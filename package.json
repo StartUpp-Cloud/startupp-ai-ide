@@ -1,0 +1,53 @@
+{
+  "name": "startupp-ai-prompt-maker",
+  "version": "1.0.0",
+  "description": "AI Prompt Maker with Project Management",
+  "type": "module",
+  "main": "src/server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "server:dev": "nodemon src/server/index.js",
+    "client:dev": "cd src/client && npm run dev",
+    "build": "cd src/client && npm run build",
+    "start": "node src/server/index.js",
+    "install:all": "npm install && cd src/client && npm install",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart ecosystem.config.cjs",
+    "pm2:reload": "pm2 reload ecosystem.config.cjs",
+    "pm2:delete": "pm2 delete ecosystem.config.cjs",
+    "pm2:logs": "pm2 logs",
+    "pm2:monit": "pm2 monit",
+    "pm2:status": "pm2 status",
+    "pm2:start:prod": "pm2 start ecosystem.config.cjs --only ai-prompt-maker-api --env production",
+    "pm2:reload:prod": "pm2 reload ecosystem.config.cjs --only ai-prompt-maker-api --env production",
+    "pm2:start:both": "pm2 start ecosystem.config.cjs",
+    "pm2:stop:both": "pm2 stop ecosystem.config.cjs",
+    "pm2:restart:both": "pm2 restart ecosystem.config.cjs",
+    "pm2:logs:both": "pm2 logs",
+    "pm2:delete:both": "pm2 delete ecosystem.config.cjs"
+  },
+  "keywords": [
+    "ai",
+    "prompt",
+    "project-management",
+    "express",
+    "react"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "lowdb": "^7.0.1",
+    "uuid": "^9.0.0",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.5",
+    "dotenv": "^16.3.1",
+    "express-async-errors": "^3.1.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "concurrently": "^8.2.2"
+  }
+}

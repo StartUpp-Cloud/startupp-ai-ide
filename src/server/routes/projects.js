@@ -1,0 +1,248 @@
+import express from "express";
+import Project from "../models/Project.js";
+import { normalizePromptSettings } from "../models/Project.js";
+
+const router = express.Router();
+
+// GET /api/projects - Get all projects
+router.get("/", async (req, res) => {
+  try {
+    const { search } = req.query;
+
+    let projects;
+    if (search) {
+      projects = Project.search(search);
+    } else {
+      projects = Project.getAll();
+    }
+
+    res.json(projects);
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: "Failed to fetch projects", message: error.message });
+  }
+});
+
+// GET /api/projects/:id - Get project by ID
+router.get("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const project = Project.findById(id);
+
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    res.json(project);
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: "Failed to fetch project", message: error.message });
+  }
+});
+
+// POST /api/projects - Create new project
+router.post("/", async (req, res) => {
+  try {
+    const { name, description, rules, cloneFromId, promptSettings } = req.body;
+
+    // Handle project cloning
+    if (cloneFromId) {
+      const sourceProject = Project.findById(cloneFromId);
+      if (!sourceProject) {
+        return res.status(404).json({ error: "Source project not found" });
+      }
+
+      // Create cloned project with new name
+      const clonedProject = await Project.create({
+        name: name || `${sourceProject.name} (Copy)`,
+        description: description || sourceProject.description,
+        rules: sourceProject.rules,
+        promptSettings: sourceProject.promptSettings,
+      });
+
+      res.status(201).json(clonedProject);
+      return;
+    }
+
+    // Regular project creation logic
+    // Validation
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "Project name is required" });
+    }
+
+    if (!description || !description.trim()) {
+      return res.status(400).json({ error: "Project description is required" });
+    }
+
+    if (!rules || !Array.isArray(rules) || rules.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "At least one project rule is required" });
+    }
+
+    // Filter out empty rules
+    const validRules = rules.filter((rule) => rule && rule.trim());
+
+    if (validRules.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "At least one valid project rule is required" });
+    }
+
+    // Check if project name already exists
+    const existingProject = Project.findByName(name.trim());
+    if (existingProject) {
+      return res
+        .status(400)
+        .json({ error: "A project with this name already exists" });
+    }
+
+    const project = await Project.create({
+      name: name.trim(),
+      description: description.trim(),
+      rules: validRules,
+      promptSettings: normalizePromptSettings(promptSettings),
+    });
+
+    res.status(201).json(project);
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: "Failed to create project", message: error.message });
+  }
+});
+
+// POST /api/projects/:id/clone - Clone specific project
+router.post("/:id/clone", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description } = req.body;
+
+    const sourceProject = Project.findById(id);
+    if (!sourceProject) {
+      return res.status(404).json({ error: "Source project not found" });
+    }
+
+    // Generate default name if not provided
+    const defaultName = `${sourceProject.name} (Copy)`;
+    const projectName = name && name.trim() ? name.trim() : defaultName;
+
+    // Check if the new name conflicts with existing projects
+    const existingProject = Project.findByName(projectName);
+    if (existingProject) {
+      return res
+        .status(400)
+        .json({ error: "A project with this name already exists" });
+    }
+
+    // Create cloned project
+    const clonedProject = await Project.create({
+      name: projectName,
+      description:
+        description && description.trim()
+          ? description.trim()
+          : sourceProject.description,
+      rules: sourceProject.rules,
+      promptSettings: sourceProject.promptSettings,
+    });
+
+    res.status(201).json(clonedProject);
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: "Failed to clone project", message: error.message });
+  }
+});
+
+// PUT /api/projects/:id - Update project
+router.put("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, rules, promptSettings } = req.body;
+
+    const project = Project.findById(id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const updates = {};
+
+    // Validation
+    if (name !== undefined) {
+      if (!name || !name.trim()) {
+        return res.status(400).json({ error: "Project name cannot be empty" });
+      }
+
+      // Check if new name conflicts with existing project
+      const existingProject = Project.findByName(name.trim());
+      if (existingProject && existingProject.id !== id) {
+        return res
+          .status(400)
+          .json({ error: "A project with this name already exists" });
+      }
+
+      updates.name = name.trim();
+    }
+
+    if (description !== undefined) {
+      if (!description || !description.trim()) {
+        return res
+          .status(400)
+          .json({ error: "Project description cannot be empty" });
+      }
+      updates.description = description.trim();
+    }
+
+    if (rules !== undefined) {
+      if (!Array.isArray(rules) || rules.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "At least one project rule is required" });
+      }
+
+      const validRules = rules.filter((rule) => rule && rule.trim());
+      if (validRules.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "At least one valid project rule is required" });
+      }
+
+      updates.rules = validRules.map((r) => r.trim());
+    }
+
+    if (promptSettings !== undefined) {
+      updates.promptSettings = normalizePromptSettings(promptSettings);
+    }
+
+    const updatedProject = await Project.update(id, updates);
+    res.json(updatedProject);
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: "Failed to update project", message: error.message });
+  }
+});
+
+// DELETE /api/projects/:id - Delete project
+router.delete("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const project = Project.findById(id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    await Project.delete(id);
+    res.json({ message: "Project deleted successfully" });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: "Failed to delete project", message: error.message });
+  }
+});
+
+export default router;
