@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useProjects } from "../contexts/ProjectContext";
+import { TASK_MODES, getTaskMode } from "../data/taskModes";
 import {
   ArrowLeft,
   Plus,
@@ -23,6 +24,18 @@ import {
   Download,
   Upload,
   Save,
+  Bug,
+  RefreshCw,
+  Eye,
+  Zap,
+  Shield,
+  TestTube,
+  FileText,
+  FlaskConical,
+  Settings,
+  CheckSquare,
+  Square,
+  ListChecks,
 } from "lucide-react";
 
 const PROMPT_SECTION_OPTIONS = [
@@ -74,6 +87,22 @@ const reorderSections = (list, fromIndex, toIndex) => {
   return next;
 };
 
+// Icon mapping for task modes
+const TASK_MODE_ICONS = {
+  Bug,
+  Sparkles,
+  RefreshCw,
+  Eye,
+  Zap,
+  Shield,
+  TestTube,
+  FileText,
+  FlaskConical,
+  Settings,
+};
+
+const getTaskModeIcon = (iconName) => TASK_MODE_ICONS[iconName] || Settings;
+
 const ProjectDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -98,7 +127,7 @@ const ProjectDetail = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [copiedPrompt, setCopiedPrompt] = useState(null);
-  const [selectedPromptType, setSelectedPromptType] = useState("");
+  const [selectedTaskMode, setSelectedTaskMode] = useState("");
   const [generatedPrompt, setGeneratedPrompt] = useState("");
   const [showGeneratedPrompt, setShowGeneratedPrompt] = useState(false);
   const [showRules, setShowRules] = useState(true);
@@ -119,52 +148,8 @@ const ProjectDetail = () => {
   const [globalRules, setGlobalRules] = useState([]);
   const [editingPromptId, setEditingPromptId] = useState(null);
   const [editingPromptText, setEditingPromptText] = useState("");
-
-  const promptTypes = [
-    {
-      value: "requirement",
-      label: "Requirement Analysis",
-      template:
-        "Please analyze the following requirement for my {projectType} project and provide a detailed breakdown of the technical specifications, implementation approach, and potential challenges. Consider the project rules and constraints when formulating your response.",
-    },
-    {
-      value: "fix",
-      label: "Bug Fix",
-      template:
-        "I need help fixing a bug in my {projectType} project. Please analyze the issue and provide a step-by-step solution that follows the project rules and best practices. Include code examples and testing recommendations.",
-    },
-    {
-      value: "feature",
-      label: "Feature Implementation",
-      template:
-        "I want to implement a new feature for my {projectType} project. Please provide a comprehensive implementation plan, including architecture considerations, code structure, and integration points that align with the existing project rules.",
-    },
-    {
-      value: "review",
-      label: "Code Review",
-      template:
-        "Please review this code for my {projectType} project and provide feedback on code quality, adherence to project rules, potential improvements, and any security or performance concerns.",
-    },
-    {
-      value: "optimization",
-      label: "Performance Optimization",
-      template:
-        "I need to optimize the performance of my {projectType} project. Please analyze the current implementation and suggest specific optimizations that maintain code quality while improving speed, memory usage, or scalability.",
-    },
-    {
-      value: "testing",
-      label: "Testing Strategy",
-      template:
-        "Please help me develop a comprehensive testing strategy for my {projectType} project. Consider unit tests, integration tests, and end-to-end tests that ensure the project rules are properly enforced.",
-    },
-    {
-      value: "documentation",
-      label: "Documentation",
-      template:
-        "I need help creating comprehensive documentation for my {projectType} project. Please suggest a documentation structure and how to document the project rules and implementation details effectively.",
-    },
-    { value: "custom", label: "Custom Prompt", template: "" },
-  ];
+  const [checklistState, setChecklistState] = useState({});
+  const [showTaskModeRules, setShowTaskModeRules] = useState(false);
 
   useEffect(() => {
     loadProject();
@@ -257,7 +242,7 @@ const ProjectDetail = () => {
     const newPrompt = await createPrompt(id, {
       text,
       projectId: id,
-      promptType: selectedPromptType || null,
+      promptType: selectedTaskMode || null,
     });
 
     setPrompts((prev) => [newPrompt, ...prev]);
@@ -274,22 +259,24 @@ const ProjectDetail = () => {
   };
 
   const generateSmartPrompt = async () => {
-    if (!selectedPromptType || !project) return;
-    const pt = promptTypes.find((t) => t.value === selectedPromptType);
-    if (!pt) return;
+    if (!selectedTaskMode || !project) return;
+    const taskMode = getTaskMode(selectedTaskMode);
+    if (!taskMode) return;
 
+    // Build template text
     const templateText =
-      selectedPromptType === "custom"
+      selectedTaskMode === "custom"
         ? promptText
-        : pt.template.replace(/{projectType}/g, project.name.toLowerCase());
+        : taskMode.template.replace(/{projectName}/g, project.name);
 
     const contextText =
-      selectedPromptType === "custom"
+      selectedTaskMode === "custom"
         ? promptText
         : promptText
           ? `${templateText}\n\nAdditional Context: ${promptText}`
           : templateText;
 
+    // Gather all rules
     const disabledIndices = promptSettings.disabledRuleIndices || [];
     const projectRules = (project.rules || []).filter(
       (_, i) => !disabledIndices.includes(i),
@@ -297,8 +284,12 @@ const ProjectDetail = () => {
     const activeGlobalRules = promptSettings.includeGlobalRules
       ? globalRules.filter((r) => r.enabled !== false).map((r) => r.text)
       : [];
-    const allRules = [...activeGlobalRules, ...projectRules];
 
+    // Combine: global rules + project rules + task mode rules
+    const taskModeRules = taskMode.additionalRules || [];
+    const allRules = [...activeGlobalRules, ...projectRules, ...taskModeRules];
+
+    // Build sections
     const sections = {
       projectDetails:
         project.name || project.description
@@ -306,18 +297,34 @@ const ProjectDetail = () => {
           : "",
       rules:
         allRules.length > 0
-          ? `Project Rules:\n${allRules.map((rule, i) => `${i + 1}. ${rule}`).join("\n")}`
+          ? `Rules:\n${allRules.map((rule, i) => `${i + 1}. ${rule}`).join("\n")}`
           : "",
       context: contextText,
     };
 
-    const smart = promptSettings.promptStructure
+    // Assemble prompt
+    let smart = promptSettings.promptStructure
       .map((key) => sections[key])
       .filter(Boolean)
       .join("\n\n");
 
+    // Add checklist if task mode has one
+    if (taskMode.checklist && taskMode.checklist.length > 0) {
+      const checklistSection = `\nBefore completing, verify:\n${taskMode.checklist.map((item) => `[ ] ${item}`).join("\n")}`;
+      smart += checklistSection;
+    }
+
     setGeneratedPrompt(smart);
     setShowGeneratedPrompt(true);
+
+    // Initialize checklist state for UI
+    if (taskMode.checklist && taskMode.checklist.length > 0) {
+      const initialState = {};
+      taskMode.checklist.forEach((_, i) => {
+        initialState[i] = false;
+      });
+      setChecklistState(initialState);
+    }
 
     if (promptSettings.autoSavePrompts) {
       try {
@@ -343,11 +350,13 @@ const ProjectDetail = () => {
   };
 
   const resetPromptGeneration = () => {
-    setSelectedPromptType("");
+    setSelectedTaskMode("");
     setPromptText("");
     setGeneratedPrompt("");
     setShowGeneratedPrompt(false);
     setAutoSavedGenerated(false);
+    setChecklistState({});
+    setShowTaskModeRules(false);
   };
 
   const savePromptSettings = async () => {
@@ -772,22 +781,118 @@ const ProjectDetail = () => {
             }}
             className="space-y-4"
           >
+            {/* Task Mode Selection */}
             <div>
-              <label className="label">Prompt Type</label>
-              <select
-                value={selectedPromptType}
-                onChange={(e) => setSelectedPromptType(e.target.value)}
-                className="select"
-                required
-              >
-                <option value="">Select a type...</option>
-                {promptTypes.map((type) => (
-                  <option key={type.value} value={type.value}>
-                    {type.label}
-                  </option>
-                ))}
-              </select>
+              <label className="label">Task Mode</label>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {TASK_MODES.map((mode) => {
+                  const IconComponent = getTaskModeIcon(mode.icon);
+                  const isSelected = selectedTaskMode === mode.id;
+                  return (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedTaskMode(mode.id);
+                        setShowTaskModeRules(true);
+                      }}
+                      className={`flex items-center gap-2 p-3 rounded-lg border transition-all text-left ${
+                        isSelected
+                          ? "border-primary-500 bg-primary-500/10 text-primary-300"
+                          : "border-surface-700/60 bg-surface-850/40 text-surface-300 hover:border-surface-600 hover:bg-surface-800/60"
+                      }`}
+                    >
+                      <IconComponent
+                        className={`w-4 h-4 flex-shrink-0 ${isSelected ? "text-primary-400" : "text-surface-500"}`}
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">
+                          {mode.name}
+                        </p>
+                        <p className="text-xs text-surface-500 truncate">
+                          {mode.description}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
+
+            {/* Task Mode Rules Preview */}
+            {selectedTaskMode && selectedTaskMode !== "custom" && (
+              <div className="border border-surface-700/60 rounded-lg overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowTaskModeRules(!showTaskModeRules)}
+                  className="flex items-center justify-between w-full p-3 hover:bg-surface-800/50 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <ListChecks className="w-4 h-4 text-primary-400" />
+                    <span className="text-sm font-medium text-surface-200">
+                      Task Mode Rules & Checklist
+                    </span>
+                    <span className="badge-surface text-xs">
+                      {getTaskMode(selectedTaskMode)?.additionalRules?.length ||
+                        0}{" "}
+                      rules
+                    </span>
+                  </div>
+                  {showTaskModeRules ? (
+                    <ChevronDown className="w-4 h-4 text-surface-400" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4 text-surface-400" />
+                  )}
+                </button>
+                {showTaskModeRules && (
+                  <div className="px-3 pb-3 space-y-3">
+                    {/* Additional Rules */}
+                    {getTaskMode(selectedTaskMode)?.additionalRules?.length >
+                      0 && (
+                      <div>
+                        <p className="text-xs font-medium text-surface-400 mb-2">
+                          Additional rules for this task:
+                        </p>
+                        <ul className="space-y-1">
+                          {getTaskMode(selectedTaskMode).additionalRules.map(
+                            (rule, i) => (
+                              <li
+                                key={i}
+                                className="text-xs text-surface-400 flex gap-2"
+                              >
+                                <span className="text-primary-500">•</span>
+                                {rule}
+                              </li>
+                            ),
+                          )}
+                        </ul>
+                      </div>
+                    )}
+                    {/* Checklist Preview */}
+                    {getTaskMode(selectedTaskMode)?.checklist?.length > 0 && (
+                      <div>
+                        <p className="text-xs font-medium text-surface-400 mb-2">
+                          Verification checklist:
+                        </p>
+                        <ul className="space-y-1">
+                          {getTaskMode(selectedTaskMode).checklist.map(
+                            (item, i) => (
+                              <li
+                                key={i}
+                                className="text-xs text-surface-400 flex gap-2 items-center"
+                              >
+                                <Square className="w-3 h-3 text-surface-600" />
+                                {item}
+                              </li>
+                            ),
+                          )}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div>
               <label className="label">Additional Context</label>
@@ -803,7 +908,7 @@ const ProjectDetail = () => {
             <div className="flex justify-end">
               <button
                 type="submit"
-                disabled={!selectedPromptType}
+                disabled={!selectedTaskMode}
                 className="btn-primary"
               >
                 <Sparkles className="w-4 h-4" />
@@ -813,11 +918,89 @@ const ProjectDetail = () => {
           </form>
         ) : (
           <div className="space-y-4">
+            {/* Task Mode Badge */}
+            {selectedTaskMode && selectedTaskMode !== "custom" && (
+              <div className="flex items-center gap-2">
+                {(() => {
+                  const mode = getTaskMode(selectedTaskMode);
+                  const IconComponent = getTaskModeIcon(mode?.icon);
+                  return (
+                    <>
+                      <IconComponent className="w-4 h-4 text-primary-400" />
+                      <span className="text-sm font-medium text-primary-300">
+                        {mode?.name}
+                      </span>
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* Generated Prompt */}
             <div className="p-4 bg-surface-850 rounded-lg border border-surface-700/60 max-h-80 overflow-y-auto">
               <pre className="text-sm text-surface-300 whitespace-pre-wrap font-mono leading-relaxed">
                 {generatedPrompt}
               </pre>
             </div>
+
+            {/* Interactive Checklist */}
+            {selectedTaskMode &&
+              getTaskMode(selectedTaskMode)?.checklist?.length > 0 && (
+                <div className="p-4 bg-surface-850/50 rounded-lg border border-surface-700/60">
+                  <div className="flex items-center gap-2 mb-3">
+                    <ListChecks className="w-4 h-4 text-primary-400" />
+                    <span className="text-sm font-medium text-surface-200">
+                      Verification Checklist
+                    </span>
+                    <span className="text-xs text-surface-500">
+                      (Track your progress)
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {getTaskMode(selectedTaskMode).checklist.map((item, i) => (
+                      <label
+                        key={i}
+                        className="flex items-center gap-3 cursor-pointer group"
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setChecklistState((prev) => ({
+                              ...prev,
+                              [i]: !prev[i],
+                            }))
+                          }
+                          className="flex-shrink-0"
+                        >
+                          {checklistState[i] ? (
+                            <CheckSquare className="w-4 h-4 text-success-400" />
+                          ) : (
+                            <Square className="w-4 h-4 text-surface-500 group-hover:text-surface-400" />
+                          )}
+                        </button>
+                        <span
+                          className={`text-sm transition-colors ${
+                            checklistState[i]
+                              ? "text-surface-500 line-through"
+                              : "text-surface-300"
+                          }`}
+                        >
+                          {item}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  {Object.values(checklistState).filter(Boolean).length ===
+                    getTaskMode(selectedTaskMode).checklist.length && (
+                    <div className="mt-3 pt-3 border-t border-surface-700/60">
+                      <p className="text-xs text-success-400 flex items-center gap-1">
+                        <Check className="w-3 h-3" />
+                        All items verified!
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
 
             <div className="flex items-center justify-between">
               <button
@@ -914,8 +1097,8 @@ const ProjectDetail = () => {
                     </span>
                     {prompt.promptType && (
                       <span className="px-1.5 py-0.5 rounded bg-primary-500/15 text-primary-400 font-medium">
-                        {promptTypes.find((t) => t.value === prompt.promptType)
-                          ?.label || prompt.promptType}
+                        {getTaskMode(prompt.promptType)?.name ||
+                          prompt.promptType}
                       </span>
                     )}
                   </div>

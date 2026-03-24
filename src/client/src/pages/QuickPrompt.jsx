@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useProjects } from "../contexts/ProjectContext";
+import { TASK_MODES, getTaskMode } from "../data/taskModes";
 import {
   Zap,
   Copy,
@@ -8,7 +9,35 @@ import {
   Globe,
   ChevronDown,
   ChevronRight,
+  Bug,
+  Sparkles,
+  RefreshCw,
+  Eye,
+  Shield,
+  TestTube,
+  FileText,
+  FlaskConical,
+  Settings,
+  ListChecks,
+  Square,
+  CheckSquare,
 } from "lucide-react";
+
+// Icon mapping for task modes
+const TASK_MODE_ICONS = {
+  Bug,
+  Sparkles,
+  RefreshCw,
+  Eye,
+  Zap,
+  Shield,
+  TestTube,
+  FileText,
+  FlaskConical,
+  Settings,
+};
+
+const getTaskModeIcon = (iconName) => TASK_MODE_ICONS[iconName] || Settings;
 
 const PROMPT_SECTION_OPTIONS = [
   { key: "projectDetails", label: "Project details" },
@@ -26,6 +55,9 @@ const QuickPrompt = () => {
   const [assembled, setAssembled] = useState("");
   const [copied, setCopied] = useState(false);
   const [expandedProjects, setExpandedProjects] = useState({});
+  const [selectedTaskMode, setSelectedTaskMode] = useState("");
+  const [checklistState, setChecklistState] = useState({});
+  const [showTaskModeRules, setShowTaskModeRules] = useState(false);
 
   useEffect(() => {
     loadGlobalRules();
@@ -61,9 +93,15 @@ const QuickPrompt = () => {
       selectedProjectIds.includes(p.id),
     );
 
+    // Get task mode rules
+    const taskMode = selectedTaskMode ? getTaskMode(selectedTaskMode) : null;
+    const taskModeRules =
+      taskMode && taskMode.id !== "custom" ? taskMode.additionalRules || [] : [];
+
     const allRules = [
       ...activeGlobalRules,
       ...selectedProjects.flatMap((p) => p.rules || []),
+      ...taskModeRules,
     ];
 
     // Deduplicate rules
@@ -86,6 +124,19 @@ const QuickPrompt = () => {
 
     sections.push(rawPrompt.trim());
 
+    // Add checklist if task mode has one
+    if (taskMode && taskMode.checklist && taskMode.checklist.length > 0) {
+      sections.push(
+        `Before completing, verify:\n${taskMode.checklist.map((item) => `[ ] ${item}`).join("\n")}`,
+      );
+      // Initialize checklist state
+      const initialState = {};
+      taskMode.checklist.forEach((_, i) => {
+        initialState[i] = false;
+      });
+      setChecklistState(initialState);
+    }
+
     setAssembled(sections.join("\n\n"));
   };
 
@@ -104,6 +155,9 @@ const QuickPrompt = () => {
     setSelectedProjectIds([]);
     setIncludeGlobal(false);
     setAssembled("");
+    setSelectedTaskMode("");
+    setChecklistState({});
+    setShowTaskModeRules(false);
   };
 
   const enabledGlobalCount = globalRules.filter(
@@ -127,6 +181,82 @@ const QuickPrompt = () => {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left column: inputs */}
         <div className="space-y-4">
+          {/* Task Mode Selection */}
+          <div className="card">
+            <label className="label mb-3 block">Task Mode (Optional)</label>
+            <div className="grid grid-cols-2 gap-2">
+              {TASK_MODES.filter((m) => m.id !== "custom").map((mode) => {
+                const IconComponent = getTaskModeIcon(mode.icon);
+                const isSelected = selectedTaskMode === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedTaskMode(isSelected ? "" : mode.id);
+                      setShowTaskModeRules(!isSelected);
+                    }}
+                    className={`flex items-center gap-2 p-2.5 rounded-lg border transition-all text-left ${
+                      isSelected
+                        ? "border-primary-500 bg-primary-500/10 text-primary-300"
+                        : "border-surface-700/60 bg-surface-850/40 text-surface-300 hover:border-surface-600"
+                    }`}
+                  >
+                    <IconComponent
+                      className={`w-3.5 h-3.5 flex-shrink-0 ${isSelected ? "text-primary-400" : "text-surface-500"}`}
+                    />
+                    <span className="text-xs font-medium truncate">
+                      {mode.name}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {/* Task Mode Rules Preview */}
+            {selectedTaskMode && (
+              <div className="mt-3 border-t border-surface-700/60 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowTaskModeRules(!showTaskModeRules)}
+                  className="flex items-center gap-2 text-xs text-surface-400 hover:text-surface-200"
+                >
+                  <ListChecks className="w-3 h-3" />
+                  <span>
+                    {getTaskMode(selectedTaskMode)?.additionalRules?.length || 0}{" "}
+                    rules,{" "}
+                    {getTaskMode(selectedTaskMode)?.checklist?.length || 0}{" "}
+                    checklist items
+                  </span>
+                  {showTaskModeRules ? (
+                    <ChevronDown className="w-3 h-3" />
+                  ) : (
+                    <ChevronRight className="w-3 h-3" />
+                  )}
+                </button>
+                {showTaskModeRules && (
+                  <div className="mt-2 space-y-2">
+                    {getTaskMode(selectedTaskMode)?.additionalRules?.length >
+                      0 && (
+                      <ul className="space-y-1">
+                        {getTaskMode(selectedTaskMode).additionalRules.map(
+                          (rule, i) => (
+                            <li
+                              key={i}
+                              className="text-xs text-surface-500 flex gap-1.5"
+                            >
+                              <span className="text-primary-500">•</span>
+                              {rule}
+                            </li>
+                          ),
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Raw prompt */}
           <div className="card">
             <label className="label mb-3 block">Your prompt</label>
@@ -273,11 +403,69 @@ const QuickPrompt = () => {
             </div>
 
             {assembled ? (
-              <div className="flex-1 p-4 bg-surface-850 rounded-lg border border-surface-700/60 overflow-y-auto">
-                <pre className="text-sm text-surface-300 whitespace-pre-wrap font-mono leading-relaxed">
-                  {assembled}
-                </pre>
-              </div>
+              <>
+                <div className="flex-1 p-4 bg-surface-850 rounded-lg border border-surface-700/60 overflow-y-auto">
+                  <pre className="text-sm text-surface-300 whitespace-pre-wrap font-mono leading-relaxed">
+                    {assembled}
+                  </pre>
+                </div>
+
+                {/* Interactive Checklist */}
+                {selectedTaskMode &&
+                  getTaskMode(selectedTaskMode)?.checklist?.length > 0 && (
+                    <div className="mt-3 p-3 bg-surface-850/50 rounded-lg border border-surface-700/60">
+                      <div className="flex items-center gap-2 mb-2">
+                        <ListChecks className="w-3.5 h-3.5 text-primary-400" />
+                        <span className="text-xs font-medium text-surface-200">
+                          Verification Checklist
+                        </span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {getTaskMode(selectedTaskMode).checklist.map(
+                          (item, i) => (
+                            <label
+                              key={i}
+                              className="flex items-center gap-2 cursor-pointer group"
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setChecklistState((prev) => ({
+                                    ...prev,
+                                    [i]: !prev[i],
+                                  }))
+                                }
+                                className="flex-shrink-0"
+                              >
+                                {checklistState[i] ? (
+                                  <CheckSquare className="w-3.5 h-3.5 text-success-400" />
+                                ) : (
+                                  <Square className="w-3.5 h-3.5 text-surface-500 group-hover:text-surface-400" />
+                                )}
+                              </button>
+                              <span
+                                className={`text-xs transition-colors ${
+                                  checklistState[i]
+                                    ? "text-surface-500 line-through"
+                                    : "text-surface-300"
+                                }`}
+                              >
+                                {item}
+                              </span>
+                            </label>
+                          ),
+                        )}
+                      </div>
+                      {Object.values(checklistState).filter(Boolean).length ===
+                        getTaskMode(selectedTaskMode).checklist.length && (
+                        <p className="mt-2 text-xs text-success-400 flex items-center gap-1">
+                          <Check className="w-3 h-3" />
+                          All items verified!
+                        </p>
+                      )}
+                    </div>
+                  )}
+              </>
             ) : (
               <div className="flex-1 flex items-center justify-center p-8 rounded-lg border border-dashed border-surface-700/60">
                 <div className="text-center">
