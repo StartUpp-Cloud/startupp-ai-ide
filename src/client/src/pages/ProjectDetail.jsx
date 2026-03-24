@@ -5,6 +5,7 @@ import { TASK_MODES, getTaskMode } from "../data/taskModes";
 import { PRESETS } from "../data/presets";
 import { getPresetRules } from "../components/PresetSelector";
 import { getPresetExample, presetHasExamples } from "../data/presetExamples";
+import { AI_MODELS, getModel, formatPromptForModel } from "../data/models";
 import {
   ArrowLeft,
   Plus,
@@ -41,6 +42,12 @@ import {
   ListChecks,
   Layers,
   Code,
+  Brain,
+  Star,
+  Cpu,
+  Wind,
+  Bot,
+  Info,
 } from "lucide-react";
 
 const PROMPT_SECTION_OPTIONS = [
@@ -61,6 +68,7 @@ const LEGACY_TO_GROUPED_SECTION = {
 const DEFAULT_PROMPT_SETTINGS = {
   autoSavePrompts: false,
   promptStructure: PROMPT_SECTION_OPTIONS.map((section) => section.key),
+  targetModel: "claude",
 };
 
 const normalizePromptSettings = (settings) => {
@@ -82,6 +90,10 @@ const normalizePromptSettings = (settings) => {
         ? settings.autoSavePrompts
         : DEFAULT_PROMPT_SETTINGS.autoSavePrompts,
     promptStructure: [...deduped, ...missing],
+    targetModel: settings?.targetModel || DEFAULT_PROMPT_SETTINGS.targetModel,
+    includeGlobalRules: settings?.includeGlobalRules || false,
+    includeCodeExamples: settings?.includeCodeExamples || false,
+    disabledRuleIndices: settings?.disabledRuleIndices || [],
   };
 };
 
@@ -107,6 +119,19 @@ const TASK_MODE_ICONS = {
 };
 
 const getTaskModeIcon = (iconName) => TASK_MODE_ICONS[iconName] || Settings;
+
+// Icon mapping for AI models
+const MODEL_ICONS = {
+  Brain,
+  Sparkles,
+  Zap,
+  Star,
+  Cpu,
+  Wind,
+  Bot,
+};
+
+const getModelIcon = (iconName) => MODEL_ICONS[iconName] || Bot;
 
 const ProjectDetail = () => {
   const { id } = useParams();
@@ -280,7 +305,7 @@ const ProjectDetail = () => {
       return `Rules:\n${formattedRules.join("\n\n")}`;
     };
 
-    const sections = {
+    const sectionsContent = {
       projectDetails:
         project.name || project.description
           ? `Project: ${project.name}\nDescription: ${project.description}`
@@ -289,10 +314,13 @@ const ProjectDetail = () => {
       context: `User Prompt: ${prompt.text}`,
     };
 
-    return promptSettings.promptStructure
-      .map((key) => sections[key])
-      .filter(Boolean)
-      .join("\n\n");
+    // Apply model-specific formatting
+    const targetModel = promptSettings.targetModel || "claude";
+    return formatPromptForModel(
+      sectionsContent,
+      targetModel,
+      promptSettings.promptStructure
+    );
   };
 
   const copyToClipboard = async (text, key) => {
@@ -427,8 +455,8 @@ const ProjectDetail = () => {
       return `Rules:\n${formattedRules.join("\n\n")}`;
     };
 
-    // Build sections
-    const sections = {
+    // Build sections content (without formatting)
+    const sectionsContent = {
       projectDetails:
         project.name || project.description
           ? `Project: ${project.name}\nDescription: ${project.description}`
@@ -437,11 +465,13 @@ const ProjectDetail = () => {
       context: contextText,
     };
 
-    // Assemble prompt
-    let smart = promptSettings.promptStructure
-      .map((key) => sections[key])
-      .filter(Boolean)
-      .join("\n\n");
+    // Apply model-specific formatting
+    const targetModel = promptSettings.targetModel || "claude";
+    let smart = formatPromptForModel(
+      sectionsContent,
+      targetModel,
+      promptSettings.promptStructure
+    );
 
     // Add checklist if task mode has one
     if (taskMode.checklist && taskMode.checklist.length > 0) {
@@ -1007,6 +1037,78 @@ const ProjectDetail = () => {
             className="h-4 w-4 accent-primary-500"
           />
         </label>
+
+        {/* Target Model Selection */}
+        <div className="mb-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Bot className="w-3.5 h-3.5 text-primary-400" />
+            <span className="text-sm text-surface-200">Target AI Model</span>
+          </div>
+          <p className="text-xs text-surface-500 mb-3">
+            Optimizes prompt formatting for your chosen model
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {AI_MODELS.map((model) => {
+              const IconComponent = getModelIcon(model.icon);
+              const isSelected = promptSettings.targetModel === model.id;
+              return (
+                <button
+                  key={model.id}
+                  type="button"
+                  onClick={() =>
+                    setPromptSettings((prev) => ({
+                      ...prev,
+                      targetModel: model.id,
+                    }))
+                  }
+                  className={`flex items-center gap-2 p-2.5 rounded-lg border transition-all text-left ${
+                    isSelected
+                      ? "border-primary-500 bg-primary-500/10"
+                      : "border-surface-700/60 bg-surface-850/40 hover:border-surface-600"
+                  }`}
+                >
+                  <IconComponent
+                    className={`w-4 h-4 flex-shrink-0 ${
+                      isSelected ? "text-primary-400" : "text-surface-500"
+                    }`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className={`text-xs font-medium truncate ${
+                        isSelected ? "text-primary-300" : "text-surface-300"
+                      }`}
+                    >
+                      {model.name}
+                    </p>
+                    <p className="text-[10px] text-surface-500 truncate">
+                      {model.contextWindow}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Model-specific tips */}
+          {promptSettings.targetModel && (
+            <div className="mt-3 p-3 rounded-lg bg-surface-850/50 border border-surface-700/40">
+              <div className="flex items-center gap-1.5 mb-2">
+                <Info className="w-3 h-3 text-primary-400" />
+                <span className="text-xs font-medium text-surface-300">
+                  Optimization tips for {getModel(promptSettings.targetModel)?.name}
+                </span>
+              </div>
+              <ul className="space-y-1">
+                {getModel(promptSettings.targetModel)?.optimizations?.slice(0, 3).map((tip, i) => (
+                  <li key={i} className="text-[10px] text-surface-500 flex gap-1.5">
+                    <span className="text-primary-500">•</span>
+                    {tip}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
 
         <p className="text-xs text-surface-400 mb-2">
           Drag sections to set the final prompt order.

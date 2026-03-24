@@ -3,6 +3,7 @@ import { useProjects } from "../contexts/ProjectContext";
 import { TASK_MODES, getTaskMode } from "../data/taskModes";
 import { PRESETS } from "../data/presets";
 import { getPresetExample } from "../data/presetExamples";
+import { AI_MODELS, getModel, formatPromptForModel } from "../data/models";
 import {
   Zap,
   Copy,
@@ -24,6 +25,12 @@ import {
   Square,
   CheckSquare,
   Code,
+  Brain,
+  Star,
+  Cpu,
+  Wind,
+  Bot,
+  Info,
 } from "lucide-react";
 
 // Icon mapping for task modes
@@ -42,6 +49,19 @@ const TASK_MODE_ICONS = {
 
 const getTaskModeIcon = (iconName) => TASK_MODE_ICONS[iconName] || Settings;
 
+// Icon mapping for AI models
+const MODEL_ICONS = {
+  Brain,
+  Sparkles,
+  Zap,
+  Star,
+  Cpu,
+  Wind,
+  Bot,
+};
+
+const getModelIcon = (iconName) => MODEL_ICONS[iconName] || Bot;
+
 const PROMPT_SECTION_OPTIONS = [
   { key: "projectDetails", label: "Project details" },
   { key: "rules", label: "Rules" },
@@ -55,6 +75,7 @@ const QuickPrompt = () => {
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [includeGlobal, setIncludeGlobal] = useState(false);
   const [includeCodeExamples, setIncludeCodeExamples] = useState(false);
+  const [targetModel, setTargetModel] = useState("claude");
   const [globalRules, setGlobalRules] = useState([]);
   const [assembled, setAssembled] = useState("");
   const [copied, setCopied] = useState(false);
@@ -170,27 +191,25 @@ const QuickPrompt = () => {
       return `Rules:\n${formattedRules.join("\n\n")}`;
     };
 
-    const sections = [];
+    // Build sections content
+    const sectionsContent = {
+      projectDetails: selectedProjects.length > 0
+        ? `Project${selectedProjects.length > 1 ? "s" : ""}: ${selectedProjects.map((p) => p.name).join(", ")}`
+        : "",
+      rules: formatRulesSection(),
+      context: rawPrompt.trim(),
+    };
 
-    if (selectedProjects.length > 0) {
-      const names = selectedProjects.map((p) => p.name).join(", ");
-      sections.push(
-        `Project${selectedProjects.length > 1 ? "s" : ""}: ${names}`,
-      );
-    }
-
-    const rulesSection = formatRulesSection();
-    if (rulesSection) {
-      sections.push(rulesSection);
-    }
-
-    sections.push(rawPrompt.trim());
+    // Apply model-specific formatting
+    let assembled = formatPromptForModel(
+      sectionsContent,
+      targetModel,
+      ["projectDetails", "rules", "context"]
+    );
 
     // Add checklist if task mode has one
     if (taskMode && taskMode.checklist && taskMode.checklist.length > 0) {
-      sections.push(
-        `Before completing, verify:\n${taskMode.checklist.map((item) => `[ ] ${item}`).join("\n")}`,
-      );
+      assembled += `\n\nBefore completing, verify:\n${taskMode.checklist.map((item) => `[ ] ${item}`).join("\n")}`;
       // Initialize checklist state
       const initialState = {};
       taskMode.checklist.forEach((_, i) => {
@@ -199,7 +218,7 @@ const QuickPrompt = () => {
       setChecklistState(initialState);
     }
 
-    setAssembled(sections.join("\n\n"));
+    setAssembled(assembled);
   };
 
   const copyAssembled = async () => {
@@ -217,6 +236,7 @@ const QuickPrompt = () => {
     setSelectedProjectIds([]);
     setIncludeGlobal(false);
     setIncludeCodeExamples(false);
+    setTargetModel("claude");
     setAssembled("");
     setSelectedTaskMode("");
     setChecklistState({});
@@ -391,6 +411,62 @@ const QuickPrompt = () => {
                 />
               </button>
             </label>
+          </div>
+
+          {/* Target Model Selection */}
+          <div className="card">
+            <div className="flex items-center gap-2 mb-2">
+              <Bot className="w-4 h-4 text-primary-400" />
+              <p className="text-sm font-medium text-surface-200">
+                Target AI Model
+              </p>
+            </div>
+            <p className="text-xs text-surface-500 mb-3">
+              Optimizes prompt formatting for your chosen model
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {AI_MODELS.slice(0, 6).map((model) => {
+                const IconComponent = getModelIcon(model.icon);
+                const isSelected = targetModel === model.id;
+                return (
+                  <button
+                    key={model.id}
+                    type="button"
+                    onClick={() => setTargetModel(model.id)}
+                    className={`flex items-center gap-2 p-2 rounded-lg border transition-all text-left ${
+                      isSelected
+                        ? "border-primary-500 bg-primary-500/10"
+                        : "border-surface-700/60 bg-surface-850/40 hover:border-surface-600"
+                    }`}
+                  >
+                    <IconComponent
+                      className={`w-3.5 h-3.5 flex-shrink-0 ${
+                        isSelected ? "text-primary-400" : "text-surface-500"
+                      }`}
+                    />
+                    <span
+                      className={`text-xs font-medium truncate ${
+                        isSelected ? "text-primary-300" : "text-surface-300"
+                      }`}
+                    >
+                      {model.name.split(" ")[0]}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {/* Model tips */}
+            <div className="mt-2 p-2 rounded bg-surface-850/50 border border-surface-700/40">
+              <div className="flex items-center gap-1 mb-1">
+                <Info className="w-2.5 h-2.5 text-primary-400" />
+                <span className="text-[10px] font-medium text-surface-400">
+                  {getModel(targetModel)?.name}
+                </span>
+              </div>
+              <p className="text-[10px] text-surface-500">
+                {getModel(targetModel)?.optimizations?.[0]}
+              </p>
+            </div>
           </div>
 
           {/* Project selector */}
