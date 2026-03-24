@@ -4,6 +4,7 @@ import { useProjects } from "../contexts/ProjectContext";
 import { TASK_MODES, getTaskMode } from "../data/taskModes";
 import { PRESETS } from "../data/presets";
 import { getPresetRules } from "../components/PresetSelector";
+import { getPresetExample, presetHasExamples } from "../data/presetExamples";
 import {
   ArrowLeft,
   Plus,
@@ -39,6 +40,7 @@ import {
   Square,
   ListChecks,
   Layers,
+  Code,
 } from "lucide-react";
 
 const PROMPT_SECTION_OPTIONS = [
@@ -153,6 +155,8 @@ const ProjectDetail = () => {
   const [editingPromptText, setEditingPromptText] = useState("");
   const [checklistState, setChecklistState] = useState({});
   const [showTaskModeRules, setShowTaskModeRules] = useState(false);
+  const [expandedPresetRules, setExpandedPresetRules] = useState({});
+  const [expandedExamples, setExpandedExamples] = useState({});
 
   useEffect(() => {
     loadProject();
@@ -211,20 +215,77 @@ const ProjectDetail = () => {
     const activeGlobalRules = promptSettings.includeGlobalRules
       ? globalRules.filter((r) => r.enabled !== false).map((r) => r.text)
       : [];
-    // Get rules from selected presets
-    const presetRules = getPresetRules(project.selectedPresets || []);
-    // Combine all rules: global + preset + project (deduplicated)
-    const allRules = [...new Set([...activeGlobalRules, ...presetRules, ...projectRules])];
+
+    // Get rules from selected presets with example tracking
+    const presetRulesWithExamples = [];
+    (project.selectedPresets || []).forEach((presetId) => {
+      const preset = PRESETS.find((p) => p.id === presetId);
+      if (preset) {
+        preset.rules.forEach((rule, ruleIndex) => {
+          if (!presetRulesWithExamples.some(r => r.rule === rule)) {
+            presetRulesWithExamples.push({
+              rule,
+              example: promptSettings.includeCodeExamples ? getPresetExample(presetId, ruleIndex) : null,
+            });
+          }
+        });
+      }
+    });
+
+    // Build unique rules list with examples where available
+    const seenRules = new Set();
+    const rulesWithExamples = [];
+
+    // Global rules (no examples)
+    activeGlobalRules.forEach(rule => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example: null });
+      }
+    });
+
+    // Preset rules (with examples)
+    presetRulesWithExamples.forEach(({ rule, example }) => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example });
+      }
+    });
+
+    // Project rules (no examples)
+    projectRules.forEach(rule => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example: null });
+      }
+    });
+
+    // Format rules with optional examples
+    const formatRulesSection = () => {
+      if (rulesWithExamples.length === 0) return "";
+
+      const formattedRules = rulesWithExamples.map(({ rule, example }, i) => {
+        let ruleText = `${i + 1}. ${rule}`;
+        if (example && promptSettings.includeCodeExamples) {
+          if (example.good) {
+            ruleText += `\n   Example (Good):\n   \`\`\`\n${example.good.split('\n').map(line => '   ' + line).join('\n')}\n   \`\`\``;
+          }
+          if (example.bad) {
+            ruleText += `\n   Example (Bad - Avoid):\n   \`\`\`\n${example.bad.split('\n').map(line => '   ' + line).join('\n')}\n   \`\`\``;
+          }
+        }
+        return ruleText;
+      });
+
+      return `Rules:\n${formattedRules.join("\n\n")}`;
+    };
 
     const sections = {
       projectDetails:
         project.name || project.description
           ? `Project: ${project.name}\nDescription: ${project.description}`
           : "",
-      rules:
-        allRules.length > 0
-          ? `Rules:\n${allRules.map((rule, i) => `${i + 1}. ${rule}`).join("\n")}`
-          : "",
+      rules: formatRulesSection(),
       context: `User Prompt: ${prompt.text}`,
     };
 
@@ -290,12 +351,81 @@ const ProjectDetail = () => {
     const activeGlobalRules = promptSettings.includeGlobalRules
       ? globalRules.filter((r) => r.enabled !== false).map((r) => r.text)
       : [];
-    // Get rules from selected presets
-    const presetRules = getPresetRules(project.selectedPresets || []);
+
+    // Get rules from selected presets with example tracking
+    const presetRulesWithExamples = [];
+    (project.selectedPresets || []).forEach((presetId) => {
+      const preset = PRESETS.find((p) => p.id === presetId);
+      if (preset) {
+        preset.rules.forEach((rule, ruleIndex) => {
+          if (!presetRulesWithExamples.some(r => r.rule === rule)) {
+            presetRulesWithExamples.push({
+              rule,
+              example: promptSettings.includeCodeExamples ? getPresetExample(presetId, ruleIndex) : null,
+            });
+          }
+        });
+      }
+    });
 
     // Combine: global rules + preset rules + project rules + task mode rules (deduplicated)
     const taskModeRules = taskMode.additionalRules || [];
-    const allRules = [...new Set([...activeGlobalRules, ...presetRules, ...projectRules, ...taskModeRules])];
+
+    // Build unique rules list with examples where available
+    const seenRules = new Set();
+    const rulesWithExamples = [];
+
+    // Global rules (no examples)
+    activeGlobalRules.forEach(rule => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example: null });
+      }
+    });
+
+    // Preset rules (with examples)
+    presetRulesWithExamples.forEach(({ rule, example }) => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example });
+      }
+    });
+
+    // Project rules (no examples)
+    projectRules.forEach(rule => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example: null });
+      }
+    });
+
+    // Task mode rules (no examples)
+    taskModeRules.forEach(rule => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example: null });
+      }
+    });
+
+    // Format rules with optional examples
+    const formatRulesSection = () => {
+      if (rulesWithExamples.length === 0) return "";
+
+      const formattedRules = rulesWithExamples.map(({ rule, example }, i) => {
+        let ruleText = `${i + 1}. ${rule}`;
+        if (example && promptSettings.includeCodeExamples) {
+          if (example.good) {
+            ruleText += `\n   Example (Good):\n   \`\`\`\n${example.good.split('\n').map(line => '   ' + line).join('\n')}\n   \`\`\``;
+          }
+          if (example.bad) {
+            ruleText += `\n   Example (Bad - Avoid):\n   \`\`\`\n${example.bad.split('\n').map(line => '   ' + line).join('\n')}\n   \`\`\``;
+          }
+        }
+        return ruleText;
+      });
+
+      return `Rules:\n${formattedRules.join("\n\n")}`;
+    };
 
     // Build sections
     const sections = {
@@ -303,10 +433,7 @@ const ProjectDetail = () => {
         project.name || project.description
           ? `Project: ${project.name}\nDescription: ${project.description}`
           : "",
-      rules:
-        allRules.length > 0
-          ? `Rules:\n${allRules.map((rule, i) => `${i + 1}. ${rule}`).join("\n")}`
-          : "",
+      rules: formatRulesSection(),
       context: contextText,
     };
 
@@ -628,27 +755,107 @@ const ProjectDetail = () => {
               {project.selectedPresets.length}
             </span>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="space-y-2">
             {project.selectedPresets.map((presetId) => {
               const preset = PRESETS.find((p) => p.id === presetId);
               if (!preset) return null;
+              const isExpanded = expandedPresetRules[presetId];
+              const hasExamples = presetHasExamples(presetId);
               return (
                 <div
                   key={presetId}
-                  className="px-3 py-2 rounded-lg bg-primary-500/10 border border-primary-500/20"
+                  className="rounded-lg bg-primary-500/10 border border-primary-500/20 overflow-hidden"
                 >
-                  <p className="text-sm font-medium text-primary-300">
-                    {preset.name}
-                  </p>
-                  <p className="text-xs text-surface-500">
-                    {preset.rules.length} rules
-                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedPresetRules(prev => ({ ...prev, [presetId]: !prev[presetId] }))}
+                    className="flex items-center justify-between w-full px-3 py-2 hover:bg-primary-500/5 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-primary-300">
+                        {preset.name}
+                      </p>
+                      <span className="text-xs text-surface-500">
+                        {preset.rules.length} rules
+                      </span>
+                      {hasExamples && (
+                        <span className="badge-surface !text-[10px] !py-0">
+                          <Code className="w-2.5 h-2.5" />
+                          examples
+                        </span>
+                      )}
+                    </div>
+                    {isExpanded ? (
+                      <ChevronDown className="w-4 h-4 text-surface-400" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-surface-400" />
+                    )}
+                  </button>
+                  {isExpanded && (
+                    <div className="px-3 pb-3 pt-1 border-t border-primary-500/20">
+                      <div className="space-y-2 max-h-96 overflow-y-auto">
+                        {preset.rules.map((rule, ruleIndex) => {
+                          const example = getPresetExample(presetId, ruleIndex);
+                          const exampleKey = `${presetId}-${ruleIndex}`;
+                          const isExampleExpanded = expandedExamples[exampleKey];
+                          return (
+                            <div key={ruleIndex} className="space-y-1">
+                              <div className="flex items-start gap-2">
+                                <span className="flex-shrink-0 w-5 h-5 rounded bg-primary-500/20 text-primary-400 text-[10px] font-mono font-medium flex items-center justify-center mt-0.5">
+                                  {ruleIndex + 1}
+                                </span>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs text-surface-300 leading-relaxed">
+                                    {rule}
+                                  </p>
+                                  {example && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setExpandedExamples(prev => ({ ...prev, [exampleKey]: !prev[exampleKey] }))}
+                                      className="flex items-center gap-1 mt-1 text-[10px] text-primary-400 hover:text-primary-300 transition-colors"
+                                    >
+                                      <Code className="w-3 h-3" />
+                                      {isExampleExpanded ? "Hide example" : "View example"}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              {example && isExampleExpanded && (
+                                <div className="ml-7 mt-2 space-y-2">
+                                  {example.good && (
+                                    <div>
+                                      <p className="text-[10px] font-medium text-success-400 mb-1 flex items-center gap-1">
+                                        <Check className="w-3 h-3" /> Good
+                                      </p>
+                                      <pre className="text-[10px] text-surface-400 bg-surface-900/50 border border-surface-700/50 rounded p-2 overflow-x-auto whitespace-pre-wrap">
+                                        {example.good}
+                                      </pre>
+                                    </div>
+                                  )}
+                                  {example.bad && (
+                                    <div>
+                                      <p className="text-[10px] font-medium text-danger-400 mb-1 flex items-center gap-1">
+                                        <X className="w-3 h-3" /> Bad
+                                      </p>
+                                      <pre className="text-[10px] text-surface-400 bg-surface-900/50 border border-danger-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap">
+                                        {example.bad}
+                                      </pre>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
           <p className="text-xs text-surface-500 mt-3">
-            Preset rules are automatically included when generating prompts.
+            Preset rules are automatically included when generating prompts. Expand to view rules and code examples.
           </p>
         </div>
       )}
@@ -770,6 +977,31 @@ const ProjectDetail = () => {
               setPromptSettings((prev) => ({
                 ...prev,
                 includeGlobalRules: e.target.checked,
+              }))
+            }
+            className="h-4 w-4 accent-primary-500"
+          />
+        </label>
+
+        <label className="flex items-center justify-between p-3 rounded-lg border border-surface-700/60 bg-surface-850/40 mb-4">
+          <div className="flex items-center gap-2">
+            <Code className="w-3.5 h-3.5 text-primary-400" />
+            <div>
+              <span className="text-sm text-surface-200">
+                Include code examples in generated prompts
+              </span>
+              <p className="text-xs text-surface-500 mt-0.5">
+                Adds good/bad examples for rules that have them
+              </p>
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            checked={promptSettings.includeCodeExamples || false}
+            onChange={(e) =>
+              setPromptSettings((prev) => ({
+                ...prev,
+                includeCodeExamples: e.target.checked,
               }))
             }
             className="h-4 w-4 accent-primary-500"

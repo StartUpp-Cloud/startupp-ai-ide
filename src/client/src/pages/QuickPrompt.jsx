@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { useProjects } from "../contexts/ProjectContext";
 import { TASK_MODES, getTaskMode } from "../data/taskModes";
+import { PRESETS } from "../data/presets";
+import { getPresetExample } from "../data/presetExamples";
 import {
   Zap,
   Copy,
@@ -21,6 +23,7 @@ import {
   ListChecks,
   Square,
   CheckSquare,
+  Code,
 } from "lucide-react";
 
 // Icon mapping for task modes
@@ -51,6 +54,7 @@ const QuickPrompt = () => {
   const [rawPrompt, setRawPrompt] = useState("");
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [includeGlobal, setIncludeGlobal] = useState(false);
+  const [includeCodeExamples, setIncludeCodeExamples] = useState(false);
   const [globalRules, setGlobalRules] = useState([]);
   const [assembled, setAssembled] = useState("");
   const [copied, setCopied] = useState(false);
@@ -98,14 +102,73 @@ const QuickPrompt = () => {
     const taskModeRules =
       taskMode && taskMode.id !== "custom" ? taskMode.additionalRules || [] : [];
 
-    const allRules = [
-      ...activeGlobalRules,
-      ...selectedProjects.flatMap((p) => p.rules || []),
-      ...taskModeRules,
-    ];
+    // Build unique rules list with examples where available
+    const seenRules = new Set();
+    const rulesWithExamples = [];
 
-    // Deduplicate rules
-    const uniqueRules = [...new Set(allRules)];
+    // Global rules (no examples)
+    activeGlobalRules.forEach(rule => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example: null });
+      }
+    });
+
+    // Project preset rules (with examples)
+    selectedProjects.forEach(project => {
+      (project.selectedPresets || []).forEach(presetId => {
+        const preset = PRESETS.find(p => p.id === presetId);
+        if (preset) {
+          preset.rules.forEach((rule, ruleIndex) => {
+            if (!seenRules.has(rule)) {
+              seenRules.add(rule);
+              rulesWithExamples.push({
+                rule,
+                example: includeCodeExamples ? getPresetExample(presetId, ruleIndex) : null,
+              });
+            }
+          });
+        }
+      });
+    });
+
+    // Project rules (no examples)
+    selectedProjects.forEach(project => {
+      (project.rules || []).forEach(rule => {
+        if (!seenRules.has(rule)) {
+          seenRules.add(rule);
+          rulesWithExamples.push({ rule, example: null });
+        }
+      });
+    });
+
+    // Task mode rules (no examples)
+    taskModeRules.forEach(rule => {
+      if (!seenRules.has(rule)) {
+        seenRules.add(rule);
+        rulesWithExamples.push({ rule, example: null });
+      }
+    });
+
+    // Format rules with optional examples
+    const formatRulesSection = () => {
+      if (rulesWithExamples.length === 0) return "";
+
+      const formattedRules = rulesWithExamples.map(({ rule, example }, i) => {
+        let ruleText = `${i + 1}. ${rule}`;
+        if (example && includeCodeExamples) {
+          if (example.good) {
+            ruleText += `\n   Example (Good):\n   \`\`\`\n${example.good.split('\n').map(line => '   ' + line).join('\n')}\n   \`\`\``;
+          }
+          if (example.bad) {
+            ruleText += `\n   Example (Bad - Avoid):\n   \`\`\`\n${example.bad.split('\n').map(line => '   ' + line).join('\n')}\n   \`\`\``;
+          }
+        }
+        return ruleText;
+      });
+
+      return `Rules:\n${formattedRules.join("\n\n")}`;
+    };
 
     const sections = [];
 
@@ -116,10 +179,9 @@ const QuickPrompt = () => {
       );
     }
 
-    if (uniqueRules.length > 0) {
-      sections.push(
-        `Rules:\n${uniqueRules.map((rule, i) => `${i + 1}. ${rule}`).join("\n")}`,
-      );
+    const rulesSection = formatRulesSection();
+    if (rulesSection) {
+      sections.push(rulesSection);
     }
 
     sections.push(rawPrompt.trim());
@@ -154,6 +216,7 @@ const QuickPrompt = () => {
     setRawPrompt("");
     setSelectedProjectIds([]);
     setIncludeGlobal(false);
+    setIncludeCodeExamples(false);
     setAssembled("");
     setSelectedTaskMode("");
     setChecklistState({});
@@ -294,6 +357,36 @@ const QuickPrompt = () => {
                 <span
                   className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all duration-200 ${
                     includeGlobal ? "left-[18px]" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </label>
+          </div>
+
+          {/* Code examples toggle */}
+          <div className="card">
+            <label className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Code className="w-4 h-4 text-primary-400" />
+                <div>
+                  <p className="text-sm font-medium text-surface-200">
+                    Include code examples
+                  </p>
+                  <p className="text-xs text-surface-500 mt-0.5">
+                    Adds good/bad examples for rules that have them
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIncludeCodeExamples((v) => !v)}
+                className={`w-9 h-5 rounded-full transition-colors duration-200 relative flex-shrink-0 ${
+                  includeCodeExamples ? "bg-primary-500" : "bg-surface-700"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all duration-200 ${
+                    includeCodeExamples ? "left-[18px]" : "left-0.5"
                   }`}
                 />
               </button>
