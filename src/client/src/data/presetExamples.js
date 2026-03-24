@@ -464,7 +464,7 @@ await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
 -- Python
 cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))`,
       bad: `-- DANGER: SQL Injection
-SELECT * FROM users WHERE email = '${userInput}';
+SELECT * FROM users WHERE email = '\${userInput}';
 -- If userInput = "'; DROP TABLE users; --"
 -- Executes: SELECT * FROM users WHERE email = ''; DROP TABLE users; --'
 

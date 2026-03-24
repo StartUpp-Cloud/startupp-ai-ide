@@ -49,7 +49,7 @@ router.get("/:id", async (req, res) => {
 // POST /api/projects - Create new project
 router.post("/", async (req, res) => {
   try {
-    const { name, description, rules, cloneFromId, promptSettings } = req.body;
+    const { name, description, rules, selectedPresets, cloneFromId, promptSettings } = req.body;
 
     // Handle project cloning
     if (cloneFromId) {
@@ -63,6 +63,7 @@ router.post("/", async (req, res) => {
         name: name || `${sourceProject.name} (Copy)`,
         description: description || sourceProject.description,
         rules: sourceProject.rules,
+        selectedPresets: sourceProject.selectedPresets || [],
         promptSettings: sourceProject.promptSettings,
       });
 
@@ -80,19 +81,19 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Project description is required" });
     }
 
-    if (!rules || !Array.isArray(rules) || rules.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "At least one project rule is required" });
-    }
-
     // Filter out empty rules
-    const validRules = rules.filter((rule) => rule && rule.trim());
+    const validRules = Array.isArray(rules)
+      ? rules.filter((rule) => rule && rule.trim())
+      : [];
 
-    if (validRules.length === 0) {
+    // Validate selectedPresets
+    const validPresets = Array.isArray(selectedPresets) ? selectedPresets : [];
+
+    // Require either rules or presets
+    if (validRules.length === 0 && validPresets.length === 0) {
       return res
         .status(400)
-        .json({ error: "At least one valid project rule is required" });
+        .json({ error: "At least one rule or preset is required" });
     }
 
     // Check if project name already exists
@@ -107,6 +108,7 @@ router.post("/", async (req, res) => {
       name: name.trim(),
       description: description.trim(),
       rules: validRules,
+      selectedPresets: validPresets,
       promptSettings: normalizePromptSettings(promptSettings),
     });
 
@@ -149,6 +151,7 @@ router.post("/:id/clone", async (req, res) => {
           ? description.trim()
           : sourceProject.description,
       rules: sourceProject.rules,
+      selectedPresets: sourceProject.selectedPresets || [],
       promptSettings: sourceProject.promptSettings,
     });
 
@@ -164,7 +167,7 @@ router.post("/:id/clone", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, rules, promptSettings } = req.body;
+    const { name, description, rules, selectedPresets, promptSettings } = req.body;
 
     const project = Project.findById(id);
     if (!project) {
@@ -200,20 +203,23 @@ router.put("/:id", async (req, res) => {
     }
 
     if (rules !== undefined) {
-      if (!Array.isArray(rules) || rules.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "At least one project rule is required" });
-      }
+      const validRules = Array.isArray(rules)
+        ? rules.filter((rule) => rule && rule.trim()).map((r) => r.trim())
+        : [];
+      updates.rules = validRules;
+    }
 
-      const validRules = rules.filter((rule) => rule && rule.trim());
-      if (validRules.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "At least one valid project rule is required" });
-      }
+    if (selectedPresets !== undefined) {
+      updates.selectedPresets = Array.isArray(selectedPresets) ? selectedPresets : [];
+    }
 
-      updates.rules = validRules.map((r) => r.trim());
+    // Validate that at least rules or presets exist after update
+    const finalRules = updates.rules !== undefined ? updates.rules : project.rules || [];
+    const finalPresets = updates.selectedPresets !== undefined ? updates.selectedPresets : project.selectedPresets || [];
+    if (finalRules.length === 0 && finalPresets.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "At least one rule or preset is required" });
     }
 
     if (promptSettings !== undefined) {
