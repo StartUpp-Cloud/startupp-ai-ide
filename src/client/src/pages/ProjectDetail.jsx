@@ -184,7 +184,10 @@ const ProjectDetail = () => {
   const loadProject = async () => {
     try {
       const data = await getProject(id);
-      if (!data) { navigate("/"); return; }
+      if (!data) {
+        navigate("/");
+        return;
+      }
       setProject(data);
       setPromptSettings(normalizePromptSettings(data.promptSettings));
     } catch {

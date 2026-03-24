@@ -1,5 +1,5 @@
-# Local database
-data/
+# Local database (root level only)
+/data/
 
 # Logs
 logs

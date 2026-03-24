@@ -44,7 +44,7 @@ module.exports = {
       user: "node",
       host: "localhost",
       ref: "origin/main",
-      repo: "git@github.com:yourusername/startupp-ai-prompt-maker.git",
+      repo: "git@github.com:StartUpp-Cloud/startupp-ai-prompt-maker.git",
       path: "/var/www/ai-prompt-maker",
       "pre-deploy-local": "",
       "post-deploy":

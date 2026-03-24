@@ -172,7 +172,8 @@ export const ProjectProvider = ({ children }) => {
       const response = await fetch(
         `/api/projects/${projectId}/prompts?${params}`,
       );
-      if (response.status === 404) return { prompts: [], totalPages: 1, total: 0 };
+      if (response.status === 404)
+        return { prompts: [], totalPages: 1, total: 0 };
       if (!response.ok) throw new Error("Failed to fetch prompts");
       return await response.json();
     } catch (err) {
