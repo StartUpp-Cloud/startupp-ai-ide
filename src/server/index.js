@@ -14,6 +14,7 @@ import { initDB } from "./db.js";
 import projectRoutes from "./routes/projects.js";
 import promptRoutes from "./routes/prompts.js";
 import globalRuleRoutes from "./routes/globalRules.js";
+import cliRoutes from "./routes/cli.js";
 
 // Load environment variables
 dotenv.config();
@@ -66,6 +67,7 @@ async function startServer() {
     app.use("/api/projects", projectRoutes);
     app.use("/api/projects", promptRoutes); // This will handle /api/projects/:id/prompts
     app.use("/api/global-rules", globalRuleRoutes);
+    app.use("/api/cli", cliRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

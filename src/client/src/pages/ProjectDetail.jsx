@@ -7,6 +7,7 @@ import { getPresetRules } from "../components/PresetSelector";
 import { getPresetExample, presetHasExamples } from "../data/presetExamples";
 import { AI_MODELS, getModel, formatPromptForModel } from "../data/models";
 import PromptHistory from "../components/PromptHistory";
+import CLIExecutor from "../components/CLIExecutor";
 import {
   ArrowLeft,
   Plus,
@@ -50,6 +51,7 @@ import {
   Bot,
   Info,
   History,
+  Terminal,
 } from "lucide-react";
 
 const PROMPT_SECTION_OPTIONS = [
@@ -185,6 +187,7 @@ const ProjectDetail = () => {
   const [expandedPresetRules, setExpandedPresetRules] = useState({});
   const [expandedExamples, setExpandedExamples] = useState({});
   const [historyPrompt, setHistoryPrompt] = useState(null);
+  const [showCLIExecutor, setShowCLIExecutor] = useState(false);
 
   useEffect(() => {
     loadProject();
@@ -1427,6 +1430,14 @@ const ProjectDetail = () => {
                     </>
                   )}
                 </button>
+                <button
+                  onClick={() => setShowCLIExecutor(true)}
+                  className="btn bg-green-600 text-white hover:bg-green-700 active:scale-[0.98]"
+                  title="Execute with AI CLI tool"
+                >
+                  <Terminal className="w-4 h-4" />
+                  Execute
+                </button>
               </div>
             </div>
           </div>
@@ -1765,6 +1776,13 @@ const ProjectDetail = () => {
           onClose={() => setHistoryPrompt(null)}
         />
       )}
+
+      {/* CLI Executor Modal */}
+      <CLIExecutor
+        isOpen={showCLIExecutor}
+        onClose={() => setShowCLIExecutor(false)}
+        prompt={generatedPrompt}
+      />
     </div>
   );
 };
