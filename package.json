@@ -6,7 +6,7 @@
   "main": "src/server/index.js",
   "scripts": {
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
-    "server:dev": "nodemon src/server/index.js",
+    "server:dev": "nodemon --ignore data/ src/server/index.js",
     "client:dev": "cd src/client && npm run dev",
     "build": "cd src/client && npm run build",
     "start": "node src/server/index.js",

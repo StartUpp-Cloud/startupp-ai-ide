@@ -27,6 +27,7 @@ const EditProject = () => {
     rules: [""],
   });
   const [errors, setErrors] = useState({});
+  const [draggedRuleIndex, setDraggedRuleIndex] = useState(null);
 
   useEffect(() => {
     loadProject();
@@ -68,6 +69,13 @@ const EditProject = () => {
       const newRules = formData.rules.filter((_, i) => i !== index);
       setFormData((prev) => ({ ...prev, rules: newRules }));
     }
+  };
+
+  const moveRule = (fromIndex, toIndex) => {
+    const newRules = [...formData.rules];
+    const [moved] = newRules.splice(fromIndex, 1);
+    newRules.splice(toIndex, 0, moved);
+    setFormData((prev) => ({ ...prev, rules: newRules }));
   };
 
   const validateForm = () => {
@@ -191,8 +199,23 @@ const EditProject = () => {
           </label>
           <div className="space-y-2">
             {formData.rules.map((rule, index) => (
-              <div key={index} className="flex items-center gap-2 group">
-                <GripVertical className="w-4 h-4 text-surface-600 flex-shrink-0" />
+              <div
+                key={index}
+                draggable
+                onDragStart={() => setDraggedRuleIndex(index)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => {
+                  if (draggedRuleIndex === null || draggedRuleIndex === index)
+                    return;
+                  moveRule(draggedRuleIndex, index);
+                  setDraggedRuleIndex(null);
+                }}
+                onDragEnd={() => setDraggedRuleIndex(null)}
+                className={`flex items-center gap-2 group transition-opacity ${
+                  draggedRuleIndex === index ? "opacity-40" : "opacity-100"
+                }`}
+              >
+                <GripVertical className="w-4 h-4 text-surface-600 flex-shrink-0 cursor-grab active:cursor-grabbing" />
                 <span className="text-xs font-mono text-surface-500 w-5 text-right flex-shrink-0">
                   {index + 1}
                 </span>

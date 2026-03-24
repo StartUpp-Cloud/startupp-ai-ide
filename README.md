@@ -1,33 +1,146 @@
-# Startupp AI Prompt Maker
+# AI Prompt Maker
 
-A local-first prompt organizer and generator for managing project rules, generating structured prompts, and storing prompt history on your own machine.
+A local-first tool that automatically appends project-specific guardrails and rules to every AI prompt you generate — so your coding rules, design constraints, and security policies are always in context, every time.
+
+## Why this exists
+
+When working with AI assistants (GitHub Copilot, Cursor, Claude, ChatGPT), you constantly have to re-explain your project rules:
+
+- _"Don't use mocks"_
+- _"We use TypeScript strict mode"_
+- _"Never expose error details in production"_
+
+AI Prompt Maker stores these rules per project and automatically injects them into every generated prompt. You write your rules once, they're in every prompt forever.
 
 ## Quick Start
 
 ```bash
-git clone <repository-url>
-cd startupp-ai-prompt-maker
+git clone https://github.com/your-username/ai-prompt-maker
+cd ai-prompt-maker
 npm run install:all
 npm run dev
 ```
 
-Open the app at http://localhost:5173
+Open **http://localhost:5173**
 
-The local API runs at http://localhost:55590
+The API runs at **http://localhost:55590** — all data is stored locally in `data/db.json` (auto-created, gitignored).
 
-Data is stored locally in `data/db.json` (auto-created, gitignored).
+> **No authentication by default.** This tool is designed for local or self-hosted use on your own machine.
 
-This app is intentionally optimized for local or self-hosted use on your own machine. It has no built-in user authentication.
+## Example Ruleset
+
+Here's a sample ruleset for a React + TypeScript project:
+
+```
+1. Always use TypeScript with strict mode enabled
+2. Prefer functional components and React hooks over class components
+3. Define prop types for all components using TypeScript interfaces
+4. Avoid using `any` type — use `unknown` and type guards instead
+5. Do not use mocks or stubs — implement the real solution
+6. Show the complete implementation, not just the changed parts
+7. Consider edge cases and error handling in every implementation
+```
 
 ## Features
 
-### Project Management
+### Core: Guardrails Injection
 
-- **Create Projects**: Define projects with names, descriptions, and custom rules
-- **Edit Projects**: Update project details, descriptions, and rules at any time
-- **Clone Projects**: Duplicate existing projects with all rules and descriptions intact
-- **Project Rules**: Set custom rules and constraints for each project
-- **Project Dashboard**: Overview of all your projects
+Every generated prompt automatically includes your project's rules in the correct order. When you copy or save a prompt, the full assembled version (project context + rules + your input) is what goes to the AI.
+
+### Projects
+
+- **Create projects** with custom rules and guidelines
+- **Edit, clone, delete** projects at any time
+- **Drag to reorder** rules by priority (highest priority rules first)
+- **Enable/disable rules** per-session without deleting them (toggle in the project workspace)
+- **Start from a preset** — built-in rule templates for React/TypeScript, REST APIs, Cloudflare Workers, Expo, Security, and General AI guardrails
+
+### Global Rules
+
+Rules that apply across **all** projects when toggled on. Good for universal guardrails like _"Never mock implementations"_ or _"Always explain architectural decisions"_. Manage them at **Global Rules** in the nav.
+
+### Quick Prompt Builder
+
+No project setup needed. Go to **Quick Build** in the nav, paste any raw prompt, check which projects' rules to inject, and get the assembled result instantly.
+
+### Prompt Types
+
+Choose from 8 structured prompt types (Bug Fix, Feature Implementation, Code Review, Testing Strategy, etc.) — or use Custom Prompt for free-form input. Each type has a starter template that frames your request.
+
+### Prompt History
+
+- Paginated history of all generated prompts per project
+- Inline editing of saved prompts
+- Prompt type badge showing what kind of prompt it was
+- "View full prompt with context" expander shows the complete assembled prompt
+
+### Export & Import
+
+- **Export project** as JSON (rules + settings) — share with teammates or back up
+- **Import project** from JSON — drop someone else's ruleset into your instance
+- **Copy as `.cursorrules`** — export rules in the format used by Cursor IDE
+
+### Prompt Settings (per project)
+
+- Auto-save prompts after generation
+- Include global rules in this project's prompts
+- Drag to reorder the prompt sections (Project Details → Rules → Context, or any order)
+
+## How a Generated Prompt Looks
+
+```
+Project: My SaaS App
+Description: A React + TypeScript SaaS application with Supabase
+
+Rules:
+1. Always use TypeScript with strict mode enabled
+2. Prefer functional components and React hooks
+3. Do not use mocks — implement the real solution
+4. Show the complete implementation, not just changed parts
+
+Feature Implementation:
+I want to implement a new feature for my my saas app project. Please provide a comprehensive implementation plan...
+
+Additional Context: Add a dark mode toggle that persists to localStorage
+```
+
+## Tech Stack
+
+| Layer    | Tech                               |
+| -------- | ---------------------------------- |
+| Frontend | React 18, Vite, Tailwind CSS       |
+| Backend  | Express.js, LowDB (flat JSON file) |
+| UI icons | Lucide React                       |
+| Runtime  | Node.js 18+                        |
+
+## Scripts
+
+| Command               | Purpose                                                |
+| --------------------- | ------------------------------------------------------ |
+| `npm run dev`         | Start both client (port 5173) and server (port 55590)  |
+| `npm run build`       | Build React app into `src/client/dist/`                |
+| `npm start`           | Run server only (serves built React app in production) |
+| `npm run install:all` | Install dependencies for both root and client          |
+
+## Production (PM2)
+
+```bash
+npm run build
+npm run pm2:start
+```
+
+See [PM2-DEPLOYMENT.md](PM2-DEPLOYMENT.md) for full production setup.
+
+## Data
+
+All data lives in `data/db.json`. This file is gitignored — your projects and prompts never leave your machine.
+
+To back up your data: copy `data/db.json` somewhere safe.  
+To restore: replace `data/db.json` with your backup and restart the server.
+
+## License
+
+MIT
 
 ### Smart Prompt Generation
 
@@ -83,11 +196,11 @@ This app is intentionally optimized for local or self-hosted use on your own mac
 
 1. Open a project
 2. Optionally configure prompt settings for section order and auto-save
-2. Select a prompt type from the dropdown
-3. Add any additional context or specific details
-4. Click "Generate"
-5. Review the generated prompt
-6. Copy it, or let it auto-save if enabled for that project
+3. Select a prompt type from the dropdown
+4. Add any additional context or specific details
+5. Click "Generate"
+6. Review the generated prompt
+7. Copy it, or let it auto-save if enabled for that project
 
 ### Managing Prompts
 

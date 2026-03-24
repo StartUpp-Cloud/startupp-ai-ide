@@ -8,7 +8,9 @@ import {
   Copy as CloneIcon,
   ChevronDown,
   GripVertical,
+  Layers,
 } from "lucide-react";
+import { PRESETS } from "../data/presets";
 
 const CreateProject = () => {
   const navigate = useNavigate();
@@ -21,6 +23,8 @@ const CreateProject = () => {
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const [showCloneOptions, setShowCloneOptions] = useState(false);
+  const [showPresets, setShowPresets] = useState(false);
+  const [draggedRuleIndex, setDraggedRuleIndex] = useState(null);
 
   const handleInputChange = (field, value) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
@@ -41,6 +45,25 @@ const CreateProject = () => {
     if (formData.rules.length > 1) {
       const newRules = formData.rules.filter((_, i) => i !== index);
       setFormData((prev) => ({ ...prev, rules: newRules }));
+    }
+  };
+
+  const moveRule = (fromIndex, toIndex) => {
+    const newRules = [...formData.rules];
+    const [moved] = newRules.splice(fromIndex, 1);
+    newRules.splice(toIndex, 0, moved);
+    setFormData((prev) => ({ ...prev, rules: newRules }));
+  };
+
+  const handlePresetSelect = (presetId) => {
+    if (!presetId) return;
+    const preset = PRESETS.find((p) => p.id === presetId);
+    if (preset) {
+      setFormData((prev) => ({
+        ...prev,
+        rules: [...preset.rules],
+      }));
+      setShowPresets(false);
     }
   };
 
@@ -143,6 +166,50 @@ const CreateProject = () => {
         </div>
       )}
 
+      {/* Start from preset */}
+      <div className="card mb-6">
+        <button
+          type="button"
+          onClick={() => setShowPresets(!showPresets)}
+          className="flex items-center justify-between w-full text-left"
+        >
+          <div className="flex items-center gap-2">
+            <Layers className="w-4 h-4 text-primary-400" />
+            <span className="text-sm font-medium text-surface-200">
+              Start from a preset
+            </span>
+          </div>
+          <ChevronDown
+            className={`w-4 h-4 text-surface-400 transition-transform duration-200 ${
+              showPresets ? "rotate-180" : ""
+            }`}
+          />
+        </button>
+
+        {showPresets && (
+          <div className="mt-4 pt-4 border-t border-surface-700/60 space-y-2">
+            {PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => handlePresetSelect(preset.id)}
+                className="w-full text-left p-3 rounded-lg border border-surface-700/60 hover:border-primary-500/40 hover:bg-primary-500/5 transition-all"
+              >
+                <p className="text-sm font-medium text-surface-200">
+                  {preset.name}
+                </p>
+                <p className="text-xs text-surface-500 mt-0.5">
+                  {preset.description}
+                </p>
+                <p className="text-xs text-primary-400 mt-1">
+                  {preset.rules.length} rules
+                </p>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Form */}
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Name */}
@@ -190,8 +257,23 @@ const CreateProject = () => {
 
           <div className="space-y-2">
             {formData.rules.map((rule, index) => (
-              <div key={index} className="flex items-center gap-2 group">
-                <GripVertical className="w-4 h-4 text-surface-600 flex-shrink-0" />
+              <div
+                key={index}
+                draggable
+                onDragStart={() => setDraggedRuleIndex(index)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => {
+                  if (draggedRuleIndex === null || draggedRuleIndex === index)
+                    return;
+                  moveRule(draggedRuleIndex, index);
+                  setDraggedRuleIndex(null);
+                }}
+                onDragEnd={() => setDraggedRuleIndex(null)}
+                className={`flex items-center gap-2 group transition-opacity ${
+                  draggedRuleIndex === index ? "opacity-40" : "opacity-100"
+                }`}
+              >
+                <GripVertical className="w-4 h-4 text-surface-600 flex-shrink-0 cursor-grab active:cursor-grabbing" />
                 <span className="text-xs font-mono text-surface-500 w-5 text-right flex-shrink-0">
                   {index + 1}
                 </span>

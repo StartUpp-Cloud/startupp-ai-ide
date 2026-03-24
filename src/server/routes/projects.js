@@ -29,6 +29,9 @@ router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Sync prompt count before returning to prevent drift
+    await Project.recalculatePromptCount(id);
+
     const project = Project.findById(id);
 
     if (!project) {

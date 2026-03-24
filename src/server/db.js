@@ -21,6 +21,7 @@ const dbPath = path.join(dataDir, "db.json");
 const defaultData = {
   projects: [],
   prompts: [],
+  globalRules: [],
 };
 
 // Initialize LowDB with JSON file adapter
@@ -35,9 +36,10 @@ export async function initDB() {
     db.data = defaultData;
     await db.write();
   }
-  // Ensure both arrays exist
+  // Ensure all collections exist
   if (!db.data.projects) db.data.projects = [];
   if (!db.data.prompts) db.data.prompts = [];
+  if (!db.data.globalRules) db.data.globalRules = [];
   await db.write();
   console.log("Database initialized at:", dbPath);
 }

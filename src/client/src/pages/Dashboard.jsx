@@ -13,11 +13,19 @@ import {
   BookOpen,
   X,
   AlertTriangle,
+  Upload,
 } from "lucide-react";
 
 const Dashboard = () => {
-  const { projects, loading, error, cloneProject, deleteProject } =
-    useProjects();
+  const {
+    projects,
+    loading,
+    error,
+    cloneProject,
+    deleteProject,
+    createProject,
+    notify,
+  } = useProjects();
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState("");
   const [showCloneModal, setShowCloneModal] = useState(false);
@@ -29,16 +37,45 @@ const Dashboard = () => {
   });
   const [cloning, setCloning] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  const handleImport = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset file input so same file can be imported again if needed
+    e.target.value = "";
+    try {
+      setImporting(true);
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (!data.project?.name || !data.project?.rules) {
+        notify("Invalid export file format", "error");
+        return;
+      }
+      const { name, description, rules, promptSettings } = data.project;
+      const newProject = await createProject({
+        name,
+        description,
+        rules,
+        promptSettings,
+      });
+      navigate(`/project/${newProject.id}`);
+    } catch (err) {
+      notify("Failed to import project — invalid JSON file", "error");
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const filteredProjects = projects.filter(
     (project) =>
       project.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      project.description.toLowerCase().includes(searchTerm.toLowerCase())
+      project.description.toLowerCase().includes(searchTerm.toLowerCase()),
   );
 
   const totalPrompts = projects.reduce(
     (sum, p) => sum + (p.promptCount || 0),
-    0
+    0,
   );
 
   const openCloneModal = (project, e) => {
@@ -106,7 +143,10 @@ const Dashboard = () => {
       <div className="text-center py-16">
         <AlertTriangle className="w-10 h-10 text-danger-400 mx-auto mb-3" />
         <p className="text-danger-400 mb-4">{error}</p>
-        <button onClick={() => window.location.reload()} className="btn-primary">
+        <button
+          onClick={() => window.location.reload()}
+          className="btn-primary"
+        >
           Retry
         </button>
       </div>
@@ -126,27 +166,43 @@ const Dashboard = () => {
           </p>
         </div>
 
-        {/* Search */}
-        {projects.length > 0 && (
-          <div className="relative w-full sm:w-72">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500 w-4 h-4" />
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Import button */}
+          <label
+            className={`btn-secondary cursor-pointer !py-1.5 !px-3 !text-xs !gap-1.5 ${importing ? "opacity-50 pointer-events-none" : ""}`}
+          >
+            <Upload className="w-3.5 h-3.5" />
+            {importing ? "Importing..." : "Import"}
             <input
-              type="text"
-              placeholder="Search projects..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="input !pl-9 !py-2"
+              type="file"
+              accept=".json"
+              onChange={handleImport}
+              className="hidden"
             />
-            {searchTerm && (
-              <button
-                onClick={() => setSearchTerm("")}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-surface-700 transition-colors"
-              >
-                <X className="w-3.5 h-3.5 text-surface-400" />
-              </button>
-            )}
-          </div>
-        )}
+          </label>
+
+          {/* Search */}
+          {projects.length > 0 && (
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500 w-4 h-4" />
+              <input
+                type="text"
+                placeholder="Search projects..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="input !pl-9 !py-2"
+              />
+              {searchTerm && (
+                <button
+                  onClick={() => setSearchTerm("")}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-surface-700 transition-colors"
+                >
+                  <X className="w-3.5 h-3.5 text-surface-400" />
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Projects Grid */}
@@ -219,7 +275,7 @@ const Dashboard = () => {
                       {project.createdAt
                         ? new Date(project.createdAt).toLocaleDateString(
                             "en-US",
-                            { month: "short", day: "numeric", year: "numeric" }
+                            { month: "short", day: "numeric", year: "numeric" },
                           )
                         : "No date"}
                     </span>
@@ -265,7 +321,8 @@ const Dashboard = () => {
         <Modal onClose={() => setShowCloneModal(false)}>
           <h3 className="section-title mb-1">Clone Project</h3>
           <p className="text-sm text-surface-400 mb-5">
-            Create a copy of <strong className="text-surface-200">{selectedProject.name}</strong>
+            Create a copy of{" "}
+            <strong className="text-surface-200">{selectedProject.name}</strong>
           </p>
 
           <form onSubmit={handleCloneProject} className="space-y-4">
@@ -275,7 +332,10 @@ const Dashboard = () => {
                 type="text"
                 value={cloneFormData.name}
                 onChange={(e) =>
-                  setCloneFormData((prev) => ({ ...prev, name: e.target.value }))
+                  setCloneFormData((prev) => ({
+                    ...prev,
+                    name: e.target.value,
+                  }))
                 }
                 className="input"
                 placeholder="Project name"
@@ -335,8 +395,10 @@ const Dashboard = () => {
               <h3 className="section-title mb-1">Delete Project</h3>
               <p className="text-sm text-surface-400">
                 This will permanently delete{" "}
-                <strong className="text-surface-200">{selectedProject.name}</strong> and
-                all its prompts. This action cannot be undone.
+                <strong className="text-surface-200">
+                  {selectedProject.name}
+                </strong>{" "}
+                and all its prompts. This action cannot be undone.
               </p>
             </div>
           </div>

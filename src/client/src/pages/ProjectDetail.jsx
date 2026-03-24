@@ -19,6 +19,10 @@ import {
   GripVertical,
   X,
   AlertTriangle,
+  Globe,
+  Download,
+  Upload,
+  Save,
 } from "lucide-react";
 
 const PROMPT_SECTION_OPTIONS = [
@@ -81,7 +85,9 @@ const ProjectDetail = () => {
     deleteProject,
     deletePrompt,
     updateProject,
+    updatePrompt,
     notify,
+    getGlobalRules,
   } = useProjects();
 
   const [project, setProject] = useState(null);
@@ -110,6 +116,9 @@ const ProjectDetail = () => {
   const [draggedSection, setDraggedSection] = useState(null);
   const [autoSavedGenerated, setAutoSavedGenerated] = useState(false);
   const [promptSettings, setPromptSettings] = useState(DEFAULT_PROMPT_SETTINGS);
+  const [globalRules, setGlobalRules] = useState([]);
+  const [editingPromptId, setEditingPromptId] = useState(null);
+  const [editingPromptText, setEditingPromptText] = useState("");
 
   const promptTypes = [
     {
@@ -160,15 +169,26 @@ const ProjectDetail = () => {
   useEffect(() => {
     loadProject();
     loadPrompts();
+    loadGlobalRules();
   }, [id]);
+
+  const loadGlobalRules = async () => {
+    try {
+      const data = await getGlobalRules();
+      setGlobalRules(data || []);
+    } catch (error) {
+      console.error("Failed to load global rules:", error);
+    }
+  };
 
   const loadProject = async () => {
     try {
       const data = await getProject(id);
+      if (!data) { navigate("/"); return; }
       setProject(data);
       setPromptSettings(normalizePromptSettings(data.promptSettings));
-    } catch (error) {
-      console.error("Failed to load project:", error);
+    } catch {
+      navigate("/");
     }
   };
 
@@ -178,8 +198,8 @@ const ProjectDetail = () => {
       setPrompts(data.prompts || []);
       setTotalPages(data.totalPages || 1);
       setCurrentPage(page);
-    } catch (error) {
-      console.error("Failed to load prompts:", error);
+    } catch {
+      // ignore
     } finally {
       setLoading(false);
     }
@@ -192,16 +212,24 @@ const ProjectDetail = () => {
 
   const generateFullPrompt = (prompt) => {
     if (!project) return prompt.text;
+
+    const disabledIndices = promptSettings.disabledRuleIndices || [];
+    const projectRules = (project.rules || []).filter(
+      (_, i) => !disabledIndices.includes(i),
+    );
+    const activeGlobalRules = promptSettings.includeGlobalRules
+      ? globalRules.filter((r) => r.enabled !== false).map((r) => r.text)
+      : [];
+    const allRules = [...activeGlobalRules, ...projectRules];
+
     const sections = {
       projectDetails:
         project.name || project.description
           ? `Project: ${project.name}\nDescription: ${project.description}`
           : "",
       rules:
-        project.rules?.length > 0
-          ? `Rules:\n${project.rules
-              .map((rule, i) => `${i + 1}. ${rule}`)
-              .join("\n")}`
+        allRules.length > 0
+          ? `Rules:\n${allRules.map((rule, i) => `${i + 1}. ${rule}`).join("\n")}`
           : "",
       context: `User Prompt: ${prompt.text}`,
     };
@@ -226,6 +254,7 @@ const ProjectDetail = () => {
     const newPrompt = await createPrompt(id, {
       text,
       projectId: id,
+      promptType: selectedPromptType || null,
     });
 
     setPrompts((prev) => [newPrompt, ...prev]);
@@ -258,16 +287,23 @@ const ProjectDetail = () => {
           ? `${templateText}\n\nAdditional Context: ${promptText}`
           : templateText;
 
+    const disabledIndices = promptSettings.disabledRuleIndices || [];
+    const projectRules = (project.rules || []).filter(
+      (_, i) => !disabledIndices.includes(i),
+    );
+    const activeGlobalRules = promptSettings.includeGlobalRules
+      ? globalRules.filter((r) => r.enabled !== false).map((r) => r.text)
+      : [];
+    const allRules = [...activeGlobalRules, ...projectRules];
+
     const sections = {
       projectDetails:
         project.name || project.description
           ? `Project: ${project.name}\nDescription: ${project.description}`
           : "",
       rules:
-        project.rules?.length > 0
-          ? `Project Rules:\n${project.rules
-              .map((rule, i) => `${i + 1}. ${rule}`)
-              .join("\n")}`
+        allRules.length > 0
+          ? `Project Rules:\n${allRules.map((rule, i) => `${i + 1}. ${rule}`).join("\n")}`
           : "",
       context: contextText,
     };
@@ -324,6 +360,87 @@ const ProjectDetail = () => {
       console.error("Failed to save prompt settings:", error);
     } finally {
       setSettingsSaving(false);
+    }
+  };
+
+  const toggleRuleEnabled = async (index) => {
+    const current = promptSettings.disabledRuleIndices || [];
+    const newDisabled = current.includes(index)
+      ? current.filter((i) => i !== index)
+      : [...current, index];
+    const newSettings = { ...promptSettings, disabledRuleIndices: newDisabled };
+    setPromptSettings(newSettings);
+    try {
+      const updated = await updateProject(id, { promptSettings: newSettings });
+      setProject(updated);
+    } catch (error) {
+      setPromptSettings(promptSettings);
+      console.error("Failed to toggle rule:", error);
+    }
+  };
+
+  const exportProject = () => {
+    if (!project) return;
+    const exportData = {
+      version: 1,
+      project: {
+        name: project.name,
+        description: project.description,
+        rules: project.rules,
+        promptSettings: project.promptSettings,
+      },
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${project.name.replace(/\s+/g, "-").toLowerCase()}-prompt-rules.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    notify("Project exported");
+  };
+
+  const exportAsCursorrules = () => {
+    if (!project) return;
+    const lines = [
+      `# ${project.name}`,
+      `# ${project.description}`,
+      "",
+      "## Rules",
+      "",
+      ...project.rules.map((rule) => `- ${rule}`),
+    ];
+    const text = lines.join("\n");
+    copyToClipboard(text, "cursorrules");
+    notify("Copied as .cursorrules format");
+  };
+
+  const startEditingPrompt = (prompt) => {
+    setEditingPromptId(prompt.id);
+    setEditingPromptText(prompt.text);
+  };
+
+  const cancelEditingPrompt = () => {
+    setEditingPromptId(null);
+    setEditingPromptText("");
+  };
+
+  const savePromptEdit = async (promptId) => {
+    if (!editingPromptText.trim()) return;
+    try {
+      const updated = await updatePrompt(id, promptId, {
+        text: editingPromptText.trim(),
+      });
+      setPrompts((prev) => prev.map((p) => (p.id === promptId ? updated : p)));
+      setEditingPromptId(null);
+      setEditingPromptText("");
+    } catch (error) {
+      console.error("Failed to update prompt:", error);
     }
   };
 
@@ -445,6 +562,20 @@ const ProjectDetail = () => {
 
         {/* Actions */}
         <div className="flex items-center gap-1 flex-shrink-0">
+          <button
+            onClick={exportProject}
+            className="btn-icon"
+            title="Export project as JSON"
+          >
+            <Download className="w-4 h-4" />
+          </button>
+          <button
+            onClick={exportAsCursorrules}
+            className="btn-icon"
+            title="Copy as .cursorrules"
+          >
+            <Upload className="w-4 h-4" />
+          </button>
           <Link to={`/project/${id}/edit`} className="btn-icon" title="Edit">
             <Pencil className="w-4 h-4" />
           </Link>
@@ -482,19 +613,43 @@ const ProjectDetail = () => {
 
           {showRules && (
             <div className="px-4 pb-4 space-y-2">
-              {project.rules.map((rule, index) => (
-                <div
-                  key={index}
-                  className="flex items-start gap-3 py-2 px-3 rounded-lg bg-surface-850/50"
-                >
-                  <span className="flex-shrink-0 w-5 h-5 rounded bg-primary-500/15 text-primary-400 text-[11px] font-mono font-medium flex items-center justify-center mt-0.5">
-                    {index + 1}
-                  </span>
-                  <p className="text-sm text-surface-300 leading-relaxed">
-                    {rule}
-                  </p>
-                </div>
-              ))}
+              {project.rules.map((rule, index) => {
+                const disabled = (
+                  promptSettings.disabledRuleIndices || []
+                ).includes(index);
+                return (
+                  <div
+                    key={index}
+                    className={`flex items-start gap-3 py-2 px-3 rounded-lg transition-colors ${
+                      disabled
+                        ? "bg-surface-850/20 opacity-50"
+                        : "bg-surface-850/50"
+                    }`}
+                  >
+                    <span className="flex-shrink-0 w-5 h-5 rounded bg-primary-500/15 text-primary-400 text-[11px] font-mono font-medium flex items-center justify-center mt-0.5">
+                      {index + 1}
+                    </span>
+                    <p
+                      className={`text-sm leading-relaxed flex-1 ${disabled ? "line-through text-surface-500" : "text-surface-300"}`}
+                    >
+                      {rule}
+                    </p>
+                    <button
+                      onClick={() => toggleRuleEnabled(index)}
+                      title={disabled ? "Enable rule" : "Disable rule"}
+                      className={`flex-shrink-0 w-9 h-5 rounded-full transition-colors duration-200 relative ${
+                        disabled ? "bg-surface-700" : "bg-primary-500"
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all duration-200 ${
+                          disabled ? "left-0.5" : "left-[18px]"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -534,6 +689,26 @@ const ProjectDetail = () => {
               setPromptSettings((prev) => ({
                 ...prev,
                 autoSavePrompts: e.target.checked,
+              }))
+            }
+            className="h-4 w-4 accent-primary-500"
+          />
+        </label>
+
+        <label className="flex items-center justify-between p-3 rounded-lg border border-surface-700/60 bg-surface-850/40 mb-4">
+          <div className="flex items-center gap-2">
+            <Globe className="w-3.5 h-3.5 text-primary-400" />
+            <span className="text-sm text-surface-200">
+              Include global rules in generated prompts
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            checked={promptSettings.includeGlobalRules || false}
+            onChange={(e) =>
+              setPromptSettings((prev) => ({
+                ...prev,
+                includeGlobalRules: e.target.checked,
               }))
             }
             className="h-4 w-4 accent-primary-500"
@@ -724,7 +899,7 @@ const ProjectDetail = () => {
                 className="group border border-surface-700/60 rounded-lg p-4 hover:border-surface-600/60 transition-colors"
               >
                 <div className="flex items-start justify-between gap-3 mb-2">
-                  <div className="flex items-center gap-2 text-xs text-surface-500">
+                  <div className="flex items-center gap-2 text-xs text-surface-500 flex-wrap">
                     <Calendar className="w-3 h-3" />
                     <span>
                       {prompt.createdAt
@@ -734,8 +909,21 @@ const ProjectDetail = () => {
                           )
                         : "No date"}
                     </span>
+                    {prompt.promptType && (
+                      <span className="px-1.5 py-0.5 rounded bg-primary-500/15 text-primary-400 font-medium">
+                        {promptTypes.find((t) => t.value === prompt.promptType)
+                          ?.label || prompt.promptType}
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={() => startEditingPrompt(prompt)}
+                      className="btn-icon !p-1.5"
+                      title="Edit prompt"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
                     <button
                       onClick={() =>
                         copyToClipboard(generateFullPrompt(prompt), prompt.id)
@@ -762,20 +950,49 @@ const ProjectDetail = () => {
                   </div>
                 </div>
 
-                <p className="text-sm text-surface-200 mb-3 line-clamp-3">
-                  {prompt.text}
-                </p>
-
-                <details className="group/details">
-                  <summary className="cursor-pointer text-xs text-primary-400 hover:text-primary-300 font-medium transition-colors">
-                    View full prompt with context
-                  </summary>
-                  <div className="mt-3 p-3 bg-surface-850 rounded-lg border border-surface-700/60 max-h-60 overflow-y-auto">
-                    <pre className="text-xs text-surface-400 whitespace-pre-wrap font-mono leading-relaxed">
-                      {generateFullPrompt(prompt)}
-                    </pre>
+                {editingPromptId === prompt.id ? (
+                  <div className="space-y-2">
+                    <textarea
+                      value={editingPromptText}
+                      onChange={(e) => setEditingPromptText(e.target.value)}
+                      rows={4}
+                      className="input resize-none text-sm !py-2"
+                      autoFocus
+                    />
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        onClick={cancelEditingPrompt}
+                        className="btn-secondary !py-1 !px-3 !text-xs"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => savePromptEdit(prompt.id)}
+                        className="btn-primary !py-1 !px-3 !text-xs"
+                      >
+                        <Save className="w-3 h-3" />
+                        Save
+                      </button>
+                    </div>
                   </div>
-                </details>
+                ) : (
+                  <>
+                    <p className="text-sm text-surface-200 mb-3 line-clamp-3">
+                      {prompt.text}
+                    </p>
+
+                    <details className="group/details">
+                      <summary className="cursor-pointer text-xs text-primary-400 hover:text-primary-300 font-medium transition-colors">
+                        View full prompt with context
+                      </summary>
+                      <div className="mt-3 p-3 bg-surface-850 rounded-lg border border-surface-700/60 max-h-60 overflow-y-auto">
+                        <pre className="text-xs text-surface-400 whitespace-pre-wrap font-mono leading-relaxed">
+                          {generateFullPrompt(prompt)}
+                        </pre>
+                      </div>
+                    </details>
+                  </>
+                )}
               </div>
             ))}
           </div>

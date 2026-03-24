@@ -49,7 +49,7 @@ router.get("/:projectId/prompts", async (req, res) => {
 router.post("/:projectId/prompts", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { text } = req.body;
+    const { text, promptType } = req.body;
 
     // Validation
     if (!text || !text.trim()) {
@@ -57,11 +57,9 @@ router.post("/:projectId/prompts", async (req, res) => {
     }
 
     if (text.trim().length > MAX_PROMPT_LENGTH) {
-      return res
-        .status(400)
-        .json({
-          error: `Prompt text cannot exceed ${MAX_PROMPT_LENGTH} characters`,
-        });
+      return res.status(400).json({
+        error: `Prompt text cannot exceed ${MAX_PROMPT_LENGTH} characters`,
+      });
     }
 
     // Verify project exists
@@ -70,9 +68,23 @@ router.post("/:projectId/prompts", async (req, res) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
+    const validPromptTypes = [
+      "requirement",
+      "fix",
+      "feature",
+      "review",
+      "optimization",
+      "testing",
+      "documentation",
+      "custom",
+    ];
+    const sanitizedPromptType =
+      promptType && validPromptTypes.includes(promptType) ? promptType : null;
+
     const prompt = await Prompt.create({
       text: text.trim(),
       projectId,
+      promptType: sanitizedPromptType,
     });
 
     // Return prompt with project info
@@ -128,11 +140,9 @@ router.put("/:projectId/prompts/:promptId", async (req, res) => {
     }
 
     if (text.trim().length > MAX_PROMPT_LENGTH) {
-      return res
-        .status(400)
-        .json({
-          error: `Prompt text cannot exceed ${MAX_PROMPT_LENGTH} characters`,
-        });
+      return res.status(400).json({
+        error: `Prompt text cannot exceed ${MAX_PROMPT_LENGTH} characters`,
+      });
     }
 
     // Verify project exists

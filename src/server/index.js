@@ -13,6 +13,7 @@ import { initDB } from "./db.js";
 // Import routes
 import projectRoutes from "./routes/projects.js";
 import promptRoutes from "./routes/prompts.js";
+import globalRuleRoutes from "./routes/globalRules.js";
 
 // Load environment variables
 dotenv.config();
@@ -64,6 +65,7 @@ async function startServer() {
     // API routes
     app.use("/api/projects", projectRoutes);
     app.use("/api/projects", promptRoutes); // This will handle /api/projects/:id/prompts
+    app.use("/api/global-rules", globalRuleRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {
@@ -91,7 +93,8 @@ async function startServer() {
       console.error(err.stack);
       res.status(500).json({
         error: "Something went wrong!",
-        message: NODE_ENV === "development" ? err.message : "Internal server error",
+        message:
+          NODE_ENV === "development" ? err.message : "Internal server error",
       });
     });
 

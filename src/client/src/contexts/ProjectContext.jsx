@@ -1,4 +1,10 @@
-import { createContext, useContext, useState, useEffect, useCallback } from "react";
+import {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+} from "react";
 
 const ProjectContext = createContext();
 
@@ -67,6 +73,7 @@ export const ProjectProvider = ({ children }) => {
   const getProject = async (id) => {
     try {
       const response = await fetch(`/api/projects/${id}`);
+      if (response.status === 404) return null;
       if (!response.ok) throw new Error("Failed to fetch project");
       return await response.json();
     } catch (err) {
@@ -86,7 +93,7 @@ export const ProjectProvider = ({ children }) => {
       if (!response.ok) throw new Error("Failed to update project");
       const updatedProject = await response.json();
       setProjects((prev) =>
-        prev.map((p) => (p.id === id ? updatedProject : p))
+        prev.map((p) => (p.id === id ? updatedProject : p)),
       );
       notify("Project updated");
       return updatedProject;
@@ -163,8 +170,9 @@ export const ProjectProvider = ({ children }) => {
         ...(search && { search }),
       });
       const response = await fetch(
-        `/api/projects/${projectId}/prompts?${params}`
+        `/api/projects/${projectId}/prompts?${params}`,
       );
+      if (response.status === 404) return { prompts: [], totalPages: 1, total: 0 };
       if (!response.ok) throw new Error("Failed to fetch prompts");
       return await response.json();
     } catch (err) {
@@ -173,17 +181,99 @@ export const ProjectProvider = ({ children }) => {
     }
   };
 
+  const updatePrompt = async (projectId, promptId, data) => {
+    try {
+      const response = await fetch(
+        `/api/projects/${projectId}/prompts/${promptId}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data),
+        },
+      );
+      if (!response.ok) throw new Error("Failed to update prompt");
+      const updated = await response.json();
+      notify("Prompt updated");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      notify(err.message, "error");
+      throw err;
+    }
+  };
+
   const deletePrompt = async (projectId, promptId) => {
     try {
       const response = await fetch(
         `/api/projects/${projectId}/prompts/${promptId}`,
-        { method: "DELETE" }
+        { method: "DELETE" },
       );
       if (!response.ok) throw new Error("Failed to delete prompt");
       notify("Prompt deleted");
       return true;
     } catch (err) {
       setError(err.message);
+      notify(err.message, "error");
+      throw err;
+    }
+  };
+
+  const getGlobalRules = async () => {
+    try {
+      const response = await fetch("/api/global-rules");
+      if (!response.ok) throw new Error("Failed to fetch global rules");
+      return await response.json();
+    } catch (err) {
+      notify(err.message, "error");
+      throw err;
+    }
+  };
+
+  const createGlobalRule = async (data) => {
+    try {
+      const response = await fetch("/api/global-rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || "Failed to create global rule");
+      }
+      const rule = await response.json();
+      notify("Global rule added");
+      return rule;
+    } catch (err) {
+      notify(err.message, "error");
+      throw err;
+    }
+  };
+
+  const updateGlobalRule = async (id, data) => {
+    try {
+      const response = await fetch(`/api/global-rules/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) throw new Error("Failed to update global rule");
+      notify("Global rule updated");
+      return await response.json();
+    } catch (err) {
+      notify(err.message, "error");
+      throw err;
+    }
+  };
+
+  const deleteGlobalRule = async (id) => {
+    try {
+      const response = await fetch(`/api/global-rules/${id}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error("Failed to delete global rule");
+      notify("Global rule deleted");
+      return true;
+    } catch (err) {
       notify(err.message, "error");
       throw err;
     }
@@ -208,7 +298,12 @@ export const ProjectProvider = ({ children }) => {
     cloneProject,
     createPrompt,
     getPrompts,
+    updatePrompt,
     deletePrompt,
+    getGlobalRules,
+    createGlobalRule,
+    updateGlobalRule,
+    deleteGlobalRule,
   };
 
   return (

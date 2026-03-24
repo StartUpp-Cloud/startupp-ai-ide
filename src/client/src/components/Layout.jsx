@@ -1,5 +1,13 @@
 import { Link, useLocation } from "react-router-dom";
-import { Plus, LayoutGrid, X, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  Plus,
+  LayoutGrid,
+  X,
+  CheckCircle2,
+  AlertCircle,
+  Globe,
+  Zap,
+} from "lucide-react";
 import { useProjects } from "../contexts/ProjectContext";
 
 const Layout = ({ children }) => {
@@ -37,7 +45,9 @@ const Layout = ({ children }) => {
               <Link
                 to="/"
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-200 ${
-                  isActive("/")
+                  isActive("/") &&
+                  !isActive("/global-rules") &&
+                  !isActive("/quick")
                     ? "text-primary-400 bg-primary-500/10"
                     : "text-surface-400 hover:text-surface-100 hover:bg-surface-750"
                 }`}
@@ -46,9 +56,36 @@ const Layout = ({ children }) => {
                 <span>Projects</span>
               </Link>
 
+              <Link
+                to="/global-rules"
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-200 ${
+                  isActive("/global-rules")
+                    ? "text-primary-400 bg-primary-500/10"
+                    : "text-surface-400 hover:text-surface-100 hover:bg-surface-750"
+                }`}
+              >
+                <Globe className="w-3.5 h-3.5" />
+                <span>Global Rules</span>
+              </Link>
+
+              <Link
+                to="/quick"
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-200 ${
+                  isActive("/quick")
+                    ? "text-primary-400 bg-primary-500/10"
+                    : "text-surface-400 hover:text-surface-100 hover:bg-surface-750"
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>Quick Build</span>
+              </Link>
+
               <div className="w-px h-5 bg-surface-700 mx-1" />
 
-              <Link to="/project/new" className="btn-primary !py-1.5 !px-3 !text-xs !gap-1.5">
+              <Link
+                to="/project/new"
+                className="btn-primary !py-1.5 !px-3 !text-xs !gap-1.5"
+              >
                 <Plus className="w-3.5 h-3.5" />
                 <span>New</span>
               </Link>

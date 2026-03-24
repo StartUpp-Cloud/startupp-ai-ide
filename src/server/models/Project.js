@@ -18,6 +18,8 @@ export function getDefaultPromptSettings() {
   return {
     autoSavePrompts: false,
     promptStructure: [...PROMPT_STRUCTURE_SECTIONS],
+    disabledRuleIndices: [],
+    includeGlobalRules: false,
   };
 }
 
@@ -42,6 +44,15 @@ export function normalizePromptSettings(input) {
         ? settings.autoSavePrompts
         : defaults.autoSavePrompts,
     promptStructure: [...dedupedOrder, ...missing],
+    disabledRuleIndices: Array.isArray(settings.disabledRuleIndices)
+      ? settings.disabledRuleIndices.filter(
+          (i) => typeof i === "number" && i >= 0,
+        )
+      : [],
+    includeGlobalRules:
+      typeof settings.includeGlobalRules === "boolean"
+        ? settings.includeGlobalRules
+        : false,
   };
 }
 

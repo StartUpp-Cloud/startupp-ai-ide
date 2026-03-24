@@ -6,6 +6,17 @@ import {
   decrementPromptCount,
 } from "./Project.js";
 
+export const PROMPT_TYPE_LABELS = {
+  requirement: "Requirement Analysis",
+  fix: "Bug Fix",
+  feature: "Feature Implementation",
+  review: "Code Review",
+  optimization: "Performance Optimization",
+  testing: "Testing Strategy",
+  documentation: "Documentation",
+  custom: "Custom Prompt",
+};
+
 const DEFAULT_PROMPT_STRUCTURE = ["projectDetails", "rules", "context"];
 
 const LEGACY_TO_GROUPED_SECTION = {
@@ -61,12 +72,13 @@ export function findPromptsWithPagination(
   };
 }
 
-export async function createPrompt({ text, projectId }) {
+export async function createPrompt({ text, projectId, promptType }) {
   const now = new Date().toISOString();
   const prompt = {
     id: uuidv4(),
     text: text.trim(),
     projectId,
+    promptType: promptType || null,
     createdAt: now,
     updatedAt: now,
   };
@@ -125,16 +137,29 @@ export function getFullPrompt(promptId) {
       )
     : DEFAULT_PROMPT_STRUCTURE;
 
+  const disabledIndices = project.promptSettings?.disabledRuleIndices || [];
+
+  // Build rules list: include global rules first (if enabled), then project rules (filtered by disabled)
+  const projectRules = (project.rules || []).filter(
+    (_, i) => !disabledIndices.includes(i),
+  );
+
+  const globalRules = project.promptSettings?.includeGlobalRules
+    ? (db.data.globalRules || [])
+        .filter((r) => r.enabled !== false)
+        .map((r) => r.text)
+    : [];
+
+  const allRules = [...globalRules, ...projectRules];
+
   const sections = {
     projectDetails:
       project.name || project.description
         ? `Project: ${project.name}\nDescription: ${project.description}`
         : "",
     rules:
-      project.rules && project.rules.length > 0
-        ? `Rules:\n${project.rules
-            .map((rule, index) => `${index + 1}. ${rule}`)
-            .join("\n")}`
+      allRules.length > 0
+        ? `Rules:\n${allRules.map((rule, index) => `${index + 1}. ${rule}`).join("\n")}`
         : "",
     context: `User Prompt: ${prompt.text}`,
   };
