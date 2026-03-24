@@ -8,9 +8,8 @@ import {
   Copy as CloneIcon,
   ChevronDown,
   GripVertical,
-  Layers,
 } from "lucide-react";
-import { PRESETS } from "../data/presets";
+import PresetSelector from "../components/PresetSelector";
 
 const CreateProject = () => {
   const navigate = useNavigate();
@@ -19,6 +18,7 @@ const CreateProject = () => {
     name: "",
     description: "",
     rules: [""],
+    selectedPresets: [],
   });
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
@@ -55,16 +55,8 @@ const CreateProject = () => {
     setFormData((prev) => ({ ...prev, rules: newRules }));
   };
 
-  const handlePresetSelect = (presetId) => {
-    if (!presetId) return;
-    const preset = PRESETS.find((p) => p.id === presetId);
-    if (preset) {
-      setFormData((prev) => ({
-        ...prev,
-        rules: [...preset.rules],
-      }));
-      setShowPresets(false);
-    }
+  const handlePresetsChange = (presets) => {
+    setFormData((prev) => ({ ...prev, selectedPresets: presets }));
   };
 
   const handleCloneFromProject = (projectId) => {
@@ -75,6 +67,7 @@ const CreateProject = () => {
         name: `${project.name} (Copy)`,
         description: project.description,
         rules: project.rules.length > 0 ? [...project.rules] : [""],
+        selectedPresets: project.selectedPresets || [],
       });
       setShowCloneOptions(false);
     }
@@ -86,8 +79,10 @@ const CreateProject = () => {
     if (!formData.description.trim())
       newErrors.description = "Description is required";
     const validRules = formData.rules.filter((r) => r.trim());
-    if (validRules.length === 0)
-      newErrors.rules = "At least one rule is required";
+    const hasPresets = formData.selectedPresets.length > 0;
+    // Allow projects with either custom rules OR selected presets
+    if (validRules.length === 0 && !hasPresets)
+      newErrors.rules = "Add at least one rule or select a preset";
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -99,8 +94,10 @@ const CreateProject = () => {
     try {
       setSaving(true);
       const projectData = {
-        ...formData,
+        name: formData.name,
+        description: formData.description,
         rules: formData.rules.filter((r) => r.trim()),
+        selectedPresets: formData.selectedPresets,
       };
       const newProject = await createProject(projectData);
       navigate(`/project/${newProject.id}`);
@@ -166,7 +163,7 @@ const CreateProject = () => {
         </div>
       )}
 
-      {/* Start from preset */}
+      {/* Preset Composition */}
       <div className="card mb-6">
         <button
           type="button"
@@ -174,10 +171,14 @@ const CreateProject = () => {
           className="flex items-center justify-between w-full text-left"
         >
           <div className="flex items-center gap-2">
-            <Layers className="w-4 h-4 text-primary-400" />
             <span className="text-sm font-medium text-surface-200">
-              Start from a preset
+              Add Rules from Presets
             </span>
+            {formData.selectedPresets.length > 0 && (
+              <span className="badge-primary">
+                {formData.selectedPresets.length} selected
+              </span>
+            )}
           </div>
           <ChevronDown
             className={`w-4 h-4 text-surface-400 transition-transform duration-200 ${
@@ -187,25 +188,11 @@ const CreateProject = () => {
         </button>
 
         {showPresets && (
-          <div className="mt-4 pt-4 border-t border-surface-700/60 space-y-2">
-            {PRESETS.map((preset) => (
-              <button
-                key={preset.id}
-                type="button"
-                onClick={() => handlePresetSelect(preset.id)}
-                className="w-full text-left p-3 rounded-lg border border-surface-700/60 hover:border-primary-500/40 hover:bg-primary-500/5 transition-all"
-              >
-                <p className="text-sm font-medium text-surface-200">
-                  {preset.name}
-                </p>
-                <p className="text-xs text-surface-500 mt-0.5">
-                  {preset.description}
-                </p>
-                <p className="text-xs text-primary-400 mt-1">
-                  {preset.rules.length} rules
-                </p>
-              </button>
-            ))}
+          <div className="mt-4 pt-4 border-t border-surface-700/60">
+            <PresetSelector
+              selectedPresets={formData.selectedPresets}
+              onPresetsChange={handlePresetsChange}
+            />
           </div>
         )}
       </div>
@@ -249,10 +236,15 @@ const CreateProject = () => {
         {/* Rules */}
         <div>
           <label className="label">
-            Rules <span className="text-danger-400">*</span>
+            Project-Specific Rules{" "}
+            {formData.selectedPresets.length === 0 && (
+              <span className="text-danger-400">*</span>
+            )}
           </label>
           <p className="text-hint mb-3">
-            Define guidelines that will be included in every generated prompt
+            {formData.selectedPresets.length > 0
+              ? "Add custom rules specific to this project (in addition to preset rules)"
+              : "Define guidelines that will be included in every generated prompt"}
           </p>
 
           <div className="space-y-2">

@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useProjects } from "../contexts/ProjectContext";
 import { TASK_MODES, getTaskMode } from "../data/taskModes";
+import { PRESETS } from "../data/presets";
+import { getPresetRules } from "../components/PresetSelector";
 import {
   ArrowLeft,
   Plus,
@@ -36,6 +38,7 @@ import {
   CheckSquare,
   Square,
   ListChecks,
+  Layers,
 } from "lucide-react";
 
 const PROMPT_SECTION_OPTIONS = [
@@ -208,7 +211,10 @@ const ProjectDetail = () => {
     const activeGlobalRules = promptSettings.includeGlobalRules
       ? globalRules.filter((r) => r.enabled !== false).map((r) => r.text)
       : [];
-    const allRules = [...activeGlobalRules, ...projectRules];
+    // Get rules from selected presets
+    const presetRules = getPresetRules(project.selectedPresets || []);
+    // Combine all rules: global + preset + project (deduplicated)
+    const allRules = [...new Set([...activeGlobalRules, ...presetRules, ...projectRules])];
 
     const sections = {
       projectDetails:
@@ -284,10 +290,12 @@ const ProjectDetail = () => {
     const activeGlobalRules = promptSettings.includeGlobalRules
       ? globalRules.filter((r) => r.enabled !== false).map((r) => r.text)
       : [];
+    // Get rules from selected presets
+    const presetRules = getPresetRules(project.selectedPresets || []);
 
-    // Combine: global rules + project rules + task mode rules
+    // Combine: global rules + preset rules + project rules + task mode rules (deduplicated)
     const taskModeRules = taskMode.additionalRules || [];
-    const allRules = [...activeGlobalRules, ...projectRules, ...taskModeRules];
+    const allRules = [...new Set([...activeGlobalRules, ...presetRules, ...projectRules, ...taskModeRules])];
 
     // Build sections
     const sections = {
@@ -550,7 +558,13 @@ const ProjectDetail = () => {
           <p className="text-surface-400 text-sm mt-1 line-clamp-2">
             {project.description}
           </p>
-          <div className="flex items-center gap-3 mt-3">
+          <div className="flex items-center gap-3 mt-3 flex-wrap">
+            {project.selectedPresets?.length > 0 && (
+              <span className="badge-primary">
+                <Layers className="w-3 h-3" />
+                {project.selectedPresets.length} preset{project.selectedPresets.length !== 1 ? "s" : ""}
+              </span>
+            )}
             <span className="badge-primary">
               <BookOpen className="w-3 h-3" />
               {project.rules?.length || 0} rules
@@ -603,6 +617,41 @@ const ProjectDetail = () => {
           </button>
         </div>
       </div>
+
+      {/* Selected Presets Section */}
+      {project.selectedPresets?.length > 0 && (
+        <div className="card">
+          <div className="flex items-center gap-2 mb-3">
+            <Layers className="w-4 h-4 text-primary-400" />
+            <span className="section-title !text-base">Included Presets</span>
+            <span className="badge-surface ml-1">
+              {project.selectedPresets.length}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {project.selectedPresets.map((presetId) => {
+              const preset = PRESETS.find((p) => p.id === presetId);
+              if (!preset) return null;
+              return (
+                <div
+                  key={presetId}
+                  className="px-3 py-2 rounded-lg bg-primary-500/10 border border-primary-500/20"
+                >
+                  <p className="text-sm font-medium text-primary-300">
+                    {preset.name}
+                  </p>
+                  <p className="text-xs text-surface-500">
+                    {preset.rules.length} rules
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-xs text-surface-500 mt-3">
+            Preset rules are automatically included when generating prompts.
+          </p>
+        </div>
+      )}
 
       {/* Rules Section */}
       {project.rules?.length > 0 && (

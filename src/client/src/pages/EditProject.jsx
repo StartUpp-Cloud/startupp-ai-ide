@@ -9,7 +9,9 @@ import {
   X,
   GripVertical,
   AlertTriangle,
+  ChevronDown,
 } from "lucide-react";
+import PresetSelector from "../components/PresetSelector";
 
 const EditProject = () => {
   const { id } = useParams();
@@ -25,9 +27,11 @@ const EditProject = () => {
     name: "",
     description: "",
     rules: [""],
+    selectedPresets: [],
   });
   const [errors, setErrors] = useState({});
   const [draggedRuleIndex, setDraggedRuleIndex] = useState(null);
+  const [showPresets, setShowPresets] = useState(false);
 
   useEffect(() => {
     loadProject();
@@ -41,7 +45,12 @@ const EditProject = () => {
         name: projectData.name,
         description: projectData.description,
         rules: projectData.rules.length > 0 ? projectData.rules : [""],
+        selectedPresets: projectData.selectedPresets || [],
       });
+      // Auto-expand presets section if project has presets
+      if (projectData.selectedPresets?.length > 0) {
+        setShowPresets(true);
+      }
     } catch (error) {
       console.error("Failed to load project:", error);
     } finally {
@@ -78,14 +87,19 @@ const EditProject = () => {
     setFormData((prev) => ({ ...prev, rules: newRules }));
   };
 
+  const handlePresetsChange = (presets) => {
+    setFormData((prev) => ({ ...prev, selectedPresets: presets }));
+  };
+
   const validateForm = () => {
     const newErrors = {};
     if (!formData.name.trim()) newErrors.name = "Project name is required";
     if (!formData.description.trim())
       newErrors.description = "Description is required";
     const validRules = formData.rules.filter((r) => r.trim());
-    if (validRules.length === 0)
-      newErrors.rules = "At least one rule is required";
+    const hasPresets = formData.selectedPresets.length > 0;
+    if (validRules.length === 0 && !hasPresets)
+      newErrors.rules = "Add at least one rule or select a preset";
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -100,6 +114,7 @@ const EditProject = () => {
         name: formData.name.trim(),
         description: formData.description.trim(),
         rules: formData.rules.filter((r) => r.trim()),
+        selectedPresets: formData.selectedPresets,
       });
       navigate(`/project/${id}`);
     } catch (error) {
@@ -192,11 +207,53 @@ const EditProject = () => {
           )}
         </div>
 
+        {/* Presets */}
+        <div className="card">
+          <button
+            type="button"
+            onClick={() => setShowPresets(!showPresets)}
+            className="flex items-center justify-between w-full text-left"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-surface-200">
+                Preset Rules
+              </span>
+              {formData.selectedPresets.length > 0 && (
+                <span className="badge-primary">
+                  {formData.selectedPresets.length} selected
+                </span>
+              )}
+            </div>
+            <ChevronDown
+              className={`w-4 h-4 text-surface-400 transition-transform duration-200 ${
+                showPresets ? "rotate-180" : ""
+              }`}
+            />
+          </button>
+
+          {showPresets && (
+            <div className="mt-4 pt-4 border-t border-surface-700/60">
+              <PresetSelector
+                selectedPresets={formData.selectedPresets}
+                onPresetsChange={handlePresetsChange}
+              />
+            </div>
+          )}
+        </div>
+
         {/* Rules */}
         <div>
           <label className="label">
-            Rules <span className="text-danger-400">*</span>
+            Project-Specific Rules{" "}
+            {formData.selectedPresets.length === 0 && (
+              <span className="text-danger-400">*</span>
+            )}
           </label>
+          <p className="text-hint mb-3">
+            {formData.selectedPresets.length > 0
+              ? "Custom rules specific to this project (in addition to preset rules)"
+              : "Define guidelines for every generated prompt"}
+          </p>
           <div className="space-y-2">
             {formData.rules.map((rule, index) => (
               <div
