@@ -5,12 +5,16 @@
 
 import { WebSocketServer } from 'ws';
 import { ptyManager } from './ptyManager.js';
+import { OutputBuffer, stripAnsi } from './conversationParser.js';
+import History from './models/History.js';
 
 class TerminalServer {
   constructor() {
     this.wss = null;
     this.clients = new Map(); // ws -> { sessionId, ... }
     this.sessionClients = new Map(); // sessionId -> Set of ws clients
+    this.outputBuffers = new Map(); // sessionId -> OutputBuffer
+    this.userInputBuffers = new Map(); // sessionId -> current user input
   }
 
   /**
@@ -52,11 +56,18 @@ class TerminalServer {
 
     // Listen to PTY manager events
     ptyManager.on('data', ({ sessionId, data }) => {
+      // Broadcast raw output to clients
       this.broadcastToSession(sessionId, {
         type: 'output',
         sessionId,
         data,
       });
+
+      // Buffer output for history parsing
+      const buffer = this.outputBuffers.get(sessionId);
+      if (buffer) {
+        buffer.append(data);
+      }
     });
 
     ptyManager.on('exit', ({ sessionId, exitCode, signal }) => {
@@ -124,6 +135,14 @@ class TerminalServer {
         this.handleGetSession(ws, payload);
         break;
 
+      case 'get-history':
+        this.handleGetHistory(ws, payload);
+        break;
+
+      case 'add-history':
+        this.handleAddHistory(ws, payload);
+        break;
+
       default:
         this.sendError(ws, `Unknown message type: ${type}`);
     }
@@ -132,7 +151,7 @@ class TerminalServer {
   /**
    * Create a new PTY session
    */
-  handleCreateSession(ws, { projectId, cliTool, cols, rows, cwd }) {
+  async handleCreateSession(ws, { projectId, cliTool, cols, rows, cwd }) {
     try {
       const session = ptyManager.createSession({
         projectId,
@@ -141,6 +160,26 @@ class TerminalServer {
         rows: rows || 30,
         cwd,
       });
+
+      // Initialize history for this session
+      await History.createHistory(session.sessionId, projectId);
+
+      // Initialize output buffer for conversation parsing
+      const buffer = new OutputBuffer(cliTool || 'generic');
+      buffer.setOnEntries(async (entries) => {
+        // Store parsed conversation entries in history
+        for (const entry of entries) {
+          await History.addHistoryEntry(session.sessionId, {
+            role: entry.role,
+            content: entry.content,
+            projectId,
+          });
+        }
+      });
+      this.outputBuffers.set(session.sessionId, buffer);
+
+      // Initialize user input buffer
+      this.userInputBuffers.set(session.sessionId, '');
 
       // Auto-attach the creating client
       this.attachClient(ws, session.sessionId);
@@ -152,6 +191,9 @@ class TerminalServer {
 
       // If a CLI tool was specified, start it
       if (cliTool && cliTool !== 'shell') {
+        // Update history metadata with CLI tool
+        await History.updateHistoryMetadata(session.sessionId, { cliTool });
+
         setTimeout(() => {
           ptyManager.startCLI(session.sessionId, cliTool);
         }, 100);
@@ -193,7 +235,7 @@ class TerminalServer {
   /**
    * Handle terminal input
    */
-  handleInput(ws, { data, sessionId }) {
+  async handleInput(ws, { data, sessionId }) {
     const clientInfo = this.clients.get(ws);
     const targetSession = sessionId || clientInfo?.sessionId;
 
@@ -204,6 +246,25 @@ class TerminalServer {
 
     try {
       ptyManager.write(targetSession, data);
+
+      // Track user input for history
+      const inputBuffer = this.userInputBuffers.get(targetSession) || '';
+
+      // If Enter was pressed (newline), save the accumulated input as user message
+      if (data.includes('\r') || data.includes('\n')) {
+        const userMessage = (inputBuffer + data).replace(/[\r\n]+$/, '').trim();
+        if (userMessage.length > 0) {
+          // Store user input in history
+          await History.addHistoryEntry(targetSession, {
+            role: 'user',
+            content: userMessage,
+          });
+        }
+        this.userInputBuffers.set(targetSession, '');
+      } else {
+        // Accumulate input
+        this.userInputBuffers.set(targetSession, inputBuffer + data);
+      }
     } catch (error) {
       this.sendError(ws, error.message);
     }
@@ -250,6 +311,14 @@ class TerminalServer {
     const success = ptyManager.killSession(sessionId);
 
     if (success) {
+      // Flush any remaining output buffer
+      const buffer = this.outputBuffers.get(sessionId);
+      if (buffer) {
+        buffer.flush();
+        this.outputBuffers.delete(sessionId);
+      }
+      this.userInputBuffers.delete(sessionId);
+
       this.send(ws, { type: 'session-killed', sessionId });
 
       // Notify all clients attached to this session
@@ -279,6 +348,34 @@ class TerminalServer {
       this.send(ws, { type: 'session-info', session });
     } else {
       this.sendError(ws, `Session ${sessionId} not found`);
+    }
+  }
+
+  /**
+   * Get history for a session
+   */
+  handleGetHistory(ws, { sessionId }) {
+    const history = History.getHistoryBySession(sessionId);
+    if (history) {
+      this.send(ws, { type: 'history', history });
+    } else {
+      this.send(ws, { type: 'history', history: { entries: [] } });
+    }
+  }
+
+  /**
+   * Manually add a history entry (e.g., from "Send to CLI" button)
+   */
+  async handleAddHistory(ws, { sessionId, role, content, metadata }) {
+    try {
+      const entry = await History.addHistoryEntry(sessionId, {
+        role,
+        content,
+        metadata,
+      });
+      this.send(ws, { type: 'history-entry-added', entry });
+    } catch (error) {
+      this.sendError(ws, `Failed to add history entry: ${error.message}`);
     }
   }
 

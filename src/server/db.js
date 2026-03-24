@@ -44,4 +44,9 @@ export async function initDB() {
   console.log("Database initialized at:", dbPath);
 }
 
+// Get database instance
+export function getDB() {
+  return db;
+}
+
 export default db;
