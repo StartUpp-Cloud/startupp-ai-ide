@@ -6,9 +6,14 @@ import dotenv from "dotenv";
 import "express-async-errors";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createServer } from "http";
 
 // Import database
 import { initDB } from "./db.js";
+
+// Import terminal server
+import { terminalServer } from "./terminalServer.js";
+import { ptyManager } from "./ptyManager.js";
 
 // Import routes
 import projectRoutes from "./routes/projects.js";
@@ -107,9 +112,16 @@ async function startServer() {
       });
     }
 
+    // Create HTTP server
+    const server = createServer(app);
+
+    // Initialize WebSocket terminal server
+    terminalServer.init(server);
+
     // Start server
-    app.listen(PORT, () => {
+    server.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
+      console.log(`WebSocket terminal available at ws://localhost:${PORT}/ws/terminal`);
       console.log(`Environment: ${NODE_ENV}`);
       console.log(`PM2 Process: ${process.env.pm_id || "Not managed by PM2"}`);
     });
@@ -122,11 +134,13 @@ async function startServer() {
 // Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down gracefully");
+  terminalServer.cleanup();
   process.exit(0);
 });
 
 process.on("SIGINT", () => {
   console.log("SIGINT received, shutting down gracefully");
+  terminalServer.cleanup();
   process.exit(0);
 });
 

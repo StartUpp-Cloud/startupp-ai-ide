@@ -37,17 +37,19 @@
   "author": "StartUpp AI",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "lowdb": "^7.0.1",
-    "uuid": "^9.0.0",
     "cors": "^2.8.5",
-    "helmet": "^7.1.0",
-    "express-rate-limit": "^7.1.5",
     "dotenv": "^16.3.1",
-    "express-async-errors": "^3.1.1"
+    "express": "^4.18.2",
+    "express-async-errors": "^3.1.1",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "lowdb": "^7.0.1",
+    "node-pty": "^1.1.0",
+    "uuid": "^9.0.0",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2",
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.0.2"
   }
 }

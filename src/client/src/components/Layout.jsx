@@ -7,6 +7,7 @@ import {
   AlertCircle,
   Globe,
   Zap,
+  Terminal,
 } from "lucide-react";
 import { useProjects } from "../contexts/ProjectContext";
 
@@ -78,6 +79,14 @@ const Layout = ({ children }) => {
               >
                 <Zap className="w-3.5 h-3.5" />
                 <span>Quick Build</span>
+              </Link>
+
+              <Link
+                to="/ide"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-200 bg-green-500/10 text-green-400 hover:bg-green-500/20"
+              >
+                <Terminal className="w-3.5 h-3.5" />
+                <span>IDE</span>
               </Link>
 
               <div className="w-px h-5 bg-surface-700 mx-1" />
