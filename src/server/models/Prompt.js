@@ -97,10 +97,30 @@ export async function updatePrompt(id, updates) {
   if (index === -1) return null;
 
   const prompt = db.data.prompts[index];
+  const now = new Date().toISOString();
+
+  // Store version history if text is being changed
+  let versions = prompt.versions || [];
+  if (updates.text && updates.text !== prompt.text) {
+    versions = [
+      ...versions,
+      {
+        text: prompt.text,
+        editedAt: now,
+        previousUpdatedAt: prompt.updatedAt,
+      },
+    ];
+    // Keep only last 10 versions to prevent unbounded growth
+    if (versions.length > 10) {
+      versions = versions.slice(-10);
+    }
+  }
+
   const updatedPrompt = {
     ...prompt,
     ...updates,
-    updatedAt: new Date().toISOString(),
+    versions,
+    updatedAt: now,
   };
 
   db.data.prompts[index] = updatedPrompt;

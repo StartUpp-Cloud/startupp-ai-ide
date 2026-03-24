@@ -6,6 +6,7 @@ import { PRESETS } from "../data/presets";
 import { getPresetRules } from "../components/PresetSelector";
 import { getPresetExample, presetHasExamples } from "../data/presetExamples";
 import { AI_MODELS, getModel, formatPromptForModel } from "../data/models";
+import PromptHistory from "../components/PromptHistory";
 import {
   ArrowLeft,
   Plus,
@@ -48,6 +49,7 @@ import {
   Wind,
   Bot,
   Info,
+  History,
 } from "lucide-react";
 
 const PROMPT_SECTION_OPTIONS = [
@@ -182,6 +184,7 @@ const ProjectDetail = () => {
   const [showTaskModeRules, setShowTaskModeRules] = useState(false);
   const [expandedPresetRules, setExpandedPresetRules] = useState({});
   const [expandedExamples, setExpandedExamples] = useState({});
+  const [historyPrompt, setHistoryPrompt] = useState(null);
 
   useEffect(() => {
     loadProject();
@@ -1484,6 +1487,12 @@ const ProjectDetail = () => {
                           prompt.promptType}
                       </span>
                     )}
+                    {prompt.versions?.length > 0 && (
+                      <span className="px-1.5 py-0.5 rounded bg-surface-700 text-surface-400 font-medium flex items-center gap-1">
+                        <History className="w-2.5 h-2.5" />
+                        {prompt.versions.length} edit{prompt.versions.length !== 1 ? "s" : ""}
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
@@ -1493,6 +1502,15 @@ const ProjectDetail = () => {
                     >
                       <Pencil className="w-3.5 h-3.5" />
                     </button>
+                    {prompt.versions?.length > 0 && (
+                      <button
+                        onClick={() => setHistoryPrompt(prompt)}
+                        className="btn-icon !p-1.5"
+                        title="View history"
+                      >
+                        <History className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <button
                       onClick={() =>
                         copyToClipboard(generateFullPrompt(prompt), prompt.id)
@@ -1738,6 +1756,14 @@ const ProjectDetail = () => {
             </button>
           </div>
         </Modal>
+      )}
+
+      {/* Prompt History Modal */}
+      {historyPrompt && (
+        <PromptHistory
+          prompt={historyPrompt}
+          onClose={() => setHistoryPrompt(null)}
+        />
       )}
     </div>
   );
