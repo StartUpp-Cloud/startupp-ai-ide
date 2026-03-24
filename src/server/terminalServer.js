@@ -244,29 +244,30 @@ class TerminalServer {
       return;
     }
 
-    try {
-      ptyManager.write(targetSession, data);
+    // Write to PTY - returns false if session is terminated (don't error)
+    const written = ptyManager.write(targetSession, data);
+    if (!written) {
+      // Session is gone, silently ignore input
+      return;
+    }
 
-      // Track user input for history
-      const inputBuffer = this.userInputBuffers.get(targetSession) || '';
+    // Track user input for history
+    const inputBuffer = this.userInputBuffers.get(targetSession) || '';
 
-      // If Enter was pressed (newline), save the accumulated input as user message
-      if (data.includes('\r') || data.includes('\n')) {
-        const userMessage = (inputBuffer + data).replace(/[\r\n]+$/, '').trim();
-        if (userMessage.length > 0) {
-          // Store user input in history
-          await History.addHistoryEntry(targetSession, {
-            role: 'user',
-            content: userMessage,
-          });
-        }
-        this.userInputBuffers.set(targetSession, '');
-      } else {
-        // Accumulate input
-        this.userInputBuffers.set(targetSession, inputBuffer + data);
+    // If Enter was pressed (newline), save the accumulated input as user message
+    if (data.includes('\r') || data.includes('\n')) {
+      const userMessage = (inputBuffer + data).replace(/[\r\n]+$/, '').trim();
+      if (userMessage.length > 0) {
+        // Store user input in history
+        await History.addHistoryEntry(targetSession, {
+          role: 'user',
+          content: userMessage,
+        });
       }
-    } catch (error) {
-      this.sendError(ws, error.message);
+      this.userInputBuffers.set(targetSession, '');
+    } else {
+      // Accumulate input
+      this.userInputBuffers.set(targetSession, inputBuffer + data);
     }
   }
 

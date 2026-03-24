@@ -106,15 +106,18 @@ class PTYManager extends EventEmitter {
 
   /**
    * Write data to a PTY session
+   * Returns false if session not found or not active (instead of throwing)
    */
   write(sessionId, data) {
     const session = this.sessions.get(sessionId);
     if (!session || session.status !== 'active') {
-      throw new Error(`Session ${sessionId} not found or not active`);
+      // Don't throw - session may have been terminated
+      return false;
     }
 
     session.ptyProcess.write(data);
     session.lastActivity = new Date().toISOString();
+    return true;
   }
 
   /**
