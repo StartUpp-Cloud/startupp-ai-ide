@@ -16,9 +16,15 @@ export default function Terminal({ projectId, onSessionChange }) {
   const xtermRef = useRef(null);
   const fitAddonRef = useRef(null);
   const wsRef = useRef(null);
+  const sessionIdRef = useRef(null);
 
   const [connected, setConnected] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+
+  // Keep sessionIdRef in sync with sessionId state
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
   const [sessions, setSessions] = useState([]);
   const [selectedCLI, setSelectedCLI] = useState('shell');
   const [status, setStatus] = useState('disconnected');
@@ -70,9 +76,9 @@ export default function Terminal({ projectId, onSessionChange }) {
     xtermRef.current = xterm;
     fitAddonRef.current = fitAddon;
 
-    // Handle terminal input
+    // Handle terminal input - use ref to get current sessionId
     xterm.onData((data) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN && sessionId) {
+      if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
         wsRef.current.send(JSON.stringify({
           type: 'input',
           data,
@@ -80,11 +86,11 @@ export default function Terminal({ projectId, onSessionChange }) {
       }
     });
 
-    // Handle resize
+    // Handle resize - use ref to get current sessionId
     const handleResize = () => {
       if (fitAddonRef.current) {
         fitAddonRef.current.fit();
-        if (wsRef.current?.readyState === WebSocket.OPEN && sessionId) {
+        if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
           wsRef.current.send(JSON.stringify({
             type: 'resize',
             cols: xterm.cols,
