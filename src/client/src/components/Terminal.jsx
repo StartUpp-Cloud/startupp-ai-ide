@@ -163,7 +163,7 @@ export default function Terminal({ projectId, onSessionChange }) {
     };
   }, []);
 
-  // Handle WebSocket messages
+  // Handle WebSocket messages - use sessionIdRef to avoid stale closure
   const handleWebSocketMessage = useCallback((msg) => {
     switch (msg.type) {
       case 'connected':
@@ -188,7 +188,8 @@ export default function Terminal({ projectId, onSessionChange }) {
 
       case 'exit':
         xtermRef.current?.writeln(`\n\x1b[33m● Session exited (code: ${msg.exitCode})\x1b[0m`);
-        if (msg.sessionId === sessionId) {
+        // Use ref to get current sessionId value
+        if (msg.sessionId === sessionIdRef.current) {
           setSessionId(null);
         }
         break;
@@ -206,14 +207,22 @@ export default function Terminal({ projectId, onSessionChange }) {
         break;
 
       case 'session-terminated':
-        if (msg.sessionId === sessionId) {
+        // Use ref to get current sessionId value
+        if (msg.sessionId === sessionIdRef.current) {
           setSessionId(null);
           xtermRef.current?.writeln('\n\x1b[33m● Session terminated\x1b[0m');
         }
         setSessions(prev => prev.filter(s => s.id !== msg.sessionId));
         break;
+
+      case 'session-killed':
+        // Session was killed, clear it
+        if (msg.sessionId === sessionIdRef.current) {
+          setSessionId(null);
+        }
+        break;
     }
-  }, [sessionId, onSessionChange]);
+  }, [onSessionChange]);
 
   // Create new session
   const createSession = useCallback(() => {
