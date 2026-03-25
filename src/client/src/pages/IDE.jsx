@@ -6,8 +6,10 @@ import { AI_MODELS, getModel, formatPromptForModel } from '../data/models';
 import Terminal, { useTerminal } from '../components/Terminal';
 import HistoryPanel from '../components/HistoryPanel';
 import PlansPanel from '../components/PlansPanel';
+import FilesPanel from '../components/FilesPanel';
 import {
   FolderOpen,
+  Files,
   ChevronRight,
   ChevronDown,
   Plus,
@@ -297,6 +299,13 @@ export default function IDE() {
             sessionId={currentSessionId}
           />
         );
+      case 'files':
+        return (
+          <FilesPanel
+            projectId={selectedProjectId}
+            project={selectedProject}
+          />
+        );
       default:
         return (
           <div className="flex flex-col h-full">
@@ -397,6 +406,17 @@ export default function IDE() {
               >
                 <ListTodo className="w-3.5 h-3.5" />
                 <span>Plans</span>
+              </button>
+              <button
+                onClick={() => setLeftPanelTab('files')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs transition-colors ${
+                  leftPanelTab === 'files'
+                    ? 'text-primary-400 bg-primary-500/10 border-b-2 border-primary-500'
+                    : 'text-surface-400 hover:text-surface-200'
+                }`}
+              >
+                <Files className="w-3.5 h-3.5" />
+                <span>Files</span>
               </button>
               <button
                 onClick={() => setLeftPanelCollapsed(true)}

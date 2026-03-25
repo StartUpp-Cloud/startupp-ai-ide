@@ -22,6 +22,7 @@ import globalRuleRoutes from "./routes/globalRules.js";
 import cliRoutes from "./routes/cli.js";
 import historyRoutes from "./routes/history.js";
 import planRoutes from "./routes/plans.js";
+import fileRoutes from "./routes/files.js";
 
 // Load environment variables
 dotenv.config();
@@ -77,6 +78,7 @@ async function startServer() {
     app.use("/api/cli", cliRoutes);
     app.use("/api/history", historyRoutes);
     app.use("/api/plans", planRoutes);
+    app.use("/api/files", fileRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

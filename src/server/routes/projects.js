@@ -49,7 +49,7 @@ router.get("/:id", async (req, res) => {
 // POST /api/projects - Create new project
 router.post("/", async (req, res) => {
   try {
-    const { name, description, rules, selectedPresets, cloneFromId, promptSettings } = req.body;
+    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath } = req.body;
 
     // Handle project cloning
     if (cloneFromId) {
@@ -65,6 +65,7 @@ router.post("/", async (req, res) => {
         rules: sourceProject.rules,
         selectedPresets: sourceProject.selectedPresets || [],
         promptSettings: sourceProject.promptSettings,
+        folderPath: folderPath || sourceProject.folderPath,
       });
 
       res.status(201).json(clonedProject);
@@ -110,6 +111,7 @@ router.post("/", async (req, res) => {
       rules: validRules,
       selectedPresets: validPresets,
       promptSettings: normalizePromptSettings(promptSettings),
+      folderPath: folderPath || null,
     });
 
     res.status(201).json(project);
@@ -167,7 +169,7 @@ router.post("/:id/clone", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, rules, selectedPresets, promptSettings } = req.body;
+    const { name, description, rules, selectedPresets, promptSettings, folderPath } = req.body;
 
     const project = Project.findById(id);
     if (!project) {
@@ -224,6 +226,11 @@ router.put("/:id", async (req, res) => {
 
     if (promptSettings !== undefined) {
       updates.promptSettings = normalizePromptSettings(promptSettings);
+    }
+
+    // Handle folder path updates (allow null to clear)
+    if (folderPath !== undefined) {
+      updates.folderPath = folderPath || null;
     }
 
     const updatedProject = await Project.update(id, updates);

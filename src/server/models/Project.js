@@ -88,6 +88,7 @@ export async function createProject({
   description,
   rules,
   promptSettings,
+  folderPath,
 }) {
   const now = new Date().toISOString();
   const project = {
@@ -96,6 +97,7 @@ export async function createProject({
     description: description.trim(),
     rules: rules.filter((r) => r && r.trim()).map((r) => r.trim()),
     promptSettings: normalizePromptSettings(promptSettings),
+    folderPath: folderPath || null, // Local filesystem path for workspace
     promptCount: 0,
     createdAt: now,
     updatedAt: now,

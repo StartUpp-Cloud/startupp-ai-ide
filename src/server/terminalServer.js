@@ -7,6 +7,7 @@ import { WebSocketServer } from 'ws';
 import { ptyManager } from './ptyManager.js';
 import { OutputBuffer, stripAnsi } from './conversationParser.js';
 import History from './models/History.js';
+import Project from './models/Project.js';
 
 class TerminalServer {
   constructor() {
@@ -153,12 +154,21 @@ class TerminalServer {
    */
   async handleCreateSession(ws, { projectId, cliTool, cols, rows, cwd }) {
     try {
+      // If projectId provided, use project's folder path as cwd
+      let workingDir = cwd;
+      if (projectId && !cwd) {
+        const project = Project.findById(projectId);
+        if (project?.folderPath) {
+          workingDir = project.folderPath;
+        }
+      }
+
       const session = ptyManager.createSession({
         projectId,
         cliTool,
         cols: cols || 120,
         rows: rows || 30,
-        cwd,
+        cwd: workingDir,
       });
 
       // Initialize history for this session
