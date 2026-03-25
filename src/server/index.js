@@ -24,7 +24,11 @@ import historyRoutes from "./routes/history.js";
 import planRoutes from "./routes/plans.js";
 import fileRoutes from "./routes/files.js";
 import autoResponderRoutes from "./routes/autoResponder.js";
+import smartEngineRoutes from "./routes/smartEngine.js";
+import llmRoutes from "./routes/llm.js";
+import bigProjectRoutes from "./routes/bigProjects.js";
 import { autoResponder } from "./autoResponder.js";
+import { bigProjectPlanner } from "./bigProjectPlanner.js";
 
 // Load environment variables
 dotenv.config();
@@ -77,6 +81,10 @@ async function startServer() {
     await autoResponder.init();
     console.log("Auto-responder ready");
 
+    // Initialize big project planner
+    await bigProjectPlanner.init();
+    console.log("Big project planner ready");
+
     // API routes
     app.use("/api/projects", projectRoutes);
     app.use("/api/projects", promptRoutes); // This will handle /api/projects/:id/prompts
@@ -86,6 +94,9 @@ async function startServer() {
     app.use("/api/plans", planRoutes);
     app.use("/api/files", fileRoutes);
     app.use("/api/auto-responder", autoResponderRoutes);
+    app.use("/api/smart-engine", smartEngineRoutes);
+    app.use("/api/llm", llmRoutes);
+    app.use("/api/big-projects", bigProjectRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

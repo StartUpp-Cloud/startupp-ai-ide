@@ -1,0 +1,828 @@
+/**
+ * LLM Provider Service
+ * Supports Ollama (local) and can be extended for OpenAI, Anthropic, etc.
+ * Includes session context, security checks, and auto-response logic
+ */
+
+import { getDB } from './db.js';
+import { EventEmitter } from 'events';
+import { sessionContext, RISK_LEVELS } from './sessionContext.js';
+
+// Default LLM settings
+const DEFAULT_LLM_SETTINGS = {
+  enabled: false,
+  provider: 'ollama',
+  ollama: {
+    endpoint: 'http://localhost:11434',
+    model: 'llama3.2',
+    timeout: 30000,
+  },
+  openai: {
+    endpoint: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+    apiKey: '', // User must provide
+    timeout: 30000,
+  },
+  deepseek: {
+    endpoint: 'https://api.deepseek.com',
+    model: 'deepseek-chat',
+    apiKey: '', // User must provide
+    timeout: 60000, // DeepSeek can be slower
+  },
+  // When to use LLM
+  useForLowConfidence: true,
+  confidenceThreshold: 0.5, // Use LLM when smart engine confidence is below this
+  useForUnknownIntent: true,
+  useForInformationRequests: true,
+  // Auto-response settings
+  autoRespondThreshold: 0.9, // Auto-respond when confidence >= 90%
+  autoRespondEnabled: true,
+  // Security settings
+  requireConfirmationForHighRisk: true,
+  createRollbackPoints: true,
+  blockCriticalWithoutConfirm: true,
+  // Response settings
+  maxTokens: 150,
+  temperature: 0.3, // Low temperature for more deterministic responses
+};
+
+// System prompt for the LLM to understand its role
+const SYSTEM_PROMPT = `You are an intelligent assistant integrated into an AI Prompt IDE. Your role is to respond to prompts from AI CLI tools (Claude Code, GitHub Copilot, Aider) on behalf of the developer.
+
+## Your Core Mission
+Help the developer by providing quick, accurate responses to AI CLI questions so they can focus on reviewing results rather than answering routine prompts.
+
+## Response Format Rules
+CRITICAL: Respond with ONLY the exact text to send to the terminal. No explanations, no markdown, no quotes around the response.
+
+- Yes/No questions → "y" or "n"
+- Choice questions → Just the chosen option (e.g., "typescript" not "I choose typescript")
+- Continue prompts → Empty string or "y"
+- Path questions → The actual path (e.g., "src/components")
+- Name questions → The actual name (e.g., "UserService")
+
+## Decision-Making Guidelines
+
+### When to say YES (approve):
+- Reading files (always safe)
+- Writing to files that align with the current task
+- Creating new files in appropriate directories
+- Running tests, linting, or build commands
+- Git commits with clear messages
+- Installing dependencies that match the project stack
+
+### When to say NO (reject):
+- Operations that don't match the project's language/framework
+- Deleting critical files (package.json, tsconfig.json, etc.)
+- Force pushing to main/master
+- Operations outside the project directory
+- Installing suspicious or unnecessary packages
+
+### When to DEFER to user (respond with special marker):
+If you're uncertain or the operation seems risky, respond with: [NEEDS_USER_CONFIRMATION]
+This will alert the user to make the decision themselves.
+
+## Security Awareness
+- Never approve operations that could expose credentials
+- Be cautious with rm -rf, git reset --hard, force push
+- Prefer reversible operations over destructive ones
+- Consider if there's a rollback path
+
+## Using Context
+You'll receive context about:
+- The project (name, language, framework, file structure)
+- Recent conversation history (what the AI has been doing)
+- Project rules defined by the developer
+- The CLAUDE.md file if present (developer's preferences)
+
+Use this context to make informed decisions that align with the project's patterns and the developer's preferences.`;
+
+// Build the full system prompt with all context
+function buildFullSystemPrompt(context) {
+  let prompt = SYSTEM_PROMPT;
+
+  // Add project context
+  if (context.projectName) {
+    prompt += `\n\n## Current Project: ${context.projectName}`;
+    if (context.projectDescription) {
+      prompt += `\nDescription: ${context.projectDescription}`;
+    }
+  }
+
+  // Add technical context
+  if (context.projectContext) {
+    prompt += `\n\n## Technical Context
+- Main language: ${context.projectContext.mainLanguage || 'unknown'}
+- Framework: ${context.projectContext.framework || 'none detected'}
+- TypeScript: ${context.projectContext.hasTypeScript ? 'yes' : 'no'}
+- Test framework: ${context.projectContext.testFramework || 'none detected'}`;
+  }
+
+  // Add git status
+  if (context.gitStatus) {
+    prompt += `\n\n## Git Status
+- Branch: ${context.gitStatus.branch}
+- Last commit: ${context.gitStatus.lastCommit}
+- Working tree: ${context.gitStatus.clean ? 'clean' : `${context.gitStatus.modified} modified, ${context.gitStatus.added} added, ${context.gitStatus.deleted} deleted`}`;
+  }
+
+  // Add file tree (condensed)
+  if (context.fileTree) {
+    const treePreview = context.fileTree.split('\n').slice(0, 30).join('\n');
+    prompt += `\n\n## Project Structure\n\`\`\`\n${treePreview}\n\`\`\``;
+  }
+
+  // Add CLAUDE.md content (developer preferences)
+  if (context.claudeMd) {
+    prompt += `\n\n## Developer Preferences (from CLAUDE.md)\n${context.claudeMd.slice(0, 2000)}`;
+  }
+
+  // Add project rules
+  if (context.promptRules && context.promptRules.length > 0) {
+    prompt += `\n\n## Project Rules\n${context.promptRules.map((r, i) => `${i + 1}. ${r}`).join('\n')}`;
+  }
+
+  // Add global rules
+  if (context.globalRules && context.globalRules.length > 0) {
+    prompt += `\n\n## Global Rules\n${context.globalRules.map((r, i) => `${i + 1}. ${r}`).join('\n')}`;
+  }
+
+  // Add recent history
+  if (context.recentHistory) {
+    prompt += `\n\n## Recent Conversation\n${context.recentHistory}`;
+  }
+
+  // Add CLI tool context
+  if (context.cliTool) {
+    prompt += `\n\n## Active CLI: ${context.cliTool}`;
+  }
+
+  return prompt;
+}
+
+class LLMProvider extends EventEmitter {
+  constructor() {
+    super();
+    this.settings = { ...DEFAULT_LLM_SETTINGS };
+    this.available = false;
+    this.lastHealthCheck = null;
+  }
+
+  /**
+   * Initialize LLM provider with settings from database
+   */
+  async init() {
+    const db = getDB();
+
+    if (!db.data.llmSettings) {
+      db.data.llmSettings = { ...DEFAULT_LLM_SETTINGS };
+      await db.write();
+    }
+
+    this.settings = { ...DEFAULT_LLM_SETTINGS, ...db.data.llmSettings };
+
+    // Check if Ollama is available
+    if (this.settings.enabled && this.settings.provider === 'ollama') {
+      await this.checkOllamaHealth();
+    }
+
+    console.log(`LLM Provider initialized (enabled: ${this.settings.enabled}, provider: ${this.settings.provider})`);
+  }
+
+  /**
+   * Get current settings
+   */
+  getSettings() {
+    return { ...this.settings };
+  }
+
+  /**
+   * Update settings
+   */
+  async updateSettings(updates) {
+    const db = getDB();
+
+    this.settings = {
+      ...this.settings,
+      ...updates,
+      ollama: { ...this.settings.ollama, ...updates.ollama },
+      openai: { ...this.settings.openai, ...updates.openai },
+      deepseek: { ...this.settings.deepseek, ...updates.deepseek },
+    };
+
+    db.data.llmSettings = this.settings;
+    await db.write();
+
+    // Re-check health if provider changed or enabled
+    if (this.settings.enabled) {
+      await this.checkHealth();
+    }
+
+    return this.settings;
+  }
+
+  /**
+   * Check if LLM should be used based on smart engine result
+   */
+  shouldUseLLM(smartEngineResult) {
+    if (!this.settings.enabled || !this.available) {
+      return false;
+    }
+
+    // No smart engine result - use LLM for unknown
+    if (!smartEngineResult) {
+      return this.settings.useForUnknownIntent;
+    }
+
+    // Low confidence
+    if (
+      this.settings.useForLowConfidence &&
+      smartEngineResult.confidence < this.settings.confidenceThreshold
+    ) {
+      return true;
+    }
+
+    // Unknown intent
+    if (this.settings.useForUnknownIntent && smartEngineResult.intent === 'unknown') {
+      return true;
+    }
+
+    // Information requests (hard to answer without context)
+    if (
+      this.settings.useForInformationRequests &&
+      smartEngineResult.intent === 'information'
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Generate a response using the configured LLM
+   */
+  async generateResponse(prompt, context = {}) {
+    if (!this.settings.enabled) {
+      throw new Error('LLM is not enabled');
+    }
+
+    if (!this.available) {
+      throw new Error('LLM is not available');
+    }
+
+    const provider = this.settings.provider;
+
+    switch (provider) {
+      case 'ollama':
+        return this.generateOllamaResponse(prompt, context);
+      case 'openai':
+        return this.generateOpenAIResponse(prompt, context);
+      case 'deepseek':
+        return this.generateDeepSeekResponse(prompt, context);
+      default:
+        throw new Error(`Unknown LLM provider: ${provider}`);
+    }
+  }
+
+  /**
+   * Generate response using Ollama
+   */
+  async generateOllamaResponse(prompt, context) {
+    const { endpoint, model, timeout } = this.settings.ollama;
+
+    const systemPrompt = this.buildSystemPrompt(context);
+    const userPrompt = this.buildUserPrompt(prompt, context);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const response = await fetch(`${endpoint}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          prompt: userPrompt,
+          system: systemPrompt,
+          stream: false,
+          options: {
+            temperature: this.settings.temperature,
+            num_predict: this.settings.maxTokens,
+          },
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Ollama error: ${error}`);
+      }
+
+      const data = await response.json();
+      const generatedResponse = this.cleanResponse(data.response);
+
+      return {
+        response: generatedResponse,
+        provider: 'ollama',
+        model,
+        tokensUsed: data.eval_count,
+        duration: data.total_duration,
+      };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('Ollama request timed out');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Generate response using OpenAI-compatible API
+   */
+  async generateOpenAIResponse(prompt, context) {
+    const { endpoint, model, apiKey, timeout } = this.settings.openai;
+
+    if (!apiKey) {
+      throw new Error('OpenAI API key not configured');
+    }
+
+    const systemPrompt = this.buildSystemPrompt(context);
+    const userPrompt = this.buildUserPrompt(prompt, context);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const response = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: this.settings.maxTokens,
+          temperature: this.settings.temperature,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(`OpenAI error: ${error.error?.message || 'Unknown error'}`);
+      }
+
+      const data = await response.json();
+      const generatedResponse = this.cleanResponse(data.choices[0]?.message?.content || '');
+
+      return {
+        response: generatedResponse,
+        provider: 'openai',
+        model,
+        tokensUsed: data.usage?.total_tokens,
+      };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('OpenAI request timed out');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Generate response using DeepSeek API (OpenAI-compatible)
+   */
+  async generateDeepSeekResponse(prompt, context) {
+    const { endpoint, model, apiKey, timeout } = this.settings.deepseek;
+
+    if (!apiKey) {
+      throw new Error('DeepSeek API key not configured');
+    }
+
+    const systemPrompt = this.buildSystemPrompt(context);
+    const userPrompt = this.buildUserPrompt(prompt, context);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const response = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: this.settings.maxTokens,
+          temperature: this.settings.temperature,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(`DeepSeek error: ${error.error?.message || 'Unknown error'}`);
+      }
+
+      const data = await response.json();
+      const generatedResponse = this.cleanResponse(data.choices[0]?.message?.content || '');
+
+      return {
+        response: generatedResponse,
+        provider: 'deepseek',
+        model,
+        tokensUsed: data.usage?.total_tokens,
+      };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('DeepSeek request timed out');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Build system prompt with context
+   */
+  buildSystemPrompt(context) {
+    return buildFullSystemPrompt(context);
+  }
+
+  /**
+   * Build user prompt
+   */
+  buildUserPrompt(prompt, context) {
+    let userPrompt = `## Current Question\nThe AI CLI is asking:\n"${prompt}"\n`;
+
+    if (context.intent) {
+      userPrompt += `\nDetected intent: ${context.intent}`;
+    }
+
+    if (context.options && context.options.length > 0) {
+      userPrompt += `\nAvailable options: ${context.options.join(', ')}`;
+    }
+
+    if (context.reasoning && context.reasoning.length > 0) {
+      userPrompt += `\nSmart engine analysis: ${context.reasoning.join('; ')}`;
+    }
+
+    // Add security assessment
+    if (context.riskAssessment) {
+      userPrompt += `\n\n## Security Assessment`;
+      userPrompt += `\nRisk level: ${context.riskAssessment.level.toUpperCase()}`;
+      if (context.riskAssessment.reasons.length > 0) {
+        userPrompt += `\nConcerns: ${context.riskAssessment.reasons.join(', ')}`;
+      }
+      if (context.riskAssessment.requiresConfirmation) {
+        userPrompt += `\n⚠️ This operation may require user confirmation.`;
+      }
+    }
+
+    userPrompt += '\n\nRespond with ONLY the exact text to send (no quotes, no explanation):';
+
+    return userPrompt;
+  }
+
+  /**
+   * Check if response should be auto-sent based on confidence
+   */
+  shouldAutoRespond(confidence, riskLevel) {
+    if (!this.settings.autoRespondEnabled) {
+      return false;
+    }
+
+    // Never auto-respond to high-risk operations
+    if (riskLevel === RISK_LEVELS.HIGH || riskLevel === RISK_LEVELS.CRITICAL) {
+      return false;
+    }
+
+    // Auto-respond if confidence meets threshold
+    return confidence >= this.settings.autoRespondThreshold;
+  }
+
+  /**
+   * Check if operation requires user confirmation due to security
+   */
+  requiresSecurityConfirmation(riskLevel) {
+    if (this.settings.blockCriticalWithoutConfirm && riskLevel === RISK_LEVELS.CRITICAL) {
+      return true;
+    }
+    if (this.settings.requireConfirmationForHighRisk && riskLevel === RISK_LEVELS.HIGH) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Generate response with full context and security checks
+   */
+  async generateResponseWithContext(prompt, sessionId, smartEngineResult = null) {
+    // Get full session context
+    const sessionCtx = sessionContext.buildLLMContext(sessionId);
+
+    // Assess security risk
+    const riskAssessment = sessionContext.assessRisk(prompt);
+
+    // Build enhanced context
+    const context = {
+      ...sessionCtx,
+      intent: smartEngineResult?.intent,
+      options: smartEngineResult?.parsed?.options,
+      reasoning: smartEngineResult?.reasoning,
+      projectContext: smartEngineResult?.projectContext || sessionCtx,
+      riskAssessment,
+    };
+
+    // Check if this requires user confirmation
+    if (this.requiresSecurityConfirmation(riskAssessment.level)) {
+      return {
+        response: null,
+        requiresConfirmation: true,
+        riskAssessment,
+        reason: `This operation has been flagged as ${riskAssessment.level} risk: ${riskAssessment.reasons.join(', ')}`,
+      };
+    }
+
+    // Create rollback point if enabled and operation is not safe
+    if (this.settings.createRollbackPoints && riskAssessment.level !== RISK_LEVELS.SAFE) {
+      sessionContext.createRollbackPoint(sessionId, `Before: ${prompt.slice(0, 50)}...`);
+    }
+
+    // Generate the response
+    const result = await this.generateResponse(prompt, context);
+
+    // Check for special markers
+    if (result.response === '[NEEDS_USER_CONFIRMATION]') {
+      return {
+        response: null,
+        requiresConfirmation: true,
+        riskAssessment,
+        reason: 'LLM indicated this decision should be made by the user',
+      };
+    }
+
+    // Determine if we should auto-respond
+    const confidence = smartEngineResult?.confidence || 0.5;
+    const shouldAuto = this.shouldAutoRespond(confidence, riskAssessment.level);
+
+    // Record in history
+    sessionContext.addResponse(sessionId, {
+      prompt,
+      response: result.response,
+      wasAuto: shouldAuto,
+      confidence,
+      reasoning: smartEngineResult?.reasoning,
+    });
+
+    return {
+      ...result,
+      shouldAutoRespond: shouldAuto,
+      riskAssessment,
+      confidence,
+    };
+  }
+
+  /**
+   * Clean and normalize the LLM response
+   */
+  cleanResponse(response) {
+    if (!response) return '';
+
+    // Remove quotes if the response is wrapped in them
+    let cleaned = response.trim();
+    if ((cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+        (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+      cleaned = cleaned.slice(1, -1);
+    }
+
+    // Remove common prefixes LLMs might add
+    const prefixes = [
+      'Response: ',
+      'Answer: ',
+      'Output: ',
+      'Send: ',
+      'Reply: ',
+    ];
+    for (const prefix of prefixes) {
+      if (cleaned.toLowerCase().startsWith(prefix.toLowerCase())) {
+        cleaned = cleaned.slice(prefix.length);
+      }
+    }
+
+    // Normalize yes/no responses
+    const lowerCleaned = cleaned.toLowerCase();
+    if (['yes', 'yeah', 'yep', 'affirmative', 'correct', 'true'].includes(lowerCleaned)) {
+      return 'y';
+    }
+    if (['no', 'nope', 'negative', 'false', 'deny'].includes(lowerCleaned)) {
+      return 'n';
+    }
+
+    return cleaned.trim();
+  }
+
+  /**
+   * Check health of the current provider
+   */
+  async checkHealth() {
+    const provider = this.settings.provider;
+
+    switch (provider) {
+      case 'ollama':
+        return this.checkOllamaHealth();
+      case 'openai':
+        return this.checkOpenAIHealth();
+      case 'deepseek':
+        return this.checkDeepSeekHealth();
+      default:
+        this.available = false;
+        return { available: false, error: `Unknown provider: ${provider}` };
+    }
+  }
+
+  /**
+   * Check if Ollama is available
+   */
+  async checkOllamaHealth() {
+    const { endpoint, model } = this.settings.ollama;
+
+    try {
+      // Check if Ollama is running
+      const response = await fetch(`${endpoint}/api/tags`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) {
+        this.available = false;
+        this.lastHealthCheck = { available: false, error: 'Ollama not responding' };
+        return this.lastHealthCheck;
+      }
+
+      const data = await response.json();
+      const models = data.models || [];
+      const hasModel = models.some(m => m.name === model || m.name.startsWith(`${model}:`));
+
+      this.available = hasModel;
+      this.lastHealthCheck = {
+        available: hasModel,
+        models: models.map(m => m.name),
+        selectedModel: model,
+        hasSelectedModel: hasModel,
+        error: hasModel ? null : `Model "${model}" not found. Available: ${models.map(m => m.name).join(', ')}`,
+      };
+
+      if (!hasModel) {
+        console.warn(`Ollama model "${model}" not found. Available models:`, models.map(m => m.name));
+      }
+
+      return this.lastHealthCheck;
+    } catch (error) {
+      this.available = false;
+      this.lastHealthCheck = {
+        available: false,
+        error: `Cannot connect to Ollama at ${endpoint}: ${error.message}`,
+      };
+      return this.lastHealthCheck;
+    }
+  }
+
+  /**
+   * Check if OpenAI is available (just validates API key format)
+   */
+  async checkOpenAIHealth() {
+    const { apiKey } = this.settings.openai;
+
+    if (!apiKey) {
+      this.available = false;
+      this.lastHealthCheck = { available: false, error: 'OpenAI API key not configured' };
+      return this.lastHealthCheck;
+    }
+
+    // Basic format check
+    if (!apiKey.startsWith('sk-')) {
+      this.available = false;
+      this.lastHealthCheck = { available: false, error: 'Invalid OpenAI API key format' };
+      return this.lastHealthCheck;
+    }
+
+    // We don't want to make a real API call just to check health
+    // Assume it's available if the key looks valid
+    this.available = true;
+    this.lastHealthCheck = { available: true, provider: 'openai' };
+    return this.lastHealthCheck;
+  }
+
+  /**
+   * Check if DeepSeek is available
+   */
+  async checkDeepSeekHealth() {
+    const { apiKey } = this.settings.deepseek;
+
+    if (!apiKey) {
+      this.available = false;
+      this.lastHealthCheck = { available: false, error: 'DeepSeek API key not configured' };
+      return this.lastHealthCheck;
+    }
+
+    // DeepSeek API keys start with 'sk-'
+    if (!apiKey.startsWith('sk-')) {
+      this.available = false;
+      this.lastHealthCheck = { available: false, error: 'Invalid DeepSeek API key format' };
+      return this.lastHealthCheck;
+    }
+
+    // Assume it's available if the key looks valid
+    this.available = true;
+    this.lastHealthCheck = { available: true, provider: 'deepseek' };
+    return this.lastHealthCheck;
+  }
+
+  /**
+   * Get list of available Ollama models
+   */
+  async getOllamaModels() {
+    const { endpoint } = this.settings.ollama;
+
+    try {
+      const response = await fetch(`${endpoint}/api/tags`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) {
+        return [];
+      }
+
+      const data = await response.json();
+      return (data.models || []).map(m => ({
+        name: m.name,
+        size: m.size,
+        modified: m.modified_at,
+      }));
+    } catch (error) {
+      return [];
+    }
+  }
+
+  /**
+   * Pull a model in Ollama
+   */
+  async pullOllamaModel(modelName) {
+    const { endpoint } = this.settings.ollama;
+
+    const response = await fetch(`${endpoint}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: modelName, stream: false }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Failed to pull model: ${error}`);
+    }
+
+    return await response.json();
+  }
+
+  /**
+   * Test the LLM with a sample prompt
+   */
+  async testConnection() {
+    const testPrompt = 'Continue with the changes? [Y/n]';
+    const result = await this.generateResponse(testPrompt, {
+      intent: 'confirmation',
+      options: ['y', 'n'],
+    });
+
+    return {
+      success: true,
+      response: result.response,
+      provider: result.provider,
+      model: result.model,
+    };
+  }
+}
+
+// Singleton instance
+export const llmProvider = new LLMProvider();
+
+export default llmProvider;

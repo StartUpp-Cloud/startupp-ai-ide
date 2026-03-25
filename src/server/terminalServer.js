@@ -9,6 +9,7 @@ import { OutputBuffer, stripAnsi } from './conversationParser.js';
 import History from './models/History.js';
 import Project from './models/Project.js';
 import { autoResponder } from './autoResponder.js';
+import { sessionContext } from './sessionContext.js';
 
 class TerminalServer {
   constructor() {
@@ -97,7 +98,72 @@ class TerminalServer {
       });
     });
 
+    // Listen for LLM request events from auto-responder
+    autoResponder.on('llm-request', async ({ text, sessionId, cliTool, smartEngineResult }) => {
+      await this.handleLLMRequest(sessionId, text, cliTool, smartEngineResult);
+    });
+
+    autoResponder.on('llm-error', ({ sessionId, error }) => {
+      this.broadcastToSession(sessionId, {
+        type: 'llm-error',
+        sessionId,
+        error,
+      });
+    });
+
     console.log('Terminal WebSocket server initialized on /ws/terminal');
+  }
+
+  /**
+   * Handle async LLM request
+   */
+  async handleLLMRequest(sessionId, text, cliTool, smartEngineResult) {
+    try {
+      const result = await autoResponder.processLLMRequest(text, sessionId, cliTool, smartEngineResult);
+
+      if (result) {
+        // Notify clients about LLM-generated response
+        this.broadcastToSession(sessionId, {
+          type: 'prompt-detected',
+          sessionId,
+          pattern: result.pattern,
+          matchedText: result.matchedText,
+          action: result.action,
+          suggestedResponse: result.suggestedResponse,
+          responses: result.responses,
+          llmGenerated: true,
+          llmProvider: result.llmProvider,
+          llmModel: result.llmModel,
+          confidence: result.confidence || result.smartEngineConfidence,
+          reasoning: result.reasoning,
+          // Security info
+          requiresConfirmation: result.requiresConfirmation,
+          riskLevel: result.riskLevel,
+          riskReasons: result.riskReasons,
+        });
+
+        // Handle auto-response if enabled
+        if (result.action === 'auto' && result.suggestedResponse !== null) {
+          const settings = autoResponder.getSettings();
+          const delay = settings.responseDelay || 500;
+
+          setTimeout(() => {
+            ptyManager.write(sessionId, result.suggestedResponse + '\r');
+
+            this.broadcastToSession(sessionId, {
+              type: 'auto-response-sent',
+              sessionId,
+              response: result.suggestedResponse,
+              pattern: result.pattern,
+              confidence: result.confidence,
+              wasLLM: true,
+            });
+          }, delay);
+        }
+      }
+    } catch (error) {
+      console.warn('LLM request handling failed:', error.message);
+    }
   }
 
   /**
@@ -213,6 +279,18 @@ class TerminalServer {
       // Track CLI tool for auto-responder
       this.sessionCliTools.set(session.sessionId, cliTool || 'shell');
       this.recentOutput.set(session.sessionId, '');
+
+      // Set project path for smart engine context
+      if (workingDir) {
+        autoResponder.setSessionProjectPath(session.sessionId, workingDir);
+      }
+
+      // Initialize session context with full project info
+      await sessionContext.initSession(session.sessionId, {
+        projectId,
+        projectPath: workingDir,
+        cliTool: cliTool || 'shell',
+      });
 
       // Auto-attach the creating client
       this.attachClient(ws, session.sessionId);
@@ -516,6 +594,9 @@ class TerminalServer {
     }
     this.recentOutput.set(sessionId, recent);
 
+    // Also track in session context for history
+    sessionContext.addCliOutput(sessionId, cleanData);
+
     // Check for prompts after a short delay (debounce)
     // Clear any pending check
     const existingTimer = this.autoResponseTimers.get(sessionId);
@@ -551,6 +632,11 @@ class TerminalServer {
         action: result.action,
         suggestedResponse: result.suggestedResponse,
         responses: result.responses,
+        // Smart engine specific fields
+        smartEngine: result.smartEngine || false,
+        confidence: result.confidence,
+        reasoning: result.reasoning,
+        projectContext: result.projectContext,
       });
 
       // Handle auto-response if configured
@@ -637,6 +723,7 @@ class TerminalServer {
     this.userInputBuffers.delete(sessionId);
     this.outputBuffers.delete(sessionId);
     autoResponder.clearSessionSettings(sessionId);
+    sessionContext.clearSession(sessionId);
 
     const timer = this.autoResponseTimers.get(sessionId);
     if (timer) {

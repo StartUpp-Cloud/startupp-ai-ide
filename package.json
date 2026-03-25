@@ -37,6 +37,7 @@
   "author": "StartUpp AI",
   "license": "MIT",
   "dependencies": {
+    "compromise": "^14.15.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
@@ -44,6 +45,7 @@
     "express-rate-limit": "^7.1.5",
     "helmet": "^7.1.0",
     "lowdb": "^7.0.1",
+    "natural": "^8.1.1",
     "node-pty": "^1.1.0",
     "uuid": "^9.0.0",
     "ws": "^8.20.0"

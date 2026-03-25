@@ -7,6 +7,7 @@ import Terminal, { useTerminal } from '../components/Terminal';
 import HistoryPanel from '../components/HistoryPanel';
 import PlansPanel from '../components/PlansPanel';
 import FilesPanel from '../components/FilesPanel';
+import BigProjectPanel from '../components/BigProjectPanel';
 import {
   FolderOpen,
   Files,
@@ -253,6 +254,20 @@ export default function IDE() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Handle big project launch - sends prompt to terminal
+  const handleBigProjectLaunch = useCallback(({ prompt, projectId: bigProjectProjectId, bigProjectId, iterationId, workflowStep }) => {
+    if (!prompt) return;
+
+    // If we have a session, send the prompt to terminal
+    if (currentSessionId) {
+      sendToTerminal(prompt + '\n');
+    } else {
+      // If no session, copy to clipboard and notify user
+      navigator.clipboard.writeText(prompt);
+      alert('Prompt copied to clipboard. Please start a terminal session first, then paste the prompt.');
+    }
+  }, [currentSessionId, sendToTerminal]);
+
   // Handle panel resize
   const handleMouseMove = useCallback((e) => {
     if (isResizing === 'left') {
@@ -304,6 +319,15 @@ export default function IDE() {
           <FilesPanel
             projectId={selectedProjectId}
             project={selectedProject}
+          />
+        );
+      case 'big-projects':
+        return (
+          <BigProjectPanel
+            projectId={selectedProjectId}
+            projectPath={selectedProject?.folderPath}
+            cliTool={selectedProject?.cliTool}
+            onLaunchTerminal={handleBigProjectLaunch}
           />
         );
       default:
@@ -417,6 +441,18 @@ export default function IDE() {
               >
                 <Files className="w-3.5 h-3.5" />
                 <span>Files</span>
+              </button>
+              <button
+                onClick={() => setLeftPanelTab('big-projects')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs transition-colors ${
+                  leftPanelTab === 'big-projects'
+                    ? 'text-primary-400 bg-primary-500/10 border-b-2 border-primary-500'
+                    : 'text-surface-400 hover:text-surface-200'
+                }`}
+                title="Big Project Planner"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Big</span>
               </button>
               <button
                 onClick={() => setLeftPanelCollapsed(true)}

@@ -1,11 +1,15 @@
 /**
  * Auto-Responder Engine
  * Detects prompts in CLI output and can auto-respond or suggest responses
+ * Integrates with SmartEngine for NLP-based intent analysis
  */
 
 import { getDB } from './db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { EventEmitter } from 'events';
+import { smartEngine, INTENTS } from './smartEngine.js';
+import { llmProvider } from './llmProvider.js';
+import { sessionContext, RISK_LEVELS } from './sessionContext.js';
 
 // Default patterns for common AI CLI prompts
 export const DEFAULT_PATTERNS = [
@@ -190,6 +194,8 @@ class AutoResponder extends EventEmitter {
     this.sessionSettings = new Map(); // sessionId -> settings
     this.compiledPatterns = new Map(); // pattern id -> RegExp
     this.recentMatches = new Map(); // sessionId -> recent matches for debounce
+    this.sessionProjectPaths = new Map(); // sessionId -> projectPath
+    this.smartEngineEnabled = true;
   }
 
   /**
@@ -218,7 +224,29 @@ class AutoResponder extends EventEmitter {
     this.patterns = db.data.autoResponder.patterns;
     this.compilePatterns();
 
+    // Initialize smart engine for NLP-based analysis
+    await smartEngine.init();
+
+    // Initialize LLM provider
+    await llmProvider.init();
+
     console.log(`AutoResponder initialized with ${this.patterns.length} patterns`);
+    console.log('Smart engine NLP classifier ready');
+    console.log(`LLM provider ready (enabled: ${llmProvider.getSettings().enabled})`);
+  }
+
+  /**
+   * Set project path for a session (for smart engine context)
+   */
+  setSessionProjectPath(sessionId, projectPath) {
+    this.sessionProjectPaths.set(sessionId, projectPath);
+  }
+
+  /**
+   * Get project path for a session
+   */
+  getSessionProjectPath(sessionId) {
+    return this.sessionProjectPaths.get(sessionId);
   }
 
   /**
@@ -431,7 +459,193 @@ class AutoResponder extends EventEmitter {
       }
     }
 
-    return null;
+    // No pattern matched - try smart engine analysis
+    return this.analyzeWithSmartEngine(recentText, sessionId, cliTool);
+  }
+
+  /**
+   * Use smart engine for NLP-based prompt analysis
+   */
+  analyzeWithSmartEngine(text, sessionId, cliTool) {
+    if (!this.smartEngineEnabled) {
+      // If smart engine disabled, try LLM directly (async)
+      this.requestLLMFallback(text, sessionId, cliTool, null);
+      return null;
+    }
+
+    const projectPath = this.sessionProjectPaths.get(sessionId);
+
+    try {
+      const analysis = smartEngine.analyze(text, { projectPath });
+
+      // Check if we should use LLM as fallback (async via event)
+      if (llmProvider.shouldUseLLM(analysis)) {
+        this.requestLLMFallback(text, sessionId, cliTool, analysis);
+        return null; // Will come back via event
+      }
+
+      // Only act if we have reasonable confidence
+      if (analysis.confidence < 0.4) {
+        return null;
+      }
+
+      // Don't act on completion/notify intents (those are informational)
+      if (analysis.intent === INTENTS.COMPLETION) {
+        return {
+          pattern: { id: 'smart-completion', name: 'Smart: Task Complete', category: 'completion' },
+          matchedText: text.slice(-100),
+          action: 'notify',
+          suggestedResponse: null,
+          responses: [],
+          timestamp: Date.now(),
+          smartEngine: true,
+          reasoning: analysis.reasoning,
+        };
+      }
+
+      // Don't act on unknown or low-confidence
+      if (analysis.intent === INTENTS.UNKNOWN || !analysis.suggestion) {
+        return null;
+      }
+
+      // Map smart engine action to auto-responder action
+      let action = analysis.action;
+      if (action === 'ask_user') action = 'suggest';
+      if (action === 'ask_llm') action = 'suggest'; // For now, fallback to suggest
+
+      // Build response options based on intent
+      let responses = [];
+      if (analysis.intent === INTENTS.APPROVAL || analysis.intent === INTENTS.CONFIRMATION) {
+        responses = ['y', 'n'];
+      } else if (analysis.intent === INTENTS.CHOICE && analysis.parsed?.options?.length > 0) {
+        responses = analysis.parsed.options;
+      } else if (analysis.suggestion) {
+        responses = [analysis.suggestion];
+      }
+
+      // Record this match for debouncing
+      const recentKey = `${sessionId}-${text.slice(-50)}`;
+      this.recentMatches.set(recentKey, Date.now());
+
+      return {
+        pattern: {
+          id: `smart-${analysis.intent}`,
+          name: `Smart: ${analysis.intent.charAt(0).toUpperCase() + analysis.intent.slice(1)}`,
+          category: analysis.intent,
+          cli: cliTool,
+        },
+        matchedText: text.slice(-200),
+        action,
+        suggestedResponse: analysis.suggestion,
+        responses,
+        timestamp: Date.now(),
+        smartEngine: true,
+        confidence: analysis.confidence,
+        reasoning: analysis.reasoning,
+        projectContext: analysis.projectContext,
+      };
+    } catch (error) {
+      console.warn('Smart engine analysis failed:', error.message);
+      this.requestLLMFallback(text, sessionId, cliTool, null);
+      return null;
+    }
+  }
+
+  /**
+   * Request LLM fallback (async via event emitter)
+   */
+  requestLLMFallback(text, sessionId, cliTool, smartEngineResult) {
+    if (!llmProvider.getSettings().enabled) {
+      return;
+    }
+
+    // Debounce check
+    const recentKey = `llm-${sessionId}-${text.slice(-50)}`;
+    const lastRequest = this.recentMatches.get(recentKey);
+    if (lastRequest && Date.now() - lastRequest < 5000) {
+      return; // Already requested recently
+    }
+    this.recentMatches.set(recentKey, Date.now());
+
+    // Emit event for async handling
+    this.emit('llm-request', {
+      text,
+      sessionId,
+      cliTool,
+      smartEngineResult,
+    });
+  }
+
+  /**
+   * Process LLM request (called by terminal server)
+   * Returns a promise that resolves to a result object or null
+   */
+  async processLLMRequest(text, sessionId, cliTool, smartEngineResult) {
+    if (!llmProvider.getSettings().enabled || !llmProvider.available) {
+      return null;
+    }
+
+    try {
+      // Use the enhanced context-aware generation
+      const llmResult = await llmProvider.generateResponseWithContext(
+        text,
+        sessionId,
+        smartEngineResult
+      );
+
+      // Handle security confirmation required
+      if (llmResult.requiresConfirmation) {
+        return {
+          pattern: {
+            id: 'security-confirmation',
+            name: `Security: ${llmResult.riskAssessment.level.toUpperCase()} Risk`,
+            category: 'security',
+            cli: cliTool,
+          },
+          matchedText: text.slice(-200),
+          action: 'ask_user', // Force user confirmation
+          suggestedResponse: null,
+          responses: ['y', 'n'],
+          timestamp: Date.now(),
+          requiresConfirmation: true,
+          riskLevel: llmResult.riskAssessment.level,
+          riskReasons: llmResult.riskAssessment.reasons,
+          reasoning: [llmResult.reason],
+        };
+      }
+
+      // Determine action based on auto-respond settings
+      const action = llmResult.shouldAutoRespond ? 'auto' : 'suggest';
+
+      return {
+        pattern: {
+          id: 'llm-response',
+          name: `LLM: ${llmResult.provider}/${llmResult.model}`,
+          category: smartEngineResult?.intent || 'unknown',
+          cli: cliTool,
+        },
+        matchedText: text.slice(-200),
+        action,
+        suggestedResponse: llmResult.response,
+        responses: [llmResult.response],
+        timestamp: Date.now(),
+        llmGenerated: true,
+        llmProvider: llmResult.provider,
+        llmModel: llmResult.model,
+        confidence: llmResult.confidence,
+        smartEngineConfidence: smartEngineResult?.confidence,
+        riskLevel: llmResult.riskAssessment?.level,
+        reasoning: [
+          `LLM generated response using ${llmResult.provider}/${llmResult.model}`,
+          llmResult.shouldAutoRespond ? 'High confidence - auto-responding' : 'Awaiting user confirmation',
+          ...(smartEngineResult?.reasoning || []),
+        ],
+      };
+    } catch (error) {
+      console.warn('LLM request failed:', error.message);
+      this.emit('llm-error', { sessionId, error: error.message });
+      return null;
+    }
   }
 
   /**
@@ -459,12 +673,27 @@ class AutoResponder extends EventEmitter {
    */
   clearSessionSettings(sessionId) {
     this.sessionSettings.delete(sessionId);
+    this.sessionProjectPaths.delete(sessionId);
     // Clean up debounce entries for this session
     for (const key of this.recentMatches.keys()) {
       if (key.startsWith(sessionId)) {
         this.recentMatches.delete(key);
       }
     }
+  }
+
+  /**
+   * Enable/disable smart engine
+   */
+  setSmartEngineEnabled(enabled) {
+    this.smartEngineEnabled = enabled;
+  }
+
+  /**
+   * Check if smart engine is enabled
+   */
+  isSmartEngineEnabled() {
+    return this.smartEngineEnabled;
   }
 
   /**
