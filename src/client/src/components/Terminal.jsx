@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Zap, X, MessageSquare, Bot } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 
 const CLI_TOOLS = [
@@ -28,6 +29,10 @@ export default function Terminal({ projectId, onSessionChange }) {
   const [sessions, setSessions] = useState([]);
   const [selectedCLI, setSelectedCLI] = useState('shell');
   const [status, setStatus] = useState('disconnected');
+
+  // Auto-responder state
+  const [promptSuggestion, setPromptSuggestion] = useState(null);
+  const [autoResponderEnabled, setAutoResponderEnabled] = useState(true);
 
   // Initialize xterm
   useEffect(() => {
@@ -221,8 +226,36 @@ export default function Terminal({ projectId, onSessionChange }) {
           setSessionId(null);
         }
         break;
+
+      case 'prompt-detected':
+        // AI is asking a question - show suggestion
+        if (msg.action !== 'auto' && autoResponderEnabled) {
+          setPromptSuggestion({
+            pattern: msg.pattern,
+            responses: msg.responses,
+            suggestedResponse: msg.suggestedResponse,
+            matchedText: msg.matchedText,
+          });
+          // Auto-dismiss after 30 seconds
+          setTimeout(() => {
+            setPromptSuggestion(prev =>
+              prev?.matchedText === msg.matchedText ? null : prev
+            );
+          }, 30000);
+        }
+        break;
+
+      case 'auto-response-sent':
+        // Notify user of auto-response
+        xtermRef.current?.writeln(`\x1b[90m[Auto] Sent: ${msg.response || '(enter)'}\x1b[0m`);
+        setPromptSuggestion(null);
+        break;
+
+      case 'response-sent':
+        setPromptSuggestion(null);
+        break;
     }
-  }, [onSessionChange]);
+  }, [onSessionChange, autoResponderEnabled]);
 
   // Create new session
   const createSession = useCallback(() => {
@@ -273,6 +306,23 @@ export default function Terminal({ projectId, onSessionChange }) {
       data: text,
     }));
   }, [sessionId]);
+
+  // Send response to detected prompt
+  const sendPromptResponse = useCallback((response) => {
+    if (!sessionIdRef.current || !wsRef.current) return;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'send-response',
+      sessionId: sessionIdRef.current,
+      response,
+    }));
+    setPromptSuggestion(null);
+  }, []);
+
+  // Dismiss prompt suggestion
+  const dismissSuggestion = useCallback(() => {
+    setPromptSuggestion(null);
+  }, []);
 
   // Expose sendToTerminal method
   useEffect(() => {
@@ -338,6 +388,19 @@ export default function Terminal({ projectId, onSessionChange }) {
 
         {/* Status indicator */}
         <div className="flex items-center gap-2">
+          {/* Auto-responder toggle */}
+          <button
+            onClick={() => setAutoResponderEnabled(prev => !prev)}
+            className={`p-1 rounded transition-colors ${
+              autoResponderEnabled
+                ? 'bg-purple-500/20 text-purple-400'
+                : 'bg-gray-700 text-gray-500'
+            }`}
+            title={autoResponderEnabled ? 'Auto-responder ON' : 'Auto-responder OFF'}
+          >
+            <Zap className="w-3.5 h-3.5" />
+          </button>
+
           {sessionId && (
             <span className="text-xs text-gray-400 font-mono truncate max-w-32">
               {sessionId.substring(0, 16)}...
@@ -351,6 +414,48 @@ export default function Terminal({ projectId, onSessionChange }) {
           }`} title={status} />
         </div>
       </div>
+
+      {/* Prompt suggestion popup */}
+      {promptSuggestion && (
+        <div className="mx-2 mb-2 p-3 bg-purple-900/30 border border-purple-500/30 rounded-lg animate-in slide-in-from-top-2">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Bot className="w-4 h-4 text-purple-400 flex-shrink-0" />
+              <div>
+                <p className="text-xs text-purple-300 font-medium">
+                  {promptSuggestion.pattern?.name || 'AI Question Detected'}
+                </p>
+                <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-1">
+                  {promptSuggestion.matchedText}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={dismissSuggestion}
+              className="p-1 hover:bg-gray-700 rounded text-gray-500"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 mt-2">
+            <span className="text-[10px] text-gray-500">Quick response:</span>
+            {promptSuggestion.responses?.map((response, i) => (
+              <button
+                key={i}
+                onClick={() => sendPromptResponse(response)}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  response === promptSuggestion.suggestedResponse
+                    ? 'bg-purple-500 text-white'
+                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                }`}
+              >
+                {response || '(enter)'}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Terminal container */}
       <div

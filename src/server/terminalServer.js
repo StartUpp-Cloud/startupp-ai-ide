@@ -8,6 +8,7 @@ import { ptyManager } from './ptyManager.js';
 import { OutputBuffer, stripAnsi } from './conversationParser.js';
 import History from './models/History.js';
 import Project from './models/Project.js';
+import { autoResponder } from './autoResponder.js';
 
 class TerminalServer {
   constructor() {
@@ -16,6 +17,9 @@ class TerminalServer {
     this.sessionClients = new Map(); // sessionId -> Set of ws clients
     this.outputBuffers = new Map(); // sessionId -> OutputBuffer
     this.userInputBuffers = new Map(); // sessionId -> current user input
+    this.recentOutput = new Map(); // sessionId -> recent output for prompt detection
+    this.sessionCliTools = new Map(); // sessionId -> cliTool
+    this.autoResponseTimers = new Map(); // sessionId -> pending auto-response timer
   }
 
   /**
@@ -69,6 +73,9 @@ class TerminalServer {
       if (buffer) {
         buffer.append(data);
       }
+
+      // Track recent output for prompt detection
+      this.trackOutputForPromptDetection(sessionId, data);
     });
 
     ptyManager.on('exit', ({ sessionId, exitCode, signal }) => {
@@ -144,6 +151,18 @@ class TerminalServer {
         this.handleAddHistory(ws, payload);
         break;
 
+      case 'set-auto-responder':
+        this.handleSetAutoResponder(ws, payload);
+        break;
+
+      case 'send-response':
+        this.handleSendResponse(ws, payload);
+        break;
+
+      case 'get-auto-responder-settings':
+        this.handleGetAutoResponderSettings(ws, payload);
+        break;
+
       default:
         this.sendError(ws, `Unknown message type: ${type}`);
     }
@@ -190,6 +209,10 @@ class TerminalServer {
 
       // Initialize user input buffer
       this.userInputBuffers.set(session.sessionId, '');
+
+      // Track CLI tool for auto-responder
+      this.sessionCliTools.set(session.sessionId, cliTool || 'shell');
+      this.recentOutput.set(session.sessionId, '');
 
       // Auto-attach the creating client
       this.attachClient(ws, session.sessionId);
@@ -309,6 +332,8 @@ class TerminalServer {
 
     try {
       ptyManager.startCLI(targetSession, cliTool);
+      // Update CLI tool tracker for auto-responder
+      this.sessionCliTools.set(targetSession, cliTool);
       this.send(ws, { type: 'cli-started', cliTool, sessionId: targetSession });
     } catch (error) {
       this.sendError(ws, error.message);
@@ -322,13 +347,14 @@ class TerminalServer {
     const success = ptyManager.killSession(sessionId);
 
     if (success) {
-      // Flush any remaining output buffer
+      // Flush any remaining output buffer before cleanup
       const buffer = this.outputBuffers.get(sessionId);
       if (buffer) {
         buffer.flush();
-        this.outputBuffers.delete(sessionId);
       }
-      this.userInputBuffers.delete(sessionId);
+
+      // Clean up all session data
+      this.cleanupSession(sessionId);
 
       this.send(ws, { type: 'session-killed', sessionId });
 
@@ -474,9 +500,161 @@ class TerminalServer {
   }
 
   /**
+   * Track output for prompt detection
+   */
+  trackOutputForPromptDetection(sessionId, data) {
+    // Get or initialize recent output buffer
+    let recent = this.recentOutput.get(sessionId) || '';
+
+    // Strip ANSI codes for pattern matching
+    const cleanData = stripAnsi(data);
+    recent += cleanData;
+
+    // Keep only last 2000 chars
+    if (recent.length > 2000) {
+      recent = recent.slice(-2000);
+    }
+    this.recentOutput.set(sessionId, recent);
+
+    // Check for prompts after a short delay (debounce)
+    // Clear any pending check
+    const existingTimer = this.autoResponseTimers.get(sessionId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    // Schedule prompt check
+    const timer = setTimeout(() => {
+      this.checkForPrompts(sessionId);
+    }, 300); // Check 300ms after last output
+
+    this.autoResponseTimers.set(sessionId, timer);
+  }
+
+  /**
+   * Check for prompts in recent output
+   */
+  checkForPrompts(sessionId) {
+    const recent = this.recentOutput.get(sessionId);
+    if (!recent) return;
+
+    const cliTool = this.sessionCliTools.get(sessionId) || 'generic';
+    const result = autoResponder.checkForPrompt(recent, sessionId, cliTool);
+
+    if (result) {
+      // Notify clients about detected prompt
+      this.broadcastToSession(sessionId, {
+        type: 'prompt-detected',
+        sessionId,
+        pattern: result.pattern,
+        matchedText: result.matchedText,
+        action: result.action,
+        suggestedResponse: result.suggestedResponse,
+        responses: result.responses,
+      });
+
+      // Handle auto-response if configured
+      if (result.action === 'auto') {
+        const settings = autoResponder.getSettings();
+        const delay = settings.responseDelay || 500;
+
+        setTimeout(() => {
+          // Send the auto-response
+          const response = result.suggestedResponse ?? '';
+          ptyManager.write(sessionId, response + '\r');
+
+          // Notify clients
+          this.broadcastToSession(sessionId, {
+            type: 'auto-response-sent',
+            sessionId,
+            response,
+            pattern: result.pattern,
+          });
+        }, delay);
+      }
+
+      // Clear recent output after match to avoid re-matching
+      this.recentOutput.set(sessionId, '');
+    }
+  }
+
+  /**
+   * Handle auto-responder settings update for a session
+   */
+  handleSetAutoResponder(ws, { sessionId, enabled, autoMode }) {
+    const targetSession = sessionId || this.clients.get(ws)?.sessionId;
+    if (!targetSession) {
+      this.sendError(ws, 'No session specified');
+      return;
+    }
+
+    autoResponder.setSessionSettings(targetSession, { enabled, autoMode });
+    this.send(ws, {
+      type: 'auto-responder-updated',
+      sessionId: targetSession,
+      settings: autoResponder.getSessionSettings(targetSession),
+    });
+  }
+
+  /**
+   * Send a response to a detected prompt
+   */
+  handleSendResponse(ws, { sessionId, response }) {
+    const targetSession = sessionId || this.clients.get(ws)?.sessionId;
+    if (!targetSession) {
+      this.sendError(ws, 'No session specified');
+      return;
+    }
+
+    const written = ptyManager.write(targetSession, response + '\r');
+    if (written) {
+      this.send(ws, { type: 'response-sent', sessionId: targetSession, response });
+      // Clear recent output
+      this.recentOutput.set(targetSession, '');
+    }
+  }
+
+  /**
+   * Get auto-responder settings
+   */
+  handleGetAutoResponderSettings(ws, { sessionId }) {
+    const targetSession = sessionId || this.clients.get(ws)?.sessionId;
+
+    this.send(ws, {
+      type: 'auto-responder-settings',
+      sessionId: targetSession,
+      sessionSettings: targetSession ? autoResponder.getSessionSettings(targetSession) : null,
+      globalSettings: autoResponder.getSettings(),
+    });
+  }
+
+  /**
+   * Clean up session-specific data
+   */
+  cleanupSession(sessionId) {
+    this.recentOutput.delete(sessionId);
+    this.sessionCliTools.delete(sessionId);
+    this.userInputBuffers.delete(sessionId);
+    this.outputBuffers.delete(sessionId);
+    autoResponder.clearSessionSettings(sessionId);
+
+    const timer = this.autoResponseTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.autoResponseTimers.delete(sessionId);
+    }
+  }
+
+  /**
    * Cleanup on shutdown
    */
   cleanup() {
+    // Clear all auto-response timers
+    for (const timer of this.autoResponseTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.autoResponseTimers.clear();
+
     ptyManager.cleanup();
     if (this.wss) {
       this.wss.close();

@@ -23,6 +23,8 @@ import cliRoutes from "./routes/cli.js";
 import historyRoutes from "./routes/history.js";
 import planRoutes from "./routes/plans.js";
 import fileRoutes from "./routes/files.js";
+import autoResponderRoutes from "./routes/autoResponder.js";
+import { autoResponder } from "./autoResponder.js";
 
 // Load environment variables
 dotenv.config();
@@ -71,6 +73,10 @@ async function startServer() {
     await initDB();
     console.log("Database ready");
 
+    // Initialize auto-responder
+    await autoResponder.init();
+    console.log("Auto-responder ready");
+
     // API routes
     app.use("/api/projects", projectRoutes);
     app.use("/api/projects", promptRoutes); // This will handle /api/projects/:id/prompts
@@ -79,6 +85,7 @@ async function startServer() {
     app.use("/api/history", historyRoutes);
     app.use("/api/plans", planRoutes);
     app.use("/api/files", fileRoutes);
+    app.use("/api/auto-responder", autoResponderRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {
