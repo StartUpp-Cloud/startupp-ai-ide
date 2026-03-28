@@ -17,11 +17,29 @@ if (!fs.existsSync(dataDir)) {
 
 const dbPath = path.join(dataDir, "db.json");
 
+// Default safety settings
+const defaultSafetySettings = {
+  maxStepsPerPlan: 50,
+  maxExecutionTime: 3600000,
+  maxConcurrentExecutions: 1,
+  scopeRestriction: 'project',
+  autoCommitBeforeRiskyOps: true,
+  blockCriticalRisk: true,
+  pauseOnHighRisk: true,
+  allowedPaths: [],
+  blockedCommands: [],
+};
+
 // Default data structure
 const defaultData = {
   projects: [],
   prompts: [],
   globalRules: [],
+  memories: [],
+  activities: [],
+  taskQueue: [],
+  orchestratorExecutions: [],
+  safetySettings: { ...defaultSafetySettings },
 };
 
 // Initialize LowDB with JSON file adapter
@@ -40,6 +58,11 @@ export async function initDB() {
   if (!db.data.projects) db.data.projects = [];
   if (!db.data.prompts) db.data.prompts = [];
   if (!db.data.globalRules) db.data.globalRules = [];
+  if (!db.data.memories) db.data.memories = [];
+  if (!db.data.activities) db.data.activities = [];
+  if (!db.data.taskQueue) db.data.taskQueue = [];
+  if (!db.data.orchestratorExecutions) db.data.orchestratorExecutions = [];
+  if (!db.data.safetySettings) db.data.safetySettings = { ...defaultSafetySettings };
   await db.write();
   console.log("Database initialized at:", dbPath);
 }

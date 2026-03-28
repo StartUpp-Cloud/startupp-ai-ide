@@ -27,6 +27,11 @@ import autoResponderRoutes from "./routes/autoResponder.js";
 import smartEngineRoutes from "./routes/smartEngine.js";
 import llmRoutes from "./routes/llm.js";
 import bigProjectRoutes from "./routes/bigProjects.js";
+import orchestratorRoutes from "./routes/orchestrator.js";
+import activityRoutes from "./routes/activity.js";
+import memoryRoutes from "./routes/memory.js";
+import safetyRoutes from "./routes/safety.js";
+import contextRoutes from "./routes/context.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
 
@@ -93,6 +98,11 @@ async function startServer() {
     app.use("/api/smart-engine", smartEngineRoutes);
     app.use("/api/llm", llmRoutes);
     app.use("/api/big-projects", bigProjectRoutes);
+    app.use("/api/orchestrator", orchestratorRoutes);
+    app.use("/api/activity", activityRoutes);
+    app.use("/api/memory", memoryRoutes);
+    app.use("/api/safety", safetyRoutes);
+    app.use("/api/context", contextRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

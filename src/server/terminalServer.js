@@ -10,6 +10,8 @@ import History from './models/History.js';
 import Project from './models/Project.js';
 import { autoResponder } from './autoResponder.js';
 import { sessionContext } from './sessionContext.js';
+import { orchestrator } from './orchestrator.js';
+import { activityFeed } from './activityFeed.js';
 
 class TerminalServer {
   constructor() {
@@ -77,6 +79,9 @@ class TerminalServer {
 
       // Track recent output for prompt detection
       this.trackOutputForPromptDetection(sessionId, data);
+
+      // Forward to orchestrator if it has an active execution for this session
+      orchestrator.feedOutput(sessionId, data);
     });
 
     ptyManager.on('exit', ({ sessionId, exitCode, signal }) => {
@@ -86,6 +91,8 @@ class TerminalServer {
         exitCode,
         signal,
       });
+
+      orchestrator.notifyExit(sessionId, exitCode);
     });
 
     ptyManager.on('session-created', ({ sessionId, projectId, cliTool }) => {
@@ -109,6 +116,29 @@ class TerminalServer {
         sessionId,
         error,
       });
+    });
+
+    // Forward orchestrator events to WebSocket clients
+    orchestrator.on('status-change', (data) => {
+      const sessionId = data.sessionId || orchestrator.getStatus(data.executionId)?.sessionId || '';
+      this.broadcastToSession(sessionId, { type: 'orchestrator-status', ...data });
+    });
+    orchestrator.on('step-complete', (data) => {
+      const sessionId = data.sessionId || orchestrator.getStatus(data.executionId)?.sessionId || '';
+      this.broadcastToSession(sessionId, { type: 'orchestrator-step-complete', ...data });
+    });
+    orchestrator.on('waiting-approval', (data) => {
+      const sessionId = data.sessionId || orchestrator.getStatus(data.executionId)?.sessionId || '';
+      this.broadcastToSession(sessionId, { type: 'orchestrator-waiting-approval', ...data });
+    });
+    orchestrator.on('completed', (data) => {
+      const sessionId = data.sessionId || orchestrator.getStatus(data.executionId)?.sessionId || '';
+      this.broadcastToSession(sessionId, { type: 'orchestrator-completed', ...data });
+    });
+
+    // Forward activity feed entries to all connected clients
+    activityFeed.on('entry', (entry) => {
+      this.broadcast({ type: 'activity-entry', entry });
     });
 
     console.log('Terminal WebSocket server initialized on /ws/terminal');
@@ -227,6 +257,28 @@ class TerminalServer {
 
       case 'get-auto-responder-settings':
         this.handleGetAutoResponderSettings(ws, payload);
+        break;
+
+      case 'orchestrator-start':
+        this.handleOrchestratorStart(ws, payload);
+        break;
+      case 'orchestrator-pause':
+        this.handleOrchestratorPause(ws, payload);
+        break;
+      case 'orchestrator-resume':
+        this.handleOrchestratorResume(ws, payload);
+        break;
+      case 'orchestrator-stop':
+        this.handleOrchestratorStop(ws, payload);
+        break;
+      case 'orchestrator-approve':
+        this.handleOrchestratorApprove(ws, payload);
+        break;
+      case 'orchestrator-skip':
+        this.handleOrchestratorSkip(ws, payload);
+        break;
+      case 'kill-switch':
+        this.handleKillSwitch(ws, payload);
         break;
 
       default:
@@ -730,6 +782,88 @@ class TerminalServer {
       clearTimeout(timer);
       this.autoResponseTimers.delete(sessionId);
     }
+  }
+
+  /**
+   * Start orchestrator execution
+   */
+  handleOrchestratorStart(ws, { sessionId, projectId, projectPath, steps, planTitle, cliTool, config }) {
+    const targetSession = sessionId || this.clients.get(ws)?.sessionId;
+    if (!targetSession) { this.sendError(ws, 'No session specified'); return; }
+
+    const writeFn = (data) => ptyManager.write(targetSession, data);
+
+    try {
+      const executionId = orchestrator.start({
+        sessionId: targetSession,
+        projectId,
+        projectPath,
+        steps,
+        planTitle,
+        cliTool: cliTool || this.sessionCliTools.get(targetSession) || 'shell',
+        config,
+        writeFn,
+      });
+      this.send(ws, { type: 'orchestrator-started', executionId });
+    } catch (error) {
+      this.sendError(ws, `Failed to start orchestrator: ${error.message}`);
+    }
+  }
+
+  /**
+   * Pause orchestrator execution
+   */
+  handleOrchestratorPause(ws, { executionId }) {
+    orchestrator.pause(executionId);
+    this.send(ws, { type: 'orchestrator-paused', executionId });
+  }
+
+  /**
+   * Resume orchestrator execution
+   */
+  handleOrchestratorResume(ws, { executionId }) {
+    orchestrator.resume(executionId);
+    this.send(ws, { type: 'orchestrator-resumed', executionId });
+  }
+
+  /**
+   * Stop orchestrator execution
+   */
+  handleOrchestratorStop(ws, { executionId }) {
+    orchestrator.stop(executionId);
+    this.send(ws, { type: 'orchestrator-stopped', executionId });
+  }
+
+  /**
+   * Approve current orchestrator step
+   */
+  handleOrchestratorApprove(ws, { executionId }) {
+    orchestrator.approveStep(executionId);
+  }
+
+  /**
+   * Skip current orchestrator step
+   */
+  handleOrchestratorSkip(ws, { executionId }) {
+    orchestrator.skipStep(executionId);
+  }
+
+  /**
+   * Emergency kill switch - stop orchestrator and kill PTY
+   */
+  handleKillSwitch(ws, { executionId }) {
+    // Emergency stop: stop orchestrator + kill PTY
+    const execution = orchestrator.getStatus(executionId);
+    if (execution) {
+      orchestrator.stop(executionId);
+      if (execution.sessionId) {
+        ptyManager.write(execution.sessionId, '\x03'); // Send Ctrl+C first
+        setTimeout(() => {
+          ptyManager.killSession(execution.sessionId);
+        }, 1000);
+      }
+    }
+    this.send(ws, { type: 'kill-switch-activated', executionId });
   }
 
   /**

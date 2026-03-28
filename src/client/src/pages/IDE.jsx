@@ -6,6 +6,7 @@ import HistoryPanel from '../components/HistoryPanel';
 import PlansPanel from '../components/PlansPanel';
 import FilesPanel from '../components/FilesPanel';
 import BigProjectPanel from '../components/BigProjectPanel';
+import ActivityFeed from '../components/ActivityFeed';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import {
   FolderOpen,
@@ -51,7 +52,7 @@ const STORAGE_KEYS = {
 // Icon mapping removed — AI-assisted generation replaces task modes
 
 export default function IDE() {
-  const { projects, getProject, getGlobalRules } = useProjects();
+  const { projects, getProject, getGlobalRules, notify } = useProjects();
   const { sendToTerminal } = useTerminal();
 
   // Layout state (with persistence)
@@ -90,6 +91,7 @@ export default function IDE() {
   const [planTitle, setPlanTitle] = useState('');
   const [planCurrentStep, setPlanCurrentStep] = useState(0);
   const [planRunning, setPlanRunning] = useState(false);
+  const [executionId, setExecutionId] = useState(null);
 
   // Session state (with persistence)
   const [currentSessionId, setCurrentSessionId] = useState(() => {
@@ -184,6 +186,7 @@ export default function IDE() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Generation failed');
+      if (!data.prompt?.trim()) throw new Error('LLM returned an empty prompt. Try rephrasing or check your model.');
       setGeneratedPrompt(data.prompt);
     } catch (err) {
       setAiError(err.message);
@@ -199,6 +202,9 @@ export default function IDE() {
       setAiGenerating(true);
       setAiError('');
       setPlanSteps(null);
+      setPlanTitle('');
+      setPlanCurrentStep(0);
+      setPlanRunning(false);
       const res = await fetch('/api/llm/generate-plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -210,9 +216,11 @@ export default function IDE() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.raw || 'Plan generation failed');
+      if (!data.plan?.steps?.length) throw new Error('LLM returned an empty plan. Try rephrasing your goal.');
       setPlanTitle(data.plan.title || 'Plan');
-      setPlanSteps(data.plan.steps || []);
+      setPlanSteps(data.plan.steps);
       setPlanCurrentStep(0);
+      notify(`Plan ready: ${data.plan.steps.length} steps`);
     } catch (err) {
       setAiError(err.message);
     } finally {
@@ -220,12 +228,45 @@ export default function IDE() {
     }
   };
 
-  // Execute the current plan step
-  const handlePlanExecute = () => {
-    if (!planSteps || planCurrentStep >= planSteps.length || !currentSessionId) return;
-    const step = planSteps[planCurrentStep];
-    sendToTerminal(step.prompt + '\n');
-    setPlanCurrentStep(prev => prev + 1);
+  // Start autonomous execution via WebSocket
+  const handleStartAutonomous = () => {
+    if (!planSteps || !currentSessionId || !selectedProject) return;
+    // Send orchestrator-start via the sendToTerminal's WebSocket
+    // But we need direct WS access... The Terminal component exposes window.sendToTerminal
+    // For orchestrator commands, we need to go through the API instead
+    fetch('/api/orchestrator/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: currentSessionId,
+        projectId: selectedProjectId,
+        projectPath: selectedProject.folderPath || null,
+        steps: planSteps,
+        planTitle: planTitle,
+        cliTool: 'claude',
+        config: { autoCommit: true, runTests: false, maxRetries: 1 },
+      }),
+    }).then(res => res.json()).then(data => {
+      if (data.executionId) {
+        setExecutionId(data.executionId);
+        setPlanRunning(true);
+        notify('Autonomous execution started');
+      } else if (data.error) {
+        notify(data.error, 'error');
+      }
+    }).catch(err => notify(err.message, 'error'));
+  };
+
+  const handlePlanControl = (action) => {
+    if (!executionId) return;
+    fetch(`/api/orchestrator/${action}/${executionId}`, { method: 'POST' })
+      .then(res => res.json())
+      .then(() => {
+        if (action === 'stop') { setPlanRunning(false); }
+        if (action === 'pause') { setPlanRunning(false); }
+        if (action === 'resume') { setPlanRunning(true); }
+      })
+      .catch(err => notify(err.message, 'error'));
   };
 
   // Send to terminal
@@ -318,6 +359,10 @@ export default function IDE() {
             onLaunchTerminal={handleBigProjectLaunch}
           />
         );
+      case 'activity':
+        return (
+          <ActivityFeed projectId={selectedProjectId} />
+        );
       default:
         return (
           <ProjectManagerPanel
@@ -333,6 +378,28 @@ export default function IDE() {
 
   return (
     <div className="h-screen flex bg-surface-900 overflow-hidden">
+      {/* Kill Switch Bar - shown when orchestrator is running */}
+      {executionId && planRunning && (
+        <div className="absolute top-0 left-0 right-0 z-50 flex items-center justify-between px-4 py-1.5 bg-red-950/90 border-b border-red-500/30 backdrop-blur-sm">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+            <span className="text-xs text-red-300 font-medium">Autonomous execution in progress</span>
+            <span className="text-xs text-red-400/60">{planTitle}</span>
+          </div>
+          <button
+            onClick={() => {
+              fetch(`/api/orchestrator/kill/${executionId}`, { method: 'POST' });
+              setPlanRunning(false);
+              setExecutionId(null);
+              notify('Execution killed', 'error');
+            }}
+            className="px-3 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded font-medium transition-colors"
+          >
+            KILL SWITCH
+          </button>
+        </div>
+      )}
+
       {/* Left Panel */}
       {!leftPanelCollapsed && (
         <>
@@ -397,6 +464,18 @@ export default function IDE() {
               >
                 <Layers className="w-3.5 h-3.5" />
                 <span>Big</span>
+              </button>
+              <button
+                onClick={() => setLeftPanelTab('activity')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs transition-colors ${
+                  leftPanelTab === 'activity'
+                    ? 'text-primary-400 bg-primary-500/10 border-b-2 border-primary-500'
+                    : 'text-surface-400 hover:text-surface-200'
+                }`}
+                title="Activity Feed"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>Activity</span>
               </button>
               <button
                 onClick={() => setLeftPanelCollapsed(true)}
@@ -674,30 +753,64 @@ export default function IDE() {
 
                       {/* Plan controls */}
                       <div className="flex gap-2">
-                        {!planRunning ? (
-                          <button
-                            onClick={handlePlanExecute}
-                            disabled={!currentSessionId || planCurrentStep >= planSteps.length}
-                            className="flex-1 py-1.5 text-xs bg-green-600 hover:bg-green-700 disabled:bg-surface-700 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-1.5"
-                          >
-                            <Send className="w-3 h-3" />
-                            {planCurrentStep > 0 ? 'Send Next Step' : 'Start Plan'}
-                          </button>
+                        {!planRunning && !executionId ? (
+                          <>
+                            <button
+                              onClick={handleStartAutonomous}
+                              disabled={!currentSessionId || planCurrentStep >= planSteps.length}
+                              className="flex-1 py-1.5 text-xs bg-green-600 hover:bg-green-700 disabled:bg-surface-700 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-1.5"
+                            >
+                              <Send className="w-3 h-3" />
+                              Run Autonomously
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (!planSteps || planCurrentStep >= planSteps.length || !currentSessionId) return;
+                                sendToTerminal(planSteps[planCurrentStep].prompt + '\n');
+                                setPlanCurrentStep(prev => prev + 1);
+                              }}
+                              disabled={!currentSessionId || planCurrentStep >= planSteps.length}
+                              className="py-1.5 px-3 text-xs bg-surface-700 hover:bg-surface-600 text-surface-200 rounded transition-colors"
+                            >
+                              Manual
+                            </button>
+                          </>
+                        ) : planRunning ? (
+                          <>
+                            <button
+                              onClick={() => handlePlanControl('pause')}
+                              className="flex-1 py-1.5 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded transition-colors flex items-center justify-center gap-1.5"
+                            >
+                              Pause
+                            </button>
+                            <button
+                              onClick={() => handlePlanControl('stop')}
+                              className="py-1.5 px-3 text-xs bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
+                            >
+                              Stop
+                            </button>
+                          </>
                         ) : (
-                          <button
-                            onClick={() => setPlanRunning(false)}
-                            className="flex-1 py-1.5 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded transition-colors flex items-center justify-center gap-1.5"
-                          >
-                            Pause
-                          </button>
-                        )}
-                        {planCurrentStep > 0 && planCurrentStep < planSteps.length && (
-                          <button
-                            onClick={() => setPlanCurrentStep(prev => prev + 1)}
-                            className="py-1.5 px-3 text-xs bg-surface-700 hover:bg-surface-600 text-surface-200 rounded transition-colors"
-                          >
-                            Skip
-                          </button>
+                          <>
+                            <button
+                              onClick={() => handlePlanControl('resume')}
+                              className="flex-1 py-1.5 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors flex items-center justify-center gap-1.5"
+                            >
+                              Resume
+                            </button>
+                            <button
+                              onClick={() => handlePlanControl('stop')}
+                              className="py-1.5 px-3 text-xs bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
+                            >
+                              Stop
+                            </button>
+                            <button
+                              onClick={() => handlePlanControl('skip')}
+                              className="py-1.5 px-3 text-xs bg-surface-700 hover:bg-surface-600 text-surface-200 rounded transition-colors"
+                            >
+                              Skip
+                            </button>
+                          </>
                         )}
                       </div>
 
