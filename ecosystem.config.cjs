@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: "ai-prompt-maker-api",
+      name: "ai-ide-api",
       script: "src/server/index.js",
       instances: 1,
       autorestart: true,
@@ -21,7 +21,7 @@ module.exports = {
       time: true,
     },
     {
-      name: "ai-prompt-maker-frontend",
+      name: "ai-ide-frontend",
       script: "npm",
       args: "run dev",
       cwd: "./src/client",
@@ -44,8 +44,8 @@ module.exports = {
       user: "node",
       host: "localhost",
       ref: "origin/main",
-      repo: "git@github.com:StartUpp-Cloud/startupp-ai-prompt-maker.git",
-      path: "/var/www/ai-prompt-maker",
+      repo: "git@github.com:StartUpp-Cloud/startupp-ai-ide.git",
+      path: "/var/www/ai-ide",
       "pre-deploy-local": "",
       "post-deploy":
         "npm install && npm run build && pm2 reload ecosystem.config.cjs --env production",

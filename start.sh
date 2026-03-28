@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "🚀 Starting AI Prompt Maker..."
+echo "🚀 Starting StartUpp AI IDE..."
 
 # Check if .env file exists
 if [ ! -f .env ]; then

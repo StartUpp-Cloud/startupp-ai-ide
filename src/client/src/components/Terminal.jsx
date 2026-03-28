@@ -118,7 +118,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange }) 
     resizeObserver.observe(terminalRef.current);
 
     xterm.writeln('\x1b[1;34m\u256D\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256E\x1b[0m');
-    xterm.writeln('\x1b[1;34m\u2502\x1b[0m   \x1b[1;36mAI Prompt IDE Terminal\x1b[0m                      \x1b[1;34m\u2502\x1b[0m');
+    xterm.writeln('\x1b[1;34m\u2502\x1b[0m   \x1b[1;36mStartUpp AI IDE Terminal\x1b[0m                    \x1b[1;34m\u2502\x1b[0m');
     xterm.writeln('\x1b[1;34m\u2502\x1b[0m   Select a project to start a session          \x1b[1;34m\u2502\x1b[0m');
     xterm.writeln('\x1b[1;34m\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256F\x1b[0m');
     xterm.writeln('');
@@ -405,7 +405,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange }) 
     }));
   }, [sessionId]);
 
-  // Send text to terminal (for prompt maker integration)
+  // Send text to terminal (for AI prompt integration)
   const sendToTerminal = useCallback((text) => {
     if (!sessionId || !wsRef.current) return;
 

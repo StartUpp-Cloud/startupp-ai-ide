@@ -147,7 +147,7 @@ export default function Onboarding({ onSetupComplete }) {
             <span className="text-surface-950 font-display font-bold text-xl">P</span>
           </div>
           <h1 className="font-display text-2xl font-bold text-white">
-            Welcome to Prompt Maker
+            Welcome to StartUpp AI IDE
           </h1>
           <p className="text-surface-400 text-sm mt-2">
             Let's get you set up in two quick steps

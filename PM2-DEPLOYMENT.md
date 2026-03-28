@@ -1,6 +1,6 @@
-# PM2 Deployment Guide for AI Prompt Maker
+# PM2 Deployment Guide for StartUpp AI IDE
 
-This guide covers PM2-based deployment for AI Prompt Maker.
+This guide covers PM2-based deployment for StartUpp AI IDE.
 
 The recommended production mode runs only the backend process. In production, the Express server serves the built frontend from `src/client/dist`.
 
@@ -71,7 +71,7 @@ The application uses `ecosystem.config.cjs` for PM2 configuration.
 ### Development
 
 - Uses `.env` file
-- CORS allows localhost origins used during development
+- CORS allows all origins for LAN access
 - Detailed error messages
 
 ### Production
@@ -84,11 +84,12 @@ The application uses `ecosystem.config.cjs` for PM2 configuration.
 ## File Structure
 
 ```text
-startupp-ai-prompt-maker/
+startupp-ai-ide/
 ├── ecosystem.config.cjs        # PM2 configuration
 ├── start-pm2.sh                # Startup script
-├── env.example                 # Environment template
+├── .env.example                # Environment template
 ├── logs/                       # PM2 log files
+├── data/                       # Local database (gitignored)
 ├── src/
 │   ├── client/
 │   │   └── dist/               # Built frontend after build
@@ -102,7 +103,7 @@ startupp-ai-prompt-maker/
 ### 1. Prepare the Environment
 
 ```bash
-cp env.example .env
+cp .env.example .env
 npm run install:all
 npm run build
 ```
@@ -127,7 +128,7 @@ curl http://localhost:55590/api/health
 
 ```bash
 pm2 logs
-pm2 logs ai-prompt-maker-api
+pm2 logs ai-ide-api
 pm2 logs --follow
 ```
 
@@ -135,7 +136,7 @@ pm2 logs --follow
 
 ```bash
 pm2 monit
-pm2 show ai-prompt-maker-api
+pm2 show ai-ide-api
 ```
 
 ### Log Files
@@ -188,9 +189,9 @@ cd src/client && npm run build
 
 ```bash
 pm2 status
-pm2 show ai-prompt-maker-api
+pm2 show ai-ide-api
 pm2 logs --err
-pm2 restart ai-prompt-maker-api
+pm2 restart ai-ide-api
 ```
 
 ## Security Considerations
@@ -200,6 +201,7 @@ pm2 restart ai-prompt-maker-api
 - Helmet security headers enabled
 - CORS configured by environment
 - Reduced error detail in production
+- AI auto-responder has risk-based guardrails (blocks critical operations without confirmation)
 - Intended for local/private self-hosting unless you add auth in front of it
 
 ### Environment Variables
@@ -211,18 +213,10 @@ FRONTEND_URL=https://yourdomain.com
 RATE_LIMIT_MAX_REQUESTS=100
 ```
 
-## Next Steps
+## Network Access
 
-1. Set up monitoring.
-2. Add a reverse proxy if you want a public host.
-3. Back up the local data directory.
-
-## Support
-
-1. Check logs with `pm2 logs`.
-2. Verify environment variables.
-3. Check PM2 status with `pm2 status`.
+In development mode, the Vite dev server binds to all interfaces (`host: true`), making the IDE accessible from other machines on your LAN at `http://<server-ip>:5173`. The terminal sessions run on the server machine.
 
 ---
 
-**Happy Deploying! 🎉**
+**Happy Deploying!**

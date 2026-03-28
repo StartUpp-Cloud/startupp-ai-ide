@@ -1,108 +1,73 @@
-# AI Prompt Maker
+# StartUpp AI IDE
 
-A local-first tool that automatically appends project-specific guardrails and rules to every AI prompt you generate — so your coding rules, design constraints, and security policies are always in context, every time.
+An AI-assisted development environment that connects to local or cloud LLMs to generate prompts, execute multi-step plans, and manage terminal sessions across your projects — all from a single IDE interface.
 
 ## Why this exists
 
-When working with AI assistants (GitHub Copilot, Cursor, Claude, ChatGPT), you constantly have to re-explain your project rules:
+AI coding assistants (Claude Code, GitHub Copilot, Aider) are powerful but need structured prompts with project context. StartUpp AI IDE:
 
-- _"Don't use mocks"_
-- _"We use TypeScript strict mode"_
-- _"Never expose error details in production"_
-
-AI Prompt Maker stores these rules per project and automatically injects them into every generated prompt. You write your rules once, they're in every prompt forever.
+- **Stores project rules** that get injected into every prompt automatically
+- **Uses your connected LLM** (Ollama, OpenAI, DeepSeek) to draft prompts from plain-language descriptions
+- **Breaks big goals into plans** with sequential steps that execute one after another
+- **Manages terminal sessions** per project, with an AI auto-responder that handles routine CLI questions
+- **Runs on your network** — accessible from any machine on your LAN
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/your-username/ai-prompt-maker
-cd ai-prompt-maker
+git clone https://github.com/StartUpp-Cloud/startupp-ai-ide.git
+cd startupp-ai-ide
 npm run install:all
 npm run dev
 ```
 
 Open **http://localhost:5173**
 
-The API runs at **http://localhost:55590** — all data is stored locally in `data/db.json` (auto-created, gitignored).
-
-> **No authentication by default.** This tool is designed for local or self-hosted use on your own machine.
-
-## Example Ruleset
-
-Here's a sample ruleset for a React + TypeScript project:
-
-```
-1. Always use TypeScript with strict mode enabled
-2. Prefer functional components and React hooks over class components
-3. Define prop types for all components using TypeScript interfaces
-4. Avoid using `any` type — use `unknown` and type guards instead
-5. Do not use mocks or stubs — implement the real solution
-6. Show the complete implementation, not just the changed parts
-7. Consider edge cases and error handling in every implementation
-```
+On first launch, the onboarding wizard will guide you to:
+1. Connect an AI model (Ollama recommended for local use)
+2. Create your first project
 
 ## Features
 
-### Core: Guardrails Injection
+### AI-Assisted Prompt Generation
 
-Every generated prompt automatically includes your project's rules in the correct order. When you copy or save a prompt, the full assembled version (project context + rules + your input) is what goes to the AI.
+Describe what you want in plain language. The connected LLM drafts a detailed, actionable prompt using your project's context, rules, and presets. Review, edit, and send to the terminal.
 
-### Projects
+### Plan Mode
 
-- **Create projects** with custom rules and guidelines
-- **Edit, clone, delete** projects at any time
-- **Drag to reorder** rules by priority (highest priority rules first)
-- **Enable/disable rules** per-session without deleting them (toggle in the project workspace)
-- **Start from a preset** — built-in rule templates for React/TypeScript, REST APIs, Cloudflare Workers, Expo, Security, and General AI guardrails
+Describe a big goal. The LLM breaks it into sequential steps with individual prompts. Execute them one at a time with safety gates between steps. Skip, pause, or send custom responses at any point.
+
+### Integrated Terminal
+
+- One terminal session per project, opening in the project's configured folder
+- Session tabs for switching between projects
+- Quick-launch buttons for Claude Code, GitHub Copilot, and Aider
+- Full xterm.js terminal with WebSocket streaming
+
+### AI Auto-Responder
+
+The connected LLM automatically handles routine CLI questions (y/n confirmations, file approvals, etc.) based on your project context and rules. Features:
+
+- **Persistent control bar** showing detected questions with confidence levels
+- **Quick response buttons** for suggested answers
+- **Custom response input** for manual overrides
+- **Toggle on/off** with the "Auto" button
+- **Risk-based guardrails** — high-risk operations always require human confirmation
+
+### Project Management
+
+- Create projects with name, description, rules, presets, and a workspace folder path
+- Edit, clone, import/export, and delete projects from the IDE sidebar
+- Drag-and-drop rule reordering
+- Preset rule templates (React/TypeScript, REST APIs, Security, etc.)
 
 ### Global Rules
 
-Rules that apply across **all** projects when toggled on. Good for universal guardrails like _"Never mock implementations"_ or _"Always explain architectural decisions"_. Manage them at **Global Rules** in the nav.
+Rules that apply across all projects. Manage at **Global Rules** in the nav.
 
-### Quick Prompt Builder
+### Network Access
 
-No project setup needed. Go to **Quick Build** in the nav, paste any raw prompt, check which projects' rules to inject, and get the assembled result instantly.
-
-### Prompt Types
-
-Choose from 8 structured prompt types (Bug Fix, Feature Implementation, Code Review, Testing Strategy, etc.) — or use Custom Prompt for free-form input. Each type has a starter template that frames your request.
-
-### Prompt History
-
-- Paginated history of all generated prompts per project
-- Inline editing of saved prompts
-- Prompt type badge showing what kind of prompt it was
-- "View full prompt with context" expander shows the complete assembled prompt
-
-### Export & Import
-
-- **Export project** as JSON (rules + settings) — share with teammates or back up
-- **Import project** from JSON — drop someone else's ruleset into your instance
-- **Copy as `.cursorrules`** — export rules in the format used by Cursor IDE
-
-### Prompt Settings (per project)
-
-- Auto-save prompts after generation
-- Include global rules in this project's prompts
-- Drag to reorder the prompt sections (Project Details → Rules → Context, or any order)
-
-## How a Generated Prompt Looks
-
-```
-Project: My SaaS App
-Description: A React + TypeScript SaaS application with Supabase
-
-Rules:
-1. Always use TypeScript with strict mode enabled
-2. Prefer functional components and React hooks
-3. Do not use mocks — implement the real solution
-4. Show the complete implementation, not just changed parts
-
-Feature Implementation:
-I want to implement a new feature for my my saas app project. Please provide a comprehensive implementation plan...
-
-Additional Context: Add a dark mode toggle that persists to localStorage
-```
+The IDE is accessible from any computer on your local network. Both the frontend and terminal sessions work over the network — the terminal runs on the server machine.
 
 ## Tech Stack
 
@@ -110,6 +75,8 @@ Additional Context: Add a dark mode toggle that persists to localStorage
 | -------- | ---------------------------------- |
 | Frontend | React 18, Vite, Tailwind CSS       |
 | Backend  | Express.js, LowDB (flat JSON file) |
+| Terminal | node-pty, xterm.js, WebSocket      |
+| LLM      | Ollama / OpenAI / DeepSeek         |
 | UI icons | Lucide React                       |
 | Runtime  | Node.js 18+                        |
 
@@ -126,146 +93,48 @@ Additional Context: Add a dark mode toggle that persists to localStorage
 
 ```bash
 npm run build
-npm run pm2:start
+npm run pm2:start:prod
 ```
 
 See [PM2-DEPLOYMENT.md](PM2-DEPLOYMENT.md) for full production setup.
 
 ## Data
 
-All data lives in `data/db.json`. This file is gitignored — your projects and prompts never leave your machine.
+All data lives in `data/db.json`. This file is gitignored — your projects, prompts, and LLM settings never leave your machine.
 
-To back up your data: copy `data/db.json` somewhere safe.  
+To back up: copy `data/db.json` somewhere safe.
 To restore: replace `data/db.json` with your backup and restart the server.
-
-## License
-
-MIT
-
-### Smart Prompt Generation
-
-- **Predefined Prompt Types**: Choose from 8 different prompt categories:
-  - Requirement Analysis
-  - Bug Fix
-  - Feature Implementation
-  - Code Review
-  - Performance Optimization
-  - Testing Strategy
-  - Documentation
-  - Custom Prompt
-- **Context-Aware**: Automatically includes project rules, description, and context
-- **Smart Templates**: AI-optimized templates that adapt to your project type
-- **Prompt Structure Settings**: Reorder `Project details`, `Rules`, and `Context` per project
-- **Auto-Save Option**: Save generated prompts automatically per project
-- **One-Click Copy**: Copy generated prompts to clipboard instantly
-- **Save to Project**: Store generated prompts in your project history
-
-### Prompt Management
-
-- **Search & Filter**: Find specific prompts quickly
-- **Pagination**: Navigate through large numbers of prompts
-- **Full Context View**: See prompts with all project context included
-- **Copy Functionality**: Copy individual prompts or full context
-
-## Usage
-
-### Creating a Project
-
-1. Navigate to the Dashboard
-2. Click "Create New Project"
-3. Fill in project name, description, and rules
-4. Optionally clone from an existing project to use as a template
-5. Click "Create Project"
-
-### Editing a Project
-
-1. Open any project from the Dashboard
-2. Click the edit icon (pencil) in the project header
-3. Modify project details, description, or rules
-4. Click "Save Changes"
-
-### Cloning a Project
-
-1. **From Dashboard**: Hover over any project card and click the clone icon
-2. **From Project Detail**: Click the clone icon in the project header
-3. **From Create Project**: Use the "Clone from Existing Project" option
-4. Customize the cloned project name and description
-5. All rules and project structure are automatically copied
-
-### Generating Smart Prompts
-
-1. Open a project
-2. Optionally configure prompt settings for section order and auto-save
-3. Select a prompt type from the dropdown
-4. Add any additional context or specific details
-5. Click "Generate"
-6. Review the generated prompt
-7. Copy it, or let it auto-save if enabled for that project
-
-### Managing Prompts
-
-- View all prompts in the project
-- Search for specific prompts
-- Copy individual prompts or full context
-- Navigate through pages of prompts
 
 ## API Endpoints
 
 ### Projects
-
-- `GET /api/projects` - Get all projects
+- `GET /api/projects` - List all projects
 - `GET /api/projects/:id` - Get project by ID
-- `POST /api/projects` - Create new project
+- `POST /api/projects` - Create project
 - `PUT /api/projects/:id` - Update project
 - `DELETE /api/projects/:id` - Delete project
+- `POST /api/projects/:id/clone` - Clone project
 
-### Prompts
+### LLM
+- `GET /api/llm/settings` - Get LLM configuration
+- `GET /api/llm/health` - Check LLM provider health
+- `POST /api/llm/generate-prompt` - AI-assisted prompt generation
+- `POST /api/llm/generate-plan` - AI-assisted plan generation
+- `POST /api/llm/test` - Test LLM connection
+- `GET /api/llm/ollama/models` - List available Ollama models
 
-- `GET /api/projects/:id/prompts` - Get prompts for a project
-- `POST /api/projects/:id/prompts` - Create new prompt
+### Setup
+- `GET /api/setup-status` - Check onboarding completion status
 
-## Local Usage Model
+## Configuration
 
-- Project and prompt data stay in the local JSON database.
-- `.env`, `data/`, `logs/`, and build output are gitignored.
-- The app is a good fit for personal/local usage or private self-hosting.
-- If you expose it directly to the public internet, add authentication first.
-
-## Technology Stack
-
-- **Frontend**: React 18, Vite, Tailwind CSS
-- **Backend**: Node.js, Express.js
-- **Database**: LowDB (local JSON file)
-- **Security**: Helmet.js, CORS, Rate limiting
-- **Icons**: Lucide React
-
-## Configuration (Optional)
-
-Copy `env.example` to `.env` to customize:
+Copy `.env.example` to `.env` to customize:
 
 ```bash
 PORT=55590              # Server port
 NODE_ENV=development    # Environment
 ```
 
-## PM2 Deployment
-
-For a local self-hosted production-style run with PM2:
-
-```bash
-npm run pm2:start:prod
-```
-
-See `PM2-DEPLOYMENT.md` for detailed deployment instructions.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
 ## License
 
-This project is licensed under the MIT License.
+MIT

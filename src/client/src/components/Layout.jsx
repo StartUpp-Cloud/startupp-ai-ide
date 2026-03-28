@@ -30,7 +30,7 @@ const Layout = ({ children }) => {
                 </span>
               </div>
               <span className="font-display font-semibold text-[15px] text-surface-100 tracking-tight">
-                Prompt Maker
+                StartUpp AI IDE
               </span>
             </Link>
 

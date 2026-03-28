@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# AI Prompt Maker PM2 Startup Script
+# StartUpp AI IDE PM2 Startup Script
 # This script builds the frontend and starts the production server with PM2
 
-echo "🚀 Starting AI Prompt Maker with PM2..."
+echo "🚀 Starting StartUpp AI IDE with PM2..."
 
 # Check if PM2 is installed
 if ! command -v pm2 &> /dev/null; then
@@ -27,12 +27,12 @@ fi
 
 # Stop any existing PM2 processes
 echo "🛑 Stopping existing PM2 processes..."
-pm2 stop ai-prompt-maker-api 2>/dev/null || true
-pm2 delete ai-prompt-maker-api 2>/dev/null || true
+pm2 stop ai-ide-api 2>/dev/null || true
+pm2 delete ai-ide-api 2>/dev/null || true
 
 # Start the production API server only; it serves the built frontend itself.
 echo "▶️  Starting production server with PM2..."
-pm2 start ecosystem.config.cjs --only ai-prompt-maker-api --env production
+pm2 start ecosystem.config.cjs --only ai-ide-api --env production
 
 # Check if PM2 start was successful
 if [ $? -eq 0 ]; then
@@ -44,9 +44,9 @@ if [ $? -eq 0 ]; then
     echo "🔍 Useful PM2 commands:"
     echo "   pm2 logs                    - View all logs"
     echo "   pm2 monit                   - Monitor processes"
-    echo "   pm2 restart ai-prompt-maker-api  - Restart the app"
-    echo "   pm2 stop ai-prompt-maker-api     - Stop the app"
-    echo "   pm2 delete ai-prompt-maker-api   - Remove it from PM2"
+    echo "   pm2 restart ai-ide-api  - Restart the app"
+    echo "   pm2 stop ai-ide-api     - Stop the app"
+    echo "   pm2 delete ai-ide-api   - Remove it from PM2"
     echo ""
     echo "🌐 Your app is now running with PM2:"
     echo "   App: http://localhost:55590"

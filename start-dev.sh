@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# AI Prompt Maker Development Startup Script
+# StartUpp AI IDE Development Startup Script
 # This script starts both frontend and backend for development
 
-echo "🚀 Starting AI Prompt Maker in Development Mode..."
+echo "🚀 Starting StartUpp AI IDE in Development Mode..."
 
 # Install dependencies if needed
 echo "📦 Installing dependencies..."

@@ -1,7 +1,7 @@
 {
-  "name": "startupp-ai-prompt-maker",
+  "name": "startupp-ai-ide",
   "version": "1.0.0",
-  "description": "AI Prompt Maker with Project Management",
+  "description": "StartUpp AI IDE - AI-assisted development environment",
   "type": "module",
   "main": "src/server/index.js",
   "scripts": {
@@ -19,8 +19,8 @@
     "pm2:logs": "pm2 logs",
     "pm2:monit": "pm2 monit",
     "pm2:status": "pm2 status",
-    "pm2:start:prod": "pm2 start ecosystem.config.cjs --only ai-prompt-maker-api --env production",
-    "pm2:reload:prod": "pm2 reload ecosystem.config.cjs --only ai-prompt-maker-api --env production",
+    "pm2:start:prod": "pm2 start ecosystem.config.cjs --only ai-ide-api --env production",
+    "pm2:reload:prod": "pm2 reload ecosystem.config.cjs --only ai-ide-api --env production",
     "pm2:start:both": "pm2 start ecosystem.config.cjs",
     "pm2:stop:both": "pm2 stop ecosystem.config.cjs",
     "pm2:restart:both": "pm2 restart ecosystem.config.cjs",

@@ -432,7 +432,7 @@ export default function IDE() {
         </div>
       )}
 
-      {/* Middle Panel - AI Prompt Maker */}
+      {/* Middle Panel - AI Prompt */}
       <div
         className="flex flex-col bg-surface-800 border-r border-surface-700"
         style={{ width: middlePanelWidth }}
