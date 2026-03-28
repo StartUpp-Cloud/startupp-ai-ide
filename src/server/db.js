@@ -39,6 +39,7 @@ const defaultData = {
   activities: [],
   taskQueue: [],
   orchestratorExecutions: [],
+  schedules: [],
   safetySettings: { ...defaultSafetySettings },
 };
 
@@ -62,6 +63,7 @@ export async function initDB() {
   if (!db.data.activities) db.data.activities = [];
   if (!db.data.taskQueue) db.data.taskQueue = [];
   if (!db.data.orchestratorExecutions) db.data.orchestratorExecutions = [];
+  if (!db.data.schedules) db.data.schedules = [];
   if (!db.data.safetySettings) db.data.safetySettings = { ...defaultSafetySettings };
   await db.write();
   console.log("Database initialized at:", dbPath);

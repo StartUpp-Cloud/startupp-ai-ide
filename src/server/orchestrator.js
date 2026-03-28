@@ -23,6 +23,7 @@ const DEFAULT_CONFIG = {
   runTests: false,
   testCommand: null,
   maxRetries: 1,
+  gitStrategy: 'current-branch', // 'new-branch' | 'current-branch'
 };
 
 /**
@@ -94,16 +95,28 @@ class Orchestrator extends EventEmitter {
         initialCommit = commits[0].hash;
       }
 
-      // Create a dedicated branch for this plan execution
-      const branch = gitManager.createBranch(projectPath, planTitle || 'autonomous-plan');
-      if (branch) {
+      // Only create a new branch if gitStrategy says so
+      if (mergedConfig.gitStrategy === 'new-branch') {
+        const branch = gitManager.createBranch(projectPath, planTitle || 'autonomous-plan');
+        if (branch) {
+          activityFeed.log({
+            projectId,
+            executionId,
+            sessionId,
+            type: 'git-branch',
+            title: `Created branch: ${branch}`,
+            metadata: { branch, planTitle },
+          });
+        }
+      } else {
+        const currentBranch = gitManager.getCurrentBranch(projectPath);
         activityFeed.log({
           projectId,
           executionId,
           sessionId,
           type: 'git-branch',
-          title: `Created branch: ${branch}`,
-          metadata: { branch, planTitle },
+          title: `Working on existing branch: ${currentBranch}`,
+          metadata: { branch: currentBranch, planTitle },
         });
       }
     }

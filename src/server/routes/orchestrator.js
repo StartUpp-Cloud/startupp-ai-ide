@@ -7,6 +7,7 @@ import express from 'express';
 import { orchestrator } from '../orchestrator.js';
 import { ptyManager } from '../ptyManager.js';
 import { activityFeed } from '../activityFeed.js';
+import { gitManager } from '../gitManager.js';
 
 const router = express.Router();
 
@@ -189,6 +190,38 @@ router.post('/kill/:executionId', (req, res) => {
     res.json({ executionId, status: 'killed' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to kill execution', message: error.message });
+  }
+});
+
+/**
+ * GET /api/orchestrator/git-info - Get current git state for a project
+ * Used by frontend to show branch choice before starting execution
+ */
+router.get('/git-info', (req, res) => {
+  try {
+    const { projectPath } = req.query;
+    if (!projectPath) {
+      return res.status(400).json({ error: 'projectPath query param required' });
+    }
+
+    const isRepo = gitManager.isGitRepo(projectPath);
+    if (!isRepo) {
+      return res.json({ isGitRepo: false });
+    }
+
+    const branch = gitManager.getCurrentBranch(projectPath);
+    const status = gitManager.getStatus(projectPath);
+    const isMainBranch = ['main', 'master', 'develop', 'dev'].includes(branch);
+
+    res.json({
+      isGitRepo: true,
+      branch,
+      isMainBranch,
+      hasChanges: status ? (status.modified.length + status.added.length + status.deleted.length + status.untracked.length) > 0 : false,
+      status,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

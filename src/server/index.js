@@ -32,8 +32,10 @@ import activityRoutes from "./routes/activity.js";
 import memoryRoutes from "./routes/memory.js";
 import safetyRoutes from "./routes/safety.js";
 import contextRoutes from "./routes/context.js";
+import schedulerRoutes from "./routes/scheduler.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
+import { scheduler } from "./scheduler.js";
 
 // Load environment variables
 dotenv.config();
@@ -86,6 +88,10 @@ async function startServer() {
     await bigProjectPlanner.init();
     console.log("Big project planner ready");
 
+    // Initialize scheduler
+    await scheduler.init();
+    console.log("Scheduler ready");
+
     // API routes
     app.use("/api/projects", projectRoutes);
     app.use("/api/projects", promptRoutes); // This will handle /api/projects/:id/prompts
@@ -103,6 +109,7 @@ async function startServer() {
     app.use("/api/memory", memoryRoutes);
     app.use("/api/safety", safetyRoutes);
     app.use("/api/context", contextRoutes);
+    app.use("/api/schedules", schedulerRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

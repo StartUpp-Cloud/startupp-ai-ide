@@ -13,7 +13,7 @@ const CLI_TOOLS = [
   { id: 'aider', name: 'Aider', icon: '\u{1F465}' },
 ];
 
-export default function Terminal({ projectId, projects = [], onSessionChange }) {
+export default function Terminal({ projectId, projects = [], onSessionChange, isUtility = false }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -117,11 +117,16 @@ export default function Terminal({ projectId, projects = [], onSessionChange }) 
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(terminalRef.current);
 
-    xterm.writeln('\x1b[1;34m\u256D\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256E\x1b[0m');
-    xterm.writeln('\x1b[1;34m\u2502\x1b[0m   \x1b[1;36mStartUpp AI IDE Terminal\x1b[0m                    \x1b[1;34m\u2502\x1b[0m');
-    xterm.writeln('\x1b[1;34m\u2502\x1b[0m   Select a project to start a session          \x1b[1;34m\u2502\x1b[0m');
-    xterm.writeln('\x1b[1;34m\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256F\x1b[0m');
-    xterm.writeln('');
+    if (isUtility) {
+      xterm.writeln('\x1b[90m── Utility Shell ──\x1b[0m');
+      xterm.writeln('');
+    } else {
+      xterm.writeln('\x1b[1;34m\u256D\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256E\x1b[0m');
+      xterm.writeln('\x1b[1;34m\u2502\x1b[0m   \x1b[1;36mStartUpp AI IDE Terminal\x1b[0m                    \x1b[1;34m\u2502\x1b[0m');
+      xterm.writeln('\x1b[1;34m\u2502\x1b[0m   Select a project to start a session          \x1b[1;34m\u2502\x1b[0m');
+      xterm.writeln('\x1b[1;34m\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256F\x1b[0m');
+      xterm.writeln('');
+    }
 
     return () => {
       resizeObserver.disconnect();
@@ -326,6 +331,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange }) 
 
   // Auto-create or attach session when projectId changes
   useEffect(() => {
+    if (isUtility) return; // Utility terminal doesn't auto-create sessions
     if (!projectId || !connected || !wsRef.current) return;
 
     const existingSessionId = projectSessionsRef.current.get(projectId);
@@ -352,7 +358,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange }) 
         rows: xtermRef.current?.rows || 30,
       }));
     }
-  }, [projectId, connected]);
+  }, [projectId, connected, isUtility]);
 
   // Create new session (manual)
   const createSession = useCallback(() => {
@@ -433,12 +439,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange }) 
     setPromptSuggestion(null);
   }, []);
 
-  // Expose sendToTerminal method
+  // Expose sendToTerminal method (only for main terminal, not utility)
   useEffect(() => {
-    if (window) {
+    if (window && !isUtility) {
       window.sendToTerminal = sendToTerminal;
     }
-  }, [sendToTerminal]);
+  }, [sendToTerminal, isUtility]);
 
   // Custom response input state
   const [customResponse, setCustomResponse] = useState('');
@@ -447,110 +453,145 @@ export default function Terminal({ projectId, projects = [], onSessionChange }) 
     <div className="flex flex-col h-full bg-[#1a1b26] rounded-lg overflow-hidden border border-gray-700">
       {/* ── Top Control Bar ── */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-gray-800/80 border-b border-gray-700 flex-shrink-0">
-        {/* Left: session tabs + CLI tools */}
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          {/* Session tabs (inline) */}
-          {sessions.length > 1 && (
-            <div className="flex items-center gap-0.5 overflow-x-auto mr-2">
-              {sessions.map((s) => {
-                const isActive = s.id === sessionId;
-                const proj = projects.find(p => p.id === s.projectId);
-                const label = proj ? proj.name : 'Session';
-                return (
-                  <button
-                    key={s.id}
-                    onClick={() => attachToSession(s.id)}
-                    className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded whitespace-nowrap transition-colors ${
-                      isActive
-                        ? 'bg-blue-500/20 text-blue-300'
-                        : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700/50'
-                    }`}
-                  >
-                    <FolderOpen className="w-2.5 h-2.5" />
-                    <span className="max-w-20 truncate">{label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
+        {isUtility ? (
+          <>
+            {/* Utility: minimal toolbar */}
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <button
+                onClick={createSession}
+                disabled={!connected}
+                className="px-2 py-0.5 text-[11px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
+              >
+                {sessionId ? 'New Shell' : 'Start Shell'}
+              </button>
 
-          <select
-            value={selectedCLI}
-            onChange={(e) => setSelectedCLI(e.target.value)}
-            disabled={!!sessionId}
-            className="px-2 py-0.5 text-[11px] bg-gray-700 border border-gray-600 rounded text-gray-200 disabled:opacity-50"
-          >
-            {CLI_TOOLS.map((tool) => (
-              <option key={tool.id} value={tool.id}>{tool.icon} {tool.name}</option>
-            ))}
-          </select>
-
-          <button
-            onClick={createSession}
-            disabled={!connected}
-            className="px-2 py-0.5 text-[11px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
-          >
-            {sessionId ? 'New' : 'Start'}
-          </button>
-
-          {sessionId && (
-            <button
-              onClick={killSession}
-              className="px-2 py-0.5 text-[11px] bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors"
-            >
-              Kill
-            </button>
-          )}
-
-          {sessionId && selectedCLI === 'shell' && (
-            <div className="flex items-center gap-0.5 ml-1 pl-1 border-l border-gray-600">
-              {CLI_TOOLS.filter(t => t.id !== 'shell').map((tool) => (
+              {sessionId && (
                 <button
-                  key={tool.id}
-                  onClick={() => startCLI(tool.id)}
-                  className="px-1.5 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
-                  title={`Start ${tool.name}`}
+                  onClick={killSession}
+                  className="px-2 py-0.5 text-[11px] bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors"
                 >
-                  {tool.icon}
+                  Kill
                 </button>
-              ))}
+              )}
             </div>
-          )}
-        </div>
 
-        {/* Right: auto-respond toggle + settings + status */}
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          <button
-            onClick={() => setAutoResponderEnabled(prev => !prev)}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
-              autoResponderEnabled
-                ? 'bg-purple-500/25 text-purple-300 border border-purple-500/30'
-                : 'bg-gray-700 text-gray-400 border border-gray-600 hover:border-gray-500'
-            }`}
-          >
-            <Zap className="w-3 h-3" />
-            Auto
-          </button>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <div className={`w-2 h-2 rounded-full ${
+                status === 'connected' ? 'bg-green-500' :
+                status === 'connecting' ? 'bg-yellow-500 animate-pulse' :
+                status === 'error' ? 'bg-red-500' :
+                'bg-gray-500'
+              }`} title={status} />
+            </div>
+          </>
+        ) : (
+          <>
+            {/* Main terminal: full toolbar */}
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              {/* Session tabs (inline) */}
+              {sessions.length > 1 && (
+                <div className="flex items-center gap-0.5 overflow-x-auto mr-2">
+                  {sessions.map((s) => {
+                    const isActive = s.id === sessionId;
+                    const proj = projects.find(p => p.id === s.projectId);
+                    const label = proj ? proj.name : 'Session';
+                    return (
+                      <button
+                        key={s.id}
+                        onClick={() => attachToSession(s.id)}
+                        className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded whitespace-nowrap transition-colors ${
+                          isActive
+                            ? 'bg-blue-500/20 text-blue-300'
+                            : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700/50'
+                        }`}
+                      >
+                        <FolderOpen className="w-2.5 h-2.5" />
+                        <span className="max-w-20 truncate">{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
 
-          <button
-            onClick={() => setShowLLMSettings(true)}
-            className="p-1 rounded bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600 transition-colors"
-            title="LLM Settings"
-          >
-            <Cpu className="w-3 h-3" />
-          </button>
+              <select
+                value={selectedCLI}
+                onChange={(e) => setSelectedCLI(e.target.value)}
+                disabled={!!sessionId}
+                className="px-2 py-0.5 text-[11px] bg-gray-700 border border-gray-600 rounded text-gray-200 disabled:opacity-50"
+              >
+                {CLI_TOOLS.map((tool) => (
+                  <option key={tool.id} value={tool.id}>{tool.icon} {tool.name}</option>
+                ))}
+              </select>
 
-          <div className={`w-2 h-2 rounded-full ${
-            status === 'connected' ? 'bg-green-500' :
-            status === 'connecting' ? 'bg-yellow-500 animate-pulse' :
-            status === 'error' ? 'bg-red-500' :
-            'bg-gray-500'
-          }`} title={status} />
-        </div>
+              <button
+                onClick={createSession}
+                disabled={!connected}
+                className="px-2 py-0.5 text-[11px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
+              >
+                {sessionId ? 'New' : 'Start'}
+              </button>
+
+              {sessionId && (
+                <button
+                  onClick={killSession}
+                  className="px-2 py-0.5 text-[11px] bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors"
+                >
+                  Kill
+                </button>
+              )}
+
+              {sessionId && selectedCLI === 'shell' && (
+                <div className="flex items-center gap-0.5 ml-1 pl-1 border-l border-gray-600">
+                  {CLI_TOOLS.filter(t => t.id !== 'shell').map((tool) => (
+                    <button
+                      key={tool.id}
+                      onClick={() => startCLI(tool.id)}
+                      className="px-1.5 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
+                      title={`Start ${tool.name}`}
+                    >
+                      {tool.icon}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Right: auto-respond toggle + settings + status */}
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <button
+                onClick={() => setAutoResponderEnabled(prev => !prev)}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
+                  autoResponderEnabled
+                    ? 'bg-purple-500/25 text-purple-300 border border-purple-500/30'
+                    : 'bg-gray-700 text-gray-400 border border-gray-600 hover:border-gray-500'
+                }`}
+              >
+                <Zap className="w-3 h-3" />
+                Auto
+              </button>
+
+              <button
+                onClick={() => setShowLLMSettings(true)}
+                className="p-1 rounded bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600 transition-colors"
+                title="LLM Settings"
+              >
+                <Cpu className="w-3 h-3" />
+              </button>
+
+              <div className={`w-2 h-2 rounded-full ${
+                status === 'connected' ? 'bg-green-500' :
+                status === 'connecting' ? 'bg-yellow-500 animate-pulse' :
+                status === 'error' ? 'bg-red-500' :
+                'bg-gray-500'
+              }`} title={status} />
+            </div>
+          </>
+        )}
       </div>
 
       {/* ── AI Action Bar (shown when model suggests a response) ── */}
-      {promptSuggestion && (
+      {!isUtility && promptSuggestion && (
         <div className={`px-3 py-2 border-b flex-shrink-0 ${
           promptSuggestion.riskLevel === 'critical' || promptSuggestion.riskLevel === 'high'
             ? 'bg-red-950/60 border-red-500/30'
@@ -650,14 +691,16 @@ export default function Terminal({ projectId, projects = [], onSessionChange }) 
       <div
         ref={terminalRef}
         className="flex-1 p-2"
-        style={{ minHeight: '300px' }}
+        style={{ minHeight: isUtility ? '120px' : '300px' }}
       />
 
       {/* LLM Settings Panel */}
-      <LLMSettingsPanel
-        isOpen={showLLMSettings}
-        onClose={() => setShowLLMSettings(false)}
-      />
+      {!isUtility && (
+        <LLMSettingsPanel
+          isOpen={showLLMSettings}
+          onClose={() => setShowLLMSettings(false)}
+        />
+      )}
     </div>
   );
 }

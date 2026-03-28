@@ -7,6 +7,7 @@ import PlansPanel from '../components/PlansPanel';
 import FilesPanel from '../components/FilesPanel';
 import BigProjectPanel from '../components/BigProjectPanel';
 import ActivityFeed from '../components/ActivityFeed';
+import SchedulerPanel from '../components/SchedulerPanel';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import {
   FolderOpen,
@@ -37,6 +38,9 @@ import {
   PanelLeftOpen,
   ListTodo,
   X,
+  GitBranch,
+  Clock,
+  ChevronUp,
 } from 'lucide-react';
 
 // Storage keys
@@ -97,6 +101,9 @@ export default function IDE() {
   const [currentSessionId, setCurrentSessionId] = useState(() => {
     return localStorage.getItem(STORAGE_KEYS.SESSION_ID) || null;
   });
+
+  // Utility terminal state
+  const [utilTerminalCollapsed, setUtilTerminalCollapsed] = useState(true);
 
   // Resizer state
   const [isResizing, setIsResizing] = useState(null);
@@ -228,12 +235,34 @@ export default function IDE() {
     }
   };
 
-  // Start autonomous execution via WebSocket
-  const handleStartAutonomous = () => {
+  // Git branch state for pre-execution choice
+  const [gitInfo, setGitInfo] = useState(null); // null | { isGitRepo, branch, isMainBranch, hasChanges }
+  const [showBranchChoice, setShowBranchChoice] = useState(false);
+
+  // Start autonomous execution — first check git state
+  const handleStartAutonomous = async () => {
     if (!planSteps || !currentSessionId || !selectedProject) return;
-    // Send orchestrator-start via the sendToTerminal's WebSocket
-    // But we need direct WS access... The Terminal component exposes window.sendToTerminal
-    // For orchestrator commands, we need to go through the API instead
+
+    const projectPath = selectedProject.folderPath;
+    if (projectPath) {
+      try {
+        const res = await fetch(`/api/orchestrator/git-info?projectPath=${encodeURIComponent(projectPath)}`);
+        const info = await res.json();
+        setGitInfo(info);
+        if (info.isGitRepo) {
+          // Show branch choice dialog
+          setShowBranchChoice(true);
+          return;
+        }
+      } catch { /* not a git repo or path issue — proceed without git */ }
+    }
+
+    // No git repo — start directly
+    startExecution('current-branch');
+  };
+
+  const startExecution = (gitStrategy) => {
+    setShowBranchChoice(false);
     fetch('/api/orchestrator/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -244,7 +273,7 @@ export default function IDE() {
         steps: planSteps,
         planTitle: planTitle,
         cliTool: 'claude',
-        config: { autoCommit: true, runTests: false, maxRetries: 1 },
+        config: { autoCommit: true, runTests: false, maxRetries: 1, gitStrategy },
       }),
     }).then(res => res.json()).then(data => {
       if (data.executionId) {
@@ -363,6 +392,13 @@ export default function IDE() {
         return (
           <ActivityFeed projectId={selectedProjectId} />
         );
+      case 'scheduler':
+        return (
+          <SchedulerPanel
+            projectId={selectedProjectId}
+            projectPath={selectedProject?.folderPath}
+          />
+        );
       default:
         return (
           <ProjectManagerPanel
@@ -476,6 +512,18 @@ export default function IDE() {
               >
                 <Zap className="w-3.5 h-3.5" />
                 <span>Activity</span>
+              </button>
+              <button
+                onClick={() => setLeftPanelTab('scheduler')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs transition-colors ${
+                  leftPanelTab === 'scheduler'
+                    ? 'text-primary-400 bg-primary-500/10 border-b-2 border-primary-500'
+                    : 'text-surface-400 hover:text-surface-200'
+                }`}
+                title="Scheduled Tasks"
+              >
+                <Clock className="w-3.5 h-3.5" />
+                <span>Cron</span>
               </button>
               <button
                 onClick={() => setLeftPanelCollapsed(true)}
@@ -814,6 +862,41 @@ export default function IDE() {
                         )}
                       </div>
 
+                      {/* Branch choice dialog */}
+                      {showBranchChoice && gitInfo && (
+                        <div className="p-2.5 bg-surface-850 border border-surface-700 rounded-lg space-y-2">
+                          <div className="flex items-center gap-2">
+                            <GitBranch className="w-3.5 h-3.5 text-primary-400" />
+                            <span className="text-xs font-medium text-surface-200">
+                              On branch: <code className="text-primary-300">{gitInfo.branch}</code>
+                            </span>
+                          </div>
+                          {gitInfo.hasChanges && (
+                            <p className="text-[10px] text-yellow-400">Has uncommitted changes</p>
+                          )}
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => startExecution('current-branch')}
+                              className="flex-1 py-1.5 text-xs bg-primary-500 hover:bg-primary-600 text-white rounded transition-colors"
+                            >
+                              Continue on {gitInfo.branch}
+                            </button>
+                            <button
+                              onClick={() => startExecution('new-branch')}
+                              className="flex-1 py-1.5 text-xs bg-surface-700 hover:bg-surface-600 text-surface-200 rounded transition-colors"
+                            >
+                              New branch
+                            </button>
+                          </div>
+                          <button
+                            onClick={() => setShowBranchChoice(false)}
+                            className="w-full text-[10px] text-surface-500 hover:text-surface-300"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )}
+
                       {planCurrentStep >= planSteps.length && (
                         <p className="text-xs text-green-400 bg-green-500/10 rounded p-2 text-center">
                           Plan completed!
@@ -842,13 +925,39 @@ export default function IDE() {
         onMouseDown={() => setIsResizing('middle')}
       />
 
-      {/* Right Panel - Terminal */}
+      {/* Right Panel - Terminals */}
       <div className="flex-1 flex flex-col min-w-0">
-        <Terminal
-          projectId={selectedProjectId}
-          projects={projects}
-          onSessionChange={setCurrentSessionId}
-        />
+        {/* Main Terminal (AI Agent) */}
+        <div className="flex-1 flex flex-col min-h-0" style={{ flex: utilTerminalCollapsed ? 1 : 0.65 }}>
+          <Terminal
+            projectId={selectedProjectId}
+            projects={projects}
+            onSessionChange={setCurrentSessionId}
+          />
+        </div>
+
+        {/* Utility Terminal Divider */}
+        <div className="flex items-center bg-surface-800 border-y border-surface-700 px-2">
+          <button
+            onClick={() => setUtilTerminalCollapsed(prev => !prev)}
+            className="flex items-center gap-1.5 py-0.5 text-[11px] text-surface-400 hover:text-surface-200"
+          >
+            {utilTerminalCollapsed ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            <span>&gt;_ Utility Shell</span>
+          </button>
+        </div>
+
+        {/* Utility Terminal (manual commands) */}
+        {!utilTerminalCollapsed && (
+          <div className="flex flex-col min-h-0" style={{ flex: 0.35 }}>
+            <Terminal
+              projectId={selectedProjectId}
+              projects={projects}
+              onSessionChange={() => {}}
+              isUtility={true}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
