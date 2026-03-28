@@ -57,11 +57,7 @@ const corsOptions = {
   origin:
     NODE_ENV === "production"
       ? [process.env.FRONTEND_URL || "http://localhost:55590"]
-      : [
-          "http://localhost:3000",
-          "http://localhost:5173",
-          "http://localhost:55590",
-        ],
+      : true,
   credentials: true,
 };
 app.use(cors(corsOptions));
@@ -106,6 +102,26 @@ async function startServer() {
         environment: NODE_ENV,
         uptime: process.uptime(),
       });
+    });
+
+    // Setup status - used by onboarding gate
+    app.get("/api/setup-status", async (req, res) => {
+      try {
+        const { llmProvider } = await import("./llmProvider.js");
+        const ProjectModel = (await import("./models/Project.js")).default;
+        const settings = llmProvider.getSettings();
+        const projects = ProjectModel.getAll();
+        const health = await llmProvider.checkHealth().catch(() => ({ available: false }));
+        res.json({
+          llmEnabled: settings.enabled === true,
+          llmAvailable: health.available === true,
+          llmProvider: settings.provider,
+          hasProjects: projects.length > 0,
+          setupComplete: settings.enabled === true && health.available === true && projects.length > 0,
+        });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
     // Serve static files in production

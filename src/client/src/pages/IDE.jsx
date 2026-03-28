@@ -1,13 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useProjects } from '../contexts/ProjectContext';
-import { TASK_MODES, getTaskMode } from '../data/taskModes';
-import { PRESETS } from '../data/presets';
-import { AI_MODELS, getModel, formatPromptForModel } from '../data/models';
+// Task modes, presets, and model formatting removed — now using AI-assisted generation
 import Terminal, { useTerminal } from '../components/Terminal';
 import HistoryPanel from '../components/HistoryPanel';
 import PlansPanel from '../components/PlansPanel';
 import FilesPanel from '../components/FilesPanel';
 import BigProjectPanel from '../components/BigProjectPanel';
+import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import {
   FolderOpen,
   Files,
@@ -49,21 +48,7 @@ const STORAGE_KEYS = {
   LEFT_PANEL_TAB: 'ide-left-tab',
 };
 
-// Icon mapping for task modes
-const TASK_MODE_ICONS = {
-  Bug,
-  Sparkles,
-  RefreshCw,
-  Eye,
-  Zap,
-  Shield,
-  TestTube,
-  FileText,
-  FlaskConical,
-  Settings,
-};
-
-const getTaskModeIcon = (iconName) => TASK_MODE_ICONS[iconName] || Settings;
+// Icon mapping removed — AI-assisted generation replaces task modes
 
 export default function IDE() {
   const { projects, getProject, getGlobalRules } = useProjects();
@@ -90,16 +75,21 @@ export default function IDE() {
     return localStorage.getItem(STORAGE_KEYS.SELECTED_PROJECT) || null;
   });
   const [selectedProject, setSelectedProject] = useState(null);
-  const [expandedProjects, setExpandedProjects] = useState({});
   const [globalRules, setGlobalRules] = useState([]);
 
   // Prompt state
-  const [selectedTaskMode, setSelectedTaskMode] = useState('');
   const [promptText, setPromptText] = useState('');
   const [generatedPrompt, setGeneratedPrompt] = useState('');
-  const [targetModel, setTargetModel] = useState('claude');
-  const [includeGlobalRules, setIncludeGlobalRules] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiError, setAiError] = useState('');
+  const [panelMode, setPanelMode] = useState('prompt'); // 'prompt' | 'plan'
+
+  // Plan state
+  const [planSteps, setPlanSteps] = useState(null);
+  const [planTitle, setPlanTitle] = useState('');
+  const [planCurrentStep, setPlanCurrentStep] = useState(0);
+  const [planRunning, setPlanRunning] = useState(false);
 
   // Session state (with persistence)
   const [currentSessionId, setCurrentSessionId] = useState(() => {
@@ -176,68 +166,66 @@ export default function IDE() {
     }
   };
 
-  // Generate prompt
-  const generatePrompt = () => {
-    if (!selectedProject || !selectedTaskMode) return;
-
-    const taskMode = getTaskMode(selectedTaskMode);
-    if (!taskMode) return;
-
-    const templateText = selectedTaskMode === 'custom'
-      ? promptText
-      : taskMode.template.replace(/{projectName}/g, selectedProject.name);
-
-    const contextText = selectedTaskMode === 'custom'
-      ? promptText
-      : promptText
-        ? `${templateText}\n\nAdditional Context: ${promptText}`
-        : templateText;
-
-    const projectRules = selectedProject.rules || [];
-    const activeGlobalRules = includeGlobalRules
-      ? globalRules.filter(r => r.enabled !== false).map(r => r.text)
-      : [];
-
-    const presetRules = [];
-    (selectedProject.selectedPresets || []).forEach(presetId => {
-      const preset = PRESETS.find(p => p.id === presetId);
-      if (preset) {
-        preset.rules.forEach(rule => {
-          if (!presetRules.includes(rule)) {
-            presetRules.push(rule);
-          }
-        });
-      }
-    });
-
-    const allRules = [...new Set([
-      ...activeGlobalRules,
-      ...presetRules,
-      ...projectRules,
-      ...(taskMode.additionalRules || []),
-    ])];
-
-    const rulesSection = allRules.length > 0
-      ? `Rules:\n${allRules.map((rule, i) => `${i + 1}. ${rule}`).join('\n')}`
-      : '';
-
-    const sectionsContent = {
-      projectDetails: `Project: ${selectedProject.name}\nDescription: ${selectedProject.description}`,
-      rules: rulesSection,
-      context: contextText,
-    };
-
-    let prompt = formatPromptForModel(
-      sectionsContent,
-      targetModel,
-      ['projectDetails', 'rules', 'context']
-    );
-
-    if (taskMode.checklist?.length > 0) {
-      prompt += `\n\nBefore completing, verify:\n${taskMode.checklist.map(item => `[ ] ${item}`).join('\n')}`;
+  // AI-assisted prompt generation
+  const handleAIGenerate = async () => {
+    if (!selectedProject || !promptText.trim()) return;
+    try {
+      setAiGenerating(true);
+      setAiError('');
+      setGeneratedPrompt('');
+      const res = await fetch('/api/llm/generate-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: selectedProjectId,
+          description: promptText.trim(),
+          targetCLI: 'claude',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Generation failed');
+      setGeneratedPrompt(data.prompt);
+    } catch (err) {
+      setAiError(err.message);
+    } finally {
+      setAiGenerating(false);
     }
+  };
 
-    setGeneratedPrompt(prompt);
+  // AI-assisted plan generation
+  const handleAIPlan = async () => {
+    if (!selectedProject || !promptText.trim()) return;
+    try {
+      setAiGenerating(true);
+      setAiError('');
+      setPlanSteps(null);
+      const res = await fetch('/api/llm/generate-plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: selectedProjectId,
+          goal: promptText.trim(),
+          targetCLI: 'claude',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || data.raw || 'Plan generation failed');
+      setPlanTitle(data.plan.title || 'Plan');
+      setPlanSteps(data.plan.steps || []);
+      setPlanCurrentStep(0);
+    } catch (err) {
+      setAiError(err.message);
+    } finally {
+      setAiGenerating(false);
+    }
+  };
+
+  // Execute the current plan step
+  const handlePlanExecute = () => {
+    if (!planSteps || planCurrentStep >= planSteps.length || !currentSessionId) return;
+    const step = planSteps[planCurrentStep];
+    sendToTerminal(step.prompt + '\n');
+    setPlanCurrentStep(prev => prev + 1);
   };
 
   // Send to terminal
@@ -332,57 +320,13 @@ export default function IDE() {
         );
       default:
         return (
-          <div className="flex flex-col h-full">
-            <div className="flex-1 overflow-y-auto py-2">
-              {projects.map((project) => (
-                <div key={project.id}>
-                  <button
-                    onClick={() => {
-                      setSelectedProjectId(project.id);
-                      setExpandedProjects(prev => ({
-                        ...prev,
-                        [project.id]: !prev[project.id],
-                      }));
-                    }}
-                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-surface-750 transition-colors ${
-                      selectedProjectId === project.id ? 'bg-primary-500/10 text-primary-300' : 'text-surface-300'
-                    }`}
-                  >
-                    {expandedProjects[project.id] ? (
-                      <ChevronDown className="w-3 h-3 text-surface-500" />
-                    ) : (
-                      <ChevronRight className="w-3 h-3 text-surface-500" />
-                    )}
-                    <FolderOpen className="w-4 h-4 text-surface-400" />
-                    <span className="text-sm truncate flex-1">{project.name}</span>
-                  </button>
-
-                  {expandedProjects[project.id] && (
-                    <div className="pl-8 pr-2 py-1 space-y-1">
-                      {project.rules?.length > 0 && (
-                        <div className="flex items-center gap-1.5 text-xs text-surface-500">
-                          <BookOpen className="w-3 h-3" />
-                          <span>{project.rules.length} rules</span>
-                        </div>
-                      )}
-                      {project.selectedPresets?.length > 0 && (
-                        <div className="flex items-center gap-1.5 text-xs text-surface-500">
-                          <Layers className="w-3 h-3" />
-                          <span>{project.selectedPresets.length} presets</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-
-              {projects.length === 0 && (
-                <div className="px-3 py-4 text-center text-surface-500 text-sm">
-                  No projects yet
-                </div>
-              )}
-            </div>
-          </div>
+          <ProjectManagerPanel
+            selectedProjectId={selectedProjectId}
+            onSelectProject={(id) => setSelectedProjectId(id)}
+            onProjectChanged={() => {
+              if (selectedProjectId) loadProject(selectedProjectId);
+            }}
+          />
         );
     }
   };
@@ -488,167 +432,283 @@ export default function IDE() {
         </div>
       )}
 
-      {/* Middle Panel - Prompt Maker */}
+      {/* Middle Panel - AI Prompt Maker */}
       <div
         className="flex flex-col bg-surface-800 border-r border-surface-700"
         style={{ width: middlePanelWidth }}
       >
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-surface-700">
-          <Sparkles className="w-4 h-4 text-primary-400" />
-          <span className="text-sm font-medium text-surface-200">Prompt Maker</span>
+        {/* Header with mode toggle */}
+        <div className="flex items-center justify-between px-3 py-2 border-b border-surface-700">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-primary-400" />
+            <span className="text-sm font-medium text-surface-200">AI Prompt</span>
+          </div>
+          {selectedProject && (
+            <div className="flex items-center bg-surface-850 rounded p-0.5">
+              <button
+                onClick={() => setPanelMode('prompt')}
+                className={`px-2 py-0.5 text-[11px] rounded transition-colors ${
+                  panelMode === 'prompt'
+                    ? 'bg-primary-500/20 text-primary-300'
+                    : 'text-surface-400 hover:text-surface-200'
+                }`}
+              >
+                Prompt
+              </button>
+              <button
+                onClick={() => setPanelMode('plan')}
+                className={`px-2 py-0.5 text-[11px] rounded transition-colors ${
+                  panelMode === 'plan'
+                    ? 'bg-primary-500/20 text-primary-300'
+                    : 'text-surface-400 hover:text-surface-200'
+                }`}
+              >
+                Plan
+              </button>
+            </div>
+          )}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-3 space-y-4">
+        <div className="flex-1 overflow-y-auto p-3 space-y-3">
           {selectedProject ? (
             <>
               {/* Selected Project */}
               <div className="p-2 rounded-lg bg-surface-850 border border-surface-700">
                 <div className="flex items-center gap-2">
                   <Target className="w-4 h-4 text-primary-400" />
-                  <span className="text-sm font-medium text-surface-200">
+                  <span className="text-sm font-medium text-surface-200 truncate">
                     {selectedProject.name}
                   </span>
                 </div>
-                <p className="text-xs text-surface-500 mt-1 line-clamp-2">
-                  {selectedProject.description}
-                </p>
               </div>
 
-              {/* Task Mode */}
-              <div>
-                <label className="text-xs font-medium text-surface-400 mb-2 block">
-                  Task Mode
-                </label>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {TASK_MODES.slice(0, 6).map((mode) => {
-                    const IconComponent = getTaskModeIcon(mode.icon);
-                    const isSelected = selectedTaskMode === mode.id;
-                    return (
-                      <button
-                        key={mode.id}
-                        onClick={() => setSelectedTaskMode(mode.id)}
-                        className={`flex items-center gap-1.5 p-2 rounded text-left text-xs transition-all ${
-                          isSelected
-                            ? 'bg-primary-500/15 text-primary-300 border border-primary-500/30'
-                            : 'bg-surface-850 text-surface-300 border border-surface-700 hover:border-surface-600'
-                        }`}
-                      >
-                        <IconComponent className="w-3 h-3 flex-shrink-0" />
-                        <span className="truncate">{mode.name}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              {panelMode === 'prompt' ? (
+                <>
+                  {/* Describe what you want */}
+                  <div>
+                    <label className="text-xs font-medium text-surface-400 mb-1.5 block">
+                      What do you want to do?
+                    </label>
+                    <textarea
+                      value={promptText}
+                      onChange={(e) => setPromptText(e.target.value)}
+                      rows={4}
+                      className="w-full px-2 py-1.5 text-xs bg-surface-850 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500 resize-none"
+                      placeholder="Describe the task... e.g. 'Add user authentication with JWT tokens' or 'Fix the login form validation bug'"
+                    />
+                  </div>
 
-              {/* Target Model */}
-              <div>
-                <label className="text-xs font-medium text-surface-400 mb-2 block">
-                  Target Model
-                </label>
-                <select
-                  value={targetModel}
-                  onChange={(e) => setTargetModel(e.target.value)}
-                  className="w-full px-2 py-1.5 text-xs bg-surface-850 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500"
-                >
-                  {AI_MODELS.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  {/* Generate with AI */}
+                  <button
+                    onClick={handleAIGenerate}
+                    disabled={!promptText.trim() || aiGenerating}
+                    className="w-full py-2 text-sm bg-primary-500 hover:bg-primary-600 disabled:bg-surface-700 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-2"
+                  >
+                    {aiGenerating ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Generating...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" />
+                        Generate with AI
+                      </>
+                    )}
+                  </button>
 
-              {/* Context */}
-              <div>
-                <label className="text-xs font-medium text-surface-400 mb-2 block">
-                  Additional Context
-                </label>
-                <textarea
-                  value={promptText}
-                  onChange={(e) => setPromptText(e.target.value)}
-                  rows={3}
-                  className="w-full px-2 py-1.5 text-xs bg-surface-850 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500 resize-none"
-                  placeholder="Add specific details..."
-                />
-              </div>
+                  {aiError && (
+                    <p className="text-xs text-danger-400 bg-danger-500/10 rounded p-2">{aiError}</p>
+                  )}
 
-              {/* Options */}
-              <label className="flex items-center gap-2 text-xs text-surface-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={includeGlobalRules}
-                  onChange={(e) => setIncludeGlobalRules(e.target.checked)}
-                  className="accent-primary-500"
-                />
-                Include global rules
-              </label>
+                  {/* Generated prompt - editable */}
+                  {generatedPrompt && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-surface-400">
+                          AI Draft
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-surface-500">
+                            {generatedPrompt.length} chars
+                          </span>
+                          <button
+                            onClick={() => setGeneratedPrompt('')}
+                            className="p-0.5 hover:bg-surface-700 rounded"
+                          >
+                            <X className="w-3 h-3 text-surface-500" />
+                          </button>
+                        </div>
+                      </div>
 
-              {/* Generate */}
-              <button
-                onClick={generatePrompt}
-                disabled={!selectedTaskMode}
-                className="w-full py-2 text-sm bg-primary-500 hover:bg-primary-600 disabled:bg-surface-700 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-2"
-              >
-                <Sparkles className="w-4 h-4" />
-                Generate Prompt
-              </button>
+                      <textarea
+                        value={generatedPrompt}
+                        onChange={(e) => setGeneratedPrompt(e.target.value)}
+                        rows={8}
+                        className="w-full px-2 py-1.5 text-xs bg-surface-900 border border-surface-700 rounded text-surface-300 focus:ring-1 focus:ring-primary-500 resize-y font-mono"
+                      />
 
-              {/* Generated */}
-              {generatedPrompt && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-surface-400">
-                      Generated
-                    </span>
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs text-surface-500">
-                        {generatedPrompt.length} chars
-                      </span>
-                      <button
-                        onClick={() => setGeneratedPrompt('')}
-                        className="p-0.5 hover:bg-surface-700 rounded"
-                      >
-                        <X className="w-3 h-3 text-surface-500" />
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleCopy}
+                          className="flex-1 py-1.5 text-xs bg-surface-700 hover:bg-surface-600 text-surface-200 rounded transition-colors flex items-center justify-center gap-1.5"
+                        >
+                          {copied ? (
+                            <><Check className="w-3 h-3" /> Copied</>
+                          ) : (
+                            <><Copy className="w-3 h-3" /> Copy</>
+                          )}
+                        </button>
+
+                        <button
+                          onClick={handleSendToTerminal}
+                          disabled={!currentSessionId}
+                          className="flex-1 py-1.5 text-xs bg-green-600 hover:bg-green-700 disabled:bg-surface-700 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-1.5"
+                          title={!currentSessionId ? 'Start a terminal session first' : 'Send to terminal'}
+                        >
+                          <Send className="w-3 h-3" />
+                          Send to CLI
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  )}
+                </>
+              ) : (
+                /* ── Plan Mode ── */
+                <>
+                  {!planSteps ? (
+                    <>
+                      <div>
+                        <label className="text-xs font-medium text-surface-400 mb-1.5 block">
+                          What's the big goal?
+                        </label>
+                        <textarea
+                          value={promptText}
+                          onChange={(e) => setPromptText(e.target.value)}
+                          rows={4}
+                          className="w-full px-2 py-1.5 text-xs bg-surface-850 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500 resize-none"
+                          placeholder="Describe the full goal... e.g. 'Build a complete user dashboard with auth, profile page, settings, and role-based access control'"
+                        />
+                      </div>
 
-                  <div className="p-2 bg-surface-900 rounded border border-surface-700 max-h-40 overflow-y-auto">
-                    <pre className="text-xs text-surface-300 whitespace-pre-wrap font-mono">
-                      {generatedPrompt}
-                    </pre>
-                  </div>
+                      <button
+                        onClick={handleAIPlan}
+                        disabled={!promptText.trim() || aiGenerating}
+                        className="w-full py-2 text-sm bg-primary-500 hover:bg-primary-600 disabled:bg-surface-700 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-2"
+                      >
+                        {aiGenerating ? (
+                          <>
+                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                            Planning...
+                          </>
+                        ) : (
+                          <>
+                            <ListTodo className="w-4 h-4" />
+                            Generate Plan
+                          </>
+                        )}
+                      </button>
 
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handleCopy}
-                      className="flex-1 py-1.5 text-xs bg-surface-700 hover:bg-surface-600 text-surface-200 rounded transition-colors flex items-center justify-center gap-1.5"
-                    >
-                      {copied ? (
-                        <>
-                          <Check className="w-3 h-3" />
-                          Copied
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3" />
-                          Copy
-                        </>
+                      {aiError && (
+                        <p className="text-xs text-danger-400 bg-danger-500/10 rounded p-2">{aiError}</p>
                       )}
-                    </button>
+                    </>
+                  ) : (
+                    <>
+                      {/* Plan header */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-surface-200">
+                          {planTitle || 'Plan'}
+                        </span>
+                        <button
+                          onClick={() => { setPlanSteps(null); setPlanTitle(''); setPlanCurrentStep(0); setPlanRunning(false); }}
+                          className="text-xs text-surface-400 hover:text-surface-200"
+                        >
+                          Clear
+                        </button>
+                      </div>
 
-                    <button
-                      onClick={handleSendToTerminal}
-                      disabled={!currentSessionId}
-                      className="flex-1 py-1.5 text-xs bg-green-600 hover:bg-green-700 disabled:bg-surface-700 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-1.5"
-                      title={!currentSessionId ? 'Start a terminal session first' : 'Send to terminal'}
-                    >
-                      <Send className="w-3 h-3" />
-                      Send to CLI
-                    </button>
-                  </div>
-                </div>
+                      {/* Plan steps */}
+                      <div className="space-y-1.5">
+                        {planSteps.map((step, i) => {
+                          const isCurrent = i === planCurrentStep;
+                          const isDone = i < planCurrentStep;
+                          const isWaiting = i > planCurrentStep;
+                          return (
+                            <div
+                              key={i}
+                              className={`p-2 rounded border text-xs transition-all ${
+                                isCurrent
+                                  ? 'bg-primary-500/10 border-primary-500/30 text-primary-200'
+                                  : isDone
+                                    ? 'bg-surface-850 border-surface-700/50 text-surface-500'
+                                    : 'bg-surface-850 border-surface-700 text-surface-300'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
+                                  isDone
+                                    ? 'bg-green-500/20 text-green-400'
+                                    : isCurrent
+                                      ? 'bg-primary-500/20 text-primary-300'
+                                      : 'bg-surface-700 text-surface-400'
+                                }`}>
+                                  {isDone ? <Check className="w-3 h-3" /> : i + 1}
+                                </span>
+                                <span className={`flex-1 ${isDone ? 'line-through' : ''}`}>
+                                  {step.title}
+                                </span>
+                                {step.requiresApproval && (
+                                  <Shield className="w-3 h-3 text-yellow-400 flex-shrink-0" title="Requires approval" />
+                                )}
+                              </div>
+                              {isCurrent && (
+                                <div className="mt-2 p-1.5 bg-surface-900 rounded text-[11px] text-surface-400 font-mono max-h-20 overflow-y-auto">
+                                  {step.prompt}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Plan controls */}
+                      <div className="flex gap-2">
+                        {!planRunning ? (
+                          <button
+                            onClick={handlePlanExecute}
+                            disabled={!currentSessionId || planCurrentStep >= planSteps.length}
+                            className="flex-1 py-1.5 text-xs bg-green-600 hover:bg-green-700 disabled:bg-surface-700 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-1.5"
+                          >
+                            <Send className="w-3 h-3" />
+                            {planCurrentStep > 0 ? 'Send Next Step' : 'Start Plan'}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => setPlanRunning(false)}
+                            className="flex-1 py-1.5 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded transition-colors flex items-center justify-center gap-1.5"
+                          >
+                            Pause
+                          </button>
+                        )}
+                        {planCurrentStep > 0 && planCurrentStep < planSteps.length && (
+                          <button
+                            onClick={() => setPlanCurrentStep(prev => prev + 1)}
+                            className="py-1.5 px-3 text-xs bg-surface-700 hover:bg-surface-600 text-surface-200 rounded transition-colors"
+                          >
+                            Skip
+                          </button>
+                        )}
+                      </div>
+
+                      {planCurrentStep >= planSteps.length && (
+                        <p className="text-xs text-green-400 bg-green-500/10 rounded p-2 text-center">
+                          Plan completed!
+                        </p>
+                      )}
+                    </>
+                  )}
+                </>
               )}
             </>
           ) : (
@@ -673,6 +733,7 @@ export default function IDE() {
       <div className="flex-1 flex flex-col min-w-0">
         <Terminal
           projectId={selectedProjectId}
+          projects={projects}
           onSessionChange={setCurrentSessionId}
         />
       </div>

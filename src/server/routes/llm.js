@@ -5,6 +5,7 @@
 
 import express from 'express';
 import { llmProvider } from '../llmProvider.js';
+import Project from '../models/Project.js';
 
 const router = express.Router();
 
@@ -249,6 +250,162 @@ router.put('/deepseek/config', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to update', message: error.message });
+  }
+});
+
+/**
+ * POST /api/llm/generate-prompt - AI-assisted prompt generation
+ * Takes a project + user description, returns a well-crafted prompt for a CLI agent
+ */
+router.post('/generate-prompt', async (req, res) => {
+  try {
+    const { projectId, description, targetCLI } = req.body;
+
+    if (!description?.trim()) {
+      return res.status(400).json({ error: 'description is required' });
+    }
+
+    if (!llmProvider.getSettings().enabled) {
+      return res.status(400).json({ error: 'LLM is not enabled. Enable it in LLM Settings.' });
+    }
+
+    // Build project context
+    let projectContext = '';
+    if (projectId) {
+      const project = Project.findById(projectId);
+      if (project) {
+        projectContext = `\n## Project: ${project.name}\nDescription: ${project.description}`;
+        if (project.rules?.length > 0) {
+          projectContext += `\n\nProject Rules:\n${project.rules.map((r, i) => `${i + 1}. ${r}`).join('\n')}`;
+        }
+        if (project.folderPath) {
+          projectContext += `\nWorkspace: ${project.folderPath}`;
+        }
+      }
+    }
+
+    const cli = targetCLI || 'claude';
+
+    const systemPrompt = `You are an expert prompt engineer. Your job is to take a developer's brief description of what they want to accomplish and turn it into a clear, detailed, actionable prompt that will be sent to an AI coding assistant (${cli}).
+
+## Output Rules
+- Write ONLY the prompt text. No explanations, no preamble, no markdown wrapping.
+- Do NOT wrap your response in thinking tags or reasoning blocks. Output the prompt directly.
+- The prompt should be comprehensive but concise — aim for 200-500 words max.
+- Include specific file paths, function names, or patterns when relevant to the project.
+- Reference the project rules so the AI assistant follows them.
+- Be explicit about what the expected outcome should be.
+- Structure the prompt with clear sections if the task has multiple parts.
+${projectContext}`;
+
+    const result = await llmProvider.generateResponse(description, {
+      systemPrompt,
+      maxTokens: 8192,
+      temperature: 0.4,
+    });
+
+    // Strip any <think>...</think> blocks from models that use internal reasoning
+    const cleanedPrompt = result.response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+    res.json({
+      prompt: cleanedPrompt,
+      provider: result.provider,
+      model: result.model,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Prompt generation failed', message: error.message });
+  }
+});
+
+/**
+ * POST /api/llm/generate-plan - AI-assisted plan generation
+ * Takes a project + goal, returns a multi-step plan with individual prompts
+ */
+router.post('/generate-plan', async (req, res) => {
+  try {
+    const { projectId, goal, targetCLI } = req.body;
+
+    if (!goal?.trim()) {
+      return res.status(400).json({ error: 'goal is required' });
+    }
+
+    if (!llmProvider.getSettings().enabled) {
+      return res.status(400).json({ error: 'LLM is not enabled. Enable it in LLM Settings.' });
+    }
+
+    // Build project context
+    let projectContext = '';
+    if (projectId) {
+      const project = Project.findById(projectId);
+      if (project) {
+        projectContext = `\n## Project: ${project.name}\nDescription: ${project.description}`;
+        if (project.rules?.length > 0) {
+          projectContext += `\n\nProject Rules:\n${project.rules.map((r, i) => `${i + 1}. ${r}`).join('\n')}`;
+        }
+        if (project.folderPath) {
+          projectContext += `\nWorkspace: ${project.folderPath}`;
+        }
+      }
+    }
+
+    const cli = targetCLI || 'claude';
+
+    const systemPrompt = `You are an expert project planner and prompt engineer. The developer has a goal they want to achieve. Break it down into sequential steps, where each step is an independent prompt that will be sent to an AI coding assistant (${cli}).
+
+## Output Format
+Respond with valid JSON only. No markdown, no wrapping, no thinking tags. Output the JSON directly. The format:
+{
+  "title": "Short plan title",
+  "steps": [
+    {
+      "title": "Brief step name",
+      "prompt": "The full prompt to send to the AI assistant for this step",
+      "requiresApproval": false
+    }
+  ]
+}
+
+## Planning Rules
+- Each step should be self-contained and achievable in one AI session interaction.
+- Order steps logically — later steps can depend on earlier ones.
+- Set "requiresApproval": true for steps that involve destructive operations, deployments, or major architectural changes.
+- Keep prompts focused — one clear task per step. Each prompt should be 100-300 words.
+- Include context from previous steps in later prompts when needed (e.g., "In the previous step we created X, now...").
+- Reference project rules so the AI assistant follows them.
+- Aim for 3-8 steps. Split large tasks, but don't over-fragment.
+${projectContext}`;
+
+    const result = await llmProvider.generateResponse(goal, {
+      systemPrompt,
+      maxTokens: 8192,
+      temperature: 0.4,
+    });
+
+    // Strip <think>...</think> blocks from models that use internal reasoning
+    const cleanedResponse = result.response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+    // Parse JSON from response
+    let plan;
+    try {
+      // Try to extract JSON if wrapped in markdown or extra text
+      let jsonStr = cleanedResponse;
+      const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (jsonMatch) jsonStr = jsonMatch[0];
+      plan = JSON.parse(jsonStr);
+    } catch {
+      return res.status(500).json({
+        error: 'Failed to parse plan from LLM response',
+        raw: result.response,
+      });
+    }
+
+    res.json({
+      plan,
+      provider: result.provider,
+      model: result.model,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Plan generation failed', message: error.message });
   }
 });
 

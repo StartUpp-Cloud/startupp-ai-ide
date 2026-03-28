@@ -220,9 +220,9 @@ const Dashboard = () => {
               : "Create your first project to start managing AI prompts with custom rules"}
           </p>
           {!searchTerm && (
-            <Link to="/project/new" className="btn-primary">
+            <Link to="/" className="btn-primary">
               <Plus className="w-4 h-4" />
-              Create Project
+              Open IDE
             </Link>
           )}
         </div>

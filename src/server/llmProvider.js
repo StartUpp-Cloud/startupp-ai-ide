@@ -290,50 +290,95 @@ class LLMProvider extends EventEmitter {
   async generateOllamaResponse(prompt, context) {
     const { endpoint, model, timeout } = this.settings.ollama;
 
-    const systemPrompt = this.buildSystemPrompt(context);
-    const userPrompt = this.buildUserPrompt(prompt, context);
+    const systemPrompt = context.systemPrompt || this.buildSystemPrompt(context);
+    const userPrompt = context.systemPrompt ? prompt : this.buildUserPrompt(prompt, context);
+    const maxTokens = context.maxTokens || this.settings.maxTokens;
+    const temperature = context.temperature ?? this.settings.temperature;
+    const useChat = !!context.systemPrompt; // Use chat API for custom prompts (works with all modern models)
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const effectiveTimeout = maxTokens > 1000 ? timeout * 4 : timeout;
+    const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
 
     try {
-      const response = await fetch(`${endpoint}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      let data;
+
+      if (useChat) {
+        // Use /api/chat for custom system prompts — works with chat-tuned models like qwen3.5
+        const response = await fetch(`${endpoint}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            stream: false,
+            options: {
+              temperature,
+              num_predict: maxTokens,
+            },
+          }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`Ollama error: ${error}`);
+        }
+
+        data = await response.json();
+        const content = data.message?.content || '';
+
+        return {
+          response: content.trim(),
+          provider: 'ollama',
           model,
-          prompt: userPrompt,
-          system: systemPrompt,
-          stream: false,
-          options: {
-            temperature: this.settings.temperature,
-            num_predict: this.settings.maxTokens,
-          },
-        }),
-        signal: controller.signal,
-      });
+          tokensUsed: data.eval_count,
+          duration: data.total_duration,
+        };
+      } else {
+        // Use /api/generate for auto-responder (backward-compatible)
+        const response = await fetch(`${endpoint}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            prompt: userPrompt,
+            system: systemPrompt,
+            stream: false,
+            options: {
+              temperature,
+              num_predict: maxTokens,
+            },
+          }),
+          signal: controller.signal,
+        });
 
-      clearTimeout(timeoutId);
+        clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Ollama error: ${error}`);
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`Ollama error: ${error}`);
+        }
+
+        data = await response.json();
+
+        return {
+          response: this.cleanResponse(data.response),
+          provider: 'ollama',
+          model,
+          tokensUsed: data.eval_count,
+          duration: data.total_duration,
+        };
       }
-
-      const data = await response.json();
-      const generatedResponse = this.cleanResponse(data.response);
-
-      return {
-        response: generatedResponse,
-        provider: 'ollama',
-        model,
-        tokensUsed: data.eval_count,
-        duration: data.total_duration,
-      };
     } catch (error) {
       clearTimeout(timeoutId);
       if (error.name === 'AbortError') {
-        throw new Error('Ollama request timed out');
+        throw new Error(`Ollama request timed out (${effectiveTimeout / 1000}s). The model may be too slow for this request. Try a smaller model or increase the timeout.`);
       }
       throw error;
     }
@@ -349,11 +394,13 @@ class LLMProvider extends EventEmitter {
       throw new Error('OpenAI API key not configured');
     }
 
-    const systemPrompt = this.buildSystemPrompt(context);
-    const userPrompt = this.buildUserPrompt(prompt, context);
+    const systemPrompt = context.systemPrompt || this.buildSystemPrompt(context);
+    const userPrompt = context.systemPrompt ? prompt : this.buildUserPrompt(prompt, context);
+    const maxTokens = context.maxTokens || this.settings.maxTokens;
+    const temperature = context.temperature ?? this.settings.temperature;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const timeoutId = setTimeout(() => controller.abort(), maxTokens > 1000 ? timeout * 3 : timeout);
 
     try {
       const response = await fetch(`${endpoint}/chat/completions`, {
@@ -368,8 +415,8 @@ class LLMProvider extends EventEmitter {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          max_tokens: this.settings.maxTokens,
-          temperature: this.settings.temperature,
+          max_tokens: maxTokens,
+          temperature,
         }),
         signal: controller.signal,
       });
@@ -382,7 +429,8 @@ class LLMProvider extends EventEmitter {
       }
 
       const data = await response.json();
-      const generatedResponse = this.cleanResponse(data.choices[0]?.message?.content || '');
+      const rawContent = data.choices[0]?.message?.content || '';
+      const generatedResponse = context.systemPrompt ? rawContent.trim() : this.cleanResponse(rawContent);
 
       return {
         response: generatedResponse,
@@ -409,11 +457,13 @@ class LLMProvider extends EventEmitter {
       throw new Error('DeepSeek API key not configured');
     }
 
-    const systemPrompt = this.buildSystemPrompt(context);
-    const userPrompt = this.buildUserPrompt(prompt, context);
+    const systemPrompt = context.systemPrompt || this.buildSystemPrompt(context);
+    const userPrompt = context.systemPrompt ? prompt : this.buildUserPrompt(prompt, context);
+    const maxTokens = context.maxTokens || this.settings.maxTokens;
+    const temperature = context.temperature ?? this.settings.temperature;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const timeoutId = setTimeout(() => controller.abort(), maxTokens > 1000 ? timeout * 3 : timeout);
 
     try {
       const response = await fetch(`${endpoint}/chat/completions`, {
@@ -428,8 +478,8 @@ class LLMProvider extends EventEmitter {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          max_tokens: this.settings.maxTokens,
-          temperature: this.settings.temperature,
+          max_tokens: maxTokens,
+          temperature,
         }),
         signal: controller.signal,
       });
@@ -442,7 +492,8 @@ class LLMProvider extends EventEmitter {
       }
 
       const data = await response.json();
-      const generatedResponse = this.cleanResponse(data.choices[0]?.message?.content || '');
+      const rawContent = data.choices[0]?.message?.content || '';
+      const generatedResponse = context.systemPrompt ? rawContent.trim() : this.cleanResponse(rawContent);
 
       return {
         response: generatedResponse,
@@ -606,8 +657,16 @@ class LLMProvider extends EventEmitter {
   cleanResponse(response) {
     if (!response) return '';
 
+    // Strip <think>...</think> blocks from reasoning models (qwen3.5, deepseek-r1, etc.)
+    let cleaned = response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+    // Strip any other XML-like tags models might emit
+    cleaned = cleaned.replace(/<\/?[a-z][a-z0-9_-]*>/gi, '').trim();
+
+    // Strip markdown code block wrappers
+    cleaned = cleaned.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '').trim();
+
     // Remove quotes if the response is wrapped in them
-    let cleaned = response.trim();
     if ((cleaned.startsWith('"') && cleaned.endsWith('"')) ||
         (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
       cleaned = cleaned.slice(1, -1);
@@ -615,11 +674,8 @@ class LLMProvider extends EventEmitter {
 
     // Remove common prefixes LLMs might add
     const prefixes = [
-      'Response: ',
-      'Answer: ',
-      'Output: ',
-      'Send: ',
-      'Reply: ',
+      'Response: ', 'Answer: ', 'Output: ', 'Send: ', 'Reply: ',
+      'Sure, ', 'Here is ', 'The response is: ', 'I would respond with: ',
     ];
     for (const prefix of prefixes) {
       if (cleaned.toLowerCase().startsWith(prefix.toLowerCase())) {
@@ -627,16 +683,28 @@ class LLMProvider extends EventEmitter {
       }
     }
 
+    // For auto-responder: only take the first line if it looks like the model added explanation
+    // (a single y/n followed by explanation lines)
+    const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length > 1) {
+      const firstWord = lines[0].toLowerCase();
+      if (['y', 'n', 'yes', 'no'].includes(firstWord)) {
+        cleaned = lines[0];
+      }
+    }
+
+    cleaned = cleaned.trim();
+
     // Normalize yes/no responses
     const lowerCleaned = cleaned.toLowerCase();
-    if (['yes', 'yeah', 'yep', 'affirmative', 'correct', 'true'].includes(lowerCleaned)) {
+    if (['yes', 'yeah', 'yep', 'affirmative', 'correct', 'true', 'sure', 'ok', 'okay', 'approve'].includes(lowerCleaned)) {
       return 'y';
     }
-    if (['no', 'nope', 'negative', 'false', 'deny'].includes(lowerCleaned)) {
+    if (['no', 'nope', 'negative', 'false', 'deny', 'reject', 'decline'].includes(lowerCleaned)) {
       return 'n';
     }
 
-    return cleaned.trim();
+    return cleaned;
   }
 
   /**

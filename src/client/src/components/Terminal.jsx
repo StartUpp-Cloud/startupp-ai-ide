@@ -2,18 +2,18 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { Zap, X, MessageSquare, Bot, Brain, Sparkles, Cpu, Settings, Shield, AlertTriangle } from 'lucide-react';
+import { Zap, X, MessageSquare, Bot, Brain, Sparkles, Cpu, Settings, Shield, AlertTriangle, FolderOpen } from 'lucide-react';
 import LLMSettingsPanel from './LLMSettingsPanel';
 import '@xterm/xterm/css/xterm.css';
 
 const CLI_TOOLS = [
   { id: 'shell', name: 'Shell', icon: '>' },
-  { id: 'claude', name: 'Claude Code', icon: '🤖' },
-  { id: 'copilot', name: 'GitHub Copilot', icon: '🐙' },
-  { id: 'aider', name: 'Aider', icon: '👥' },
+  { id: 'claude', name: 'Claude Code', icon: '\u{1F916}' },
+  { id: 'copilot', name: 'GitHub Copilot', icon: '\u{1F419}' },
+  { id: 'aider', name: 'Aider', icon: '\u{1F465}' },
 ];
 
-export default function Terminal({ projectId, onSessionChange }) {
+export default function Terminal({ projectId, projects = [], onSessionChange }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -37,6 +37,9 @@ export default function Terminal({ projectId, onSessionChange }) {
 
   // Settings panel state
   const [showLLMSettings, setShowLLMSettings] = useState(false);
+
+  // Track project-to-session mapping (projectId -> sessionId)
+  const projectSessionsRef = useRef(new Map());
 
   // Initialize xterm
   useEffect(() => {
@@ -85,23 +88,25 @@ export default function Terminal({ projectId, onSessionChange }) {
     xtermRef.current = xterm;
     fitAddonRef.current = fitAddon;
 
-    // Handle terminal input - use ref to get current sessionId
+    // Handle terminal input - always include sessionId so server doesn't rely on attachment state
     xterm.onData((data) => {
       if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
         wsRef.current.send(JSON.stringify({
           type: 'input',
+          sessionId: sessionIdRef.current,
           data,
         }));
       }
     });
 
-    // Handle resize - use ref to get current sessionId
+    // Handle resize - always include sessionId
     const handleResize = () => {
       if (fitAddonRef.current) {
         fitAddonRef.current.fit();
         if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
           wsRef.current.send(JSON.stringify({
             type: 'resize',
+            sessionId: sessionIdRef.current,
             cols: xterm.cols,
             rows: xterm.rows,
           }));
@@ -112,10 +117,10 @@ export default function Terminal({ projectId, onSessionChange }) {
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(terminalRef.current);
 
-    xterm.writeln('\x1b[1;34m╭──────────────────────────────────────────────╮\x1b[0m');
-    xterm.writeln('\x1b[1;34m│\x1b[0m   \x1b[1;36mAI Prompt IDE Terminal\x1b[0m                      \x1b[1;34m│\x1b[0m');
-    xterm.writeln('\x1b[1;34m│\x1b[0m   Select a CLI tool and create a session     \x1b[1;34m│\x1b[0m');
-    xterm.writeln('\x1b[1;34m╰──────────────────────────────────────────────╯\x1b[0m');
+    xterm.writeln('\x1b[1;34m\u256D\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256E\x1b[0m');
+    xterm.writeln('\x1b[1;34m\u2502\x1b[0m   \x1b[1;36mAI Prompt IDE Terminal\x1b[0m                      \x1b[1;34m\u2502\x1b[0m');
+    xterm.writeln('\x1b[1;34m\u2502\x1b[0m   Select a project to start a session          \x1b[1;34m\u2502\x1b[0m');
+    xterm.writeln('\x1b[1;34m\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256F\x1b[0m');
     xterm.writeln('');
 
     return () => {
@@ -128,7 +133,7 @@ export default function Terminal({ projectId, onSessionChange }) {
   // Connect to WebSocket
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.hostname}:55590/ws/terminal`;
+    const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
 
     const connect = () => {
       setStatus('connecting');
@@ -138,6 +143,11 @@ export default function Terminal({ projectId, onSessionChange }) {
         setConnected(true);
         setStatus('connected');
         wsRef.current = ws;
+
+        // Re-attach to current session if we had one (reconnection case)
+        if (sessionIdRef.current) {
+          ws.send(JSON.stringify({ type: 'attach', sessionId: sessionIdRef.current }));
+        }
 
         // Request session list
         ws.send(JSON.stringify({ type: 'list-sessions' }));
@@ -176,19 +186,28 @@ export default function Terminal({ projectId, onSessionChange }) {
   const handleWebSocketMessage = useCallback((msg) => {
     switch (msg.type) {
       case 'connected':
-        xtermRef.current?.writeln('\x1b[32m● Connected to terminal server\x1b[0m\n');
+        xtermRef.current?.writeln('\x1b[32m\u25CF Connected to terminal server\x1b[0m\n');
         break;
 
       case 'session-created':
         setSessionId(msg.sessionId);
-        setSessions(prev => [...prev, msg]);
+        setSessions(prev => {
+          const exists = prev.some(s => s.id === msg.sessionId);
+          if (exists) return prev;
+          return [...prev, { id: msg.sessionId, projectId: msg.projectId, cliTool: msg.cliTool, status: 'running' }];
+        });
+        // Track project-session mapping
+        if (msg.projectId) {
+          projectSessionsRef.current.set(msg.projectId, msg.sessionId);
+        }
         onSessionChange?.(msg.sessionId);
-        xtermRef.current?.writeln(`\x1b[32m● Session created: ${msg.sessionId}\x1b[0m\n`);
+        xtermRef.current?.writeln(`\x1b[32m\u25CF Session started\x1b[0m\n`);
         break;
 
       case 'attached':
         setSessionId(msg.session.id);
-        xtermRef.current?.writeln(`\x1b[32m● Attached to session: ${msg.session.id}\x1b[0m\n`);
+        onSessionChange?.(msg.session.id);
+        xtermRef.current?.writeln(`\x1b[32m\u25CF Attached to session\x1b[0m\n`);
         break;
 
       case 'output':
@@ -196,30 +215,55 @@ export default function Terminal({ projectId, onSessionChange }) {
         break;
 
       case 'exit':
-        xtermRef.current?.writeln(`\n\x1b[33m● Session exited (code: ${msg.exitCode})\x1b[0m`);
+        xtermRef.current?.writeln(`\n\x1b[33m\u25CF Session exited (code: ${msg.exitCode})\x1b[0m`);
         // Use ref to get current sessionId value
         if (msg.sessionId === sessionIdRef.current) {
           setSessionId(null);
+          onSessionChange?.(null);
         }
+        // Remove from project mapping
+        for (const [pid, sid] of projectSessionsRef.current.entries()) {
+          if (sid === msg.sessionId) {
+            projectSessionsRef.current.delete(pid);
+            break;
+          }
+        }
+        setSessions(prev => prev.filter(s => s.id !== msg.sessionId));
         break;
 
       case 'sessions-list':
         setSessions(msg.sessions);
+        // Rebuild project-session mapping from server state
+        const map = projectSessionsRef.current;
+        map.clear();
+        for (const s of msg.sessions) {
+          if (s.projectId) {
+            map.set(s.projectId, s.id);
+          }
+        }
         break;
 
       case 'error':
-        xtermRef.current?.writeln(`\x1b[31m✗ Error: ${msg.error}\x1b[0m`);
+        xtermRef.current?.writeln(`\x1b[31m\u2717 Error: ${msg.error}\x1b[0m`);
         break;
 
       case 'cli-started':
-        xtermRef.current?.writeln(`\x1b[32m● Started ${msg.cliTool}\x1b[0m\n`);
+        xtermRef.current?.writeln(`\x1b[32m\u25CF Started ${msg.cliTool}\x1b[0m\n`);
         break;
 
       case 'session-terminated':
         // Use ref to get current sessionId value
         if (msg.sessionId === sessionIdRef.current) {
           setSessionId(null);
-          xtermRef.current?.writeln('\n\x1b[33m● Session terminated\x1b[0m');
+          onSessionChange?.(null);
+          xtermRef.current?.writeln('\n\x1b[33m\u25CF Session terminated\x1b[0m');
+        }
+        // Remove from project mapping
+        for (const [pid, sid] of projectSessionsRef.current.entries()) {
+          if (sid === msg.sessionId) {
+            projectSessionsRef.current.delete(pid);
+            break;
+          }
         }
         setSessions(prev => prev.filter(s => s.id !== msg.sessionId));
         break;
@@ -228,6 +272,7 @@ export default function Terminal({ projectId, onSessionChange }) {
         // Session was killed, clear it
         if (msg.sessionId === sessionIdRef.current) {
           setSessionId(null);
+          onSessionChange?.(null);
         }
         break;
 
@@ -264,7 +309,7 @@ export default function Terminal({ projectId, onSessionChange }) {
 
       case 'llm-error':
         // LLM request failed - show error in terminal
-        xtermRef.current?.writeln(`\\x1b[33m[LLM] ${msg.error}\\x1b[0m`);
+        xtermRef.current?.writeln(`\x1b[33m[LLM] ${msg.error}\x1b[0m`);
         break;
 
       case 'auto-response-sent':
@@ -279,7 +324,37 @@ export default function Terminal({ projectId, onSessionChange }) {
     }
   }, [onSessionChange, autoResponderEnabled]);
 
-  // Create new session
+  // Auto-create or attach session when projectId changes
+  useEffect(() => {
+    if (!projectId || !connected || !wsRef.current) return;
+
+    const existingSessionId = projectSessionsRef.current.get(projectId);
+
+    if (existingSessionId) {
+      // Attach to existing session for this project
+      if (existingSessionId !== sessionIdRef.current) {
+        xtermRef.current?.clear();
+        xtermRef.current?.writeln('\x1b[36m\u25CF Switching to project session...\x1b[0m\n');
+        wsRef.current.send(JSON.stringify({
+          type: 'attach',
+          sessionId: existingSessionId,
+        }));
+      }
+    } else {
+      // Create a new session for this project
+      xtermRef.current?.clear();
+      xtermRef.current?.writeln('\x1b[36m\u25CF Starting session for project...\x1b[0m\n');
+      wsRef.current.send(JSON.stringify({
+        type: 'create-session',
+        projectId,
+        cliTool: null, // Start with shell
+        cols: xtermRef.current?.cols || 120,
+        rows: xtermRef.current?.rows || 30,
+      }));
+    }
+  }, [projectId, connected]);
+
+  // Create new session (manual)
   const createSession = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       return;
@@ -287,7 +362,7 @@ export default function Terminal({ projectId, onSessionChange }) {
 
     // Clear terminal
     xtermRef.current?.clear();
-    xtermRef.current?.writeln('\x1b[36m● Creating new session...\x1b[0m\n');
+    xtermRef.current?.writeln('\x1b[36m\u25CF Creating new session...\x1b[0m\n');
 
     wsRef.current.send(JSON.stringify({
       type: 'create-session',
@@ -308,6 +383,17 @@ export default function Terminal({ projectId, onSessionChange }) {
     }));
   }, [sessionId]);
 
+  // Attach to an existing session (for session tab switching)
+  const attachToSession = useCallback((targetSessionId) => {
+    if (!wsRef.current || targetSessionId === sessionIdRef.current) return;
+
+    xtermRef.current?.clear();
+    wsRef.current.send(JSON.stringify({
+      type: 'attach',
+      sessionId: targetSessionId,
+    }));
+  }, []);
+
   // Start CLI in current session
   const startCLI = useCallback((cliTool) => {
     if (!sessionId || !wsRef.current) return;
@@ -325,6 +411,7 @@ export default function Terminal({ projectId, onSessionChange }) {
 
     wsRef.current.send(JSON.stringify({
       type: 'input',
+      sessionId,
       data: text,
     }));
   }, [sessionId]);
@@ -353,52 +440,75 @@ export default function Terminal({ projectId, onSessionChange }) {
     }
   }, [sendToTerminal]);
 
+  // Custom response input state
+  const [customResponse, setCustomResponse] = useState('');
+
   return (
     <div className="flex flex-col h-full bg-[#1a1b26] rounded-lg overflow-hidden border border-gray-700">
-      {/* Terminal toolbar */}
-      <div className="flex items-center justify-between px-3 py-2 bg-gray-800/50 border-b border-gray-700">
-        <div className="flex items-center gap-2">
-          {/* CLI selector */}
+      {/* ── Top Control Bar ── */}
+      <div className="flex items-center justify-between px-3 py-1.5 bg-gray-800/80 border-b border-gray-700 flex-shrink-0">
+        {/* Left: session tabs + CLI tools */}
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          {/* Session tabs (inline) */}
+          {sessions.length > 1 && (
+            <div className="flex items-center gap-0.5 overflow-x-auto mr-2">
+              {sessions.map((s) => {
+                const isActive = s.id === sessionId;
+                const proj = projects.find(p => p.id === s.projectId);
+                const label = proj ? proj.name : 'Session';
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => attachToSession(s.id)}
+                    className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded whitespace-nowrap transition-colors ${
+                      isActive
+                        ? 'bg-blue-500/20 text-blue-300'
+                        : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700/50'
+                    }`}
+                  >
+                    <FolderOpen className="w-2.5 h-2.5" />
+                    <span className="max-w-20 truncate">{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           <select
             value={selectedCLI}
             onChange={(e) => setSelectedCLI(e.target.value)}
             disabled={!!sessionId}
-            className="px-2 py-1 text-xs bg-gray-700 border border-gray-600 rounded text-gray-200 focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+            className="px-2 py-0.5 text-[11px] bg-gray-700 border border-gray-600 rounded text-gray-200 disabled:opacity-50"
           >
             {CLI_TOOLS.map((tool) => (
-              <option key={tool.id} value={tool.id}>
-                {tool.icon} {tool.name}
-              </option>
+              <option key={tool.id} value={tool.id}>{tool.icon} {tool.name}</option>
             ))}
           </select>
 
-          {/* New session button */}
           <button
             onClick={createSession}
             disabled={!connected}
-            className="px-3 py-1 text-xs bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
+            className="px-2 py-0.5 text-[11px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
           >
-            {sessionId ? 'New Session' : 'Start'}
+            {sessionId ? 'New' : 'Start'}
           </button>
 
-          {/* Kill session button */}
           {sessionId && (
             <button
               onClick={killSession}
-              className="px-3 py-1 text-xs bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
+              className="px-2 py-0.5 text-[11px] bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors"
             >
               Kill
             </button>
           )}
 
-          {/* Quick CLI buttons when in shell */}
           {sessionId && selectedCLI === 'shell' && (
-            <div className="flex items-center gap-1 ml-2 pl-2 border-l border-gray-600">
+            <div className="flex items-center gap-0.5 ml-1 pl-1 border-l border-gray-600">
               {CLI_TOOLS.filter(t => t.id !== 'shell').map((tool) => (
                 <button
                   key={tool.id}
                   onClick={() => startCLI(tool.id)}
-                  className="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
+                  className="px-1.5 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
                   title={`Start ${tool.name}`}
                 >
                   {tool.icon}
@@ -408,35 +518,28 @@ export default function Terminal({ projectId, onSessionChange }) {
           )}
         </div>
 
-        {/* Status indicator */}
-        <div className="flex items-center gap-2">
-          {/* LLM Settings button */}
-          <button
-            onClick={() => setShowLLMSettings(true)}
-            className="p-1 rounded transition-colors bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600"
-            title="LLM Settings"
-          >
-            <Cpu className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Auto-responder toggle */}
+        {/* Right: auto-respond toggle + settings + status */}
+        <div className="flex items-center gap-1.5 flex-shrink-0">
           <button
             onClick={() => setAutoResponderEnabled(prev => !prev)}
-            className={`p-1 rounded transition-colors ${
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
               autoResponderEnabled
-                ? 'bg-purple-500/20 text-purple-400'
-                : 'bg-gray-700 text-gray-500'
+                ? 'bg-purple-500/25 text-purple-300 border border-purple-500/30'
+                : 'bg-gray-700 text-gray-400 border border-gray-600 hover:border-gray-500'
             }`}
-            title={autoResponderEnabled ? 'Auto-responder ON' : 'Auto-responder OFF'}
           >
-            <Zap className="w-3.5 h-3.5" />
+            <Zap className="w-3 h-3" />
+            Auto
           </button>
 
-          {sessionId && (
-            <span className="text-xs text-gray-400 font-mono truncate max-w-32">
-              {sessionId.substring(0, 16)}...
-            </span>
-          )}
+          <button
+            onClick={() => setShowLLMSettings(true)}
+            className="p-1 rounded bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600 transition-colors"
+            title="LLM Settings"
+          >
+            <Cpu className="w-3 h-3" />
+          </button>
+
           <div className={`w-2 h-2 rounded-full ${
             status === 'connected' ? 'bg-green-500' :
             status === 'connecting' ? 'bg-yellow-500 animate-pulse' :
@@ -446,107 +549,99 @@ export default function Terminal({ projectId, onSessionChange }) {
         </div>
       </div>
 
-      {/* Prompt suggestion popup */}
+      {/* ── AI Action Bar (shown when model suggests a response) ── */}
       {promptSuggestion && (
-        <div className={`mx-2 mb-2 p-3 rounded-lg animate-in slide-in-from-top-2 ${
+        <div className={`px-3 py-2 border-b flex-shrink-0 ${
           promptSuggestion.riskLevel === 'critical' || promptSuggestion.riskLevel === 'high'
-            ? 'bg-red-900/30 border border-red-500/30'
+            ? 'bg-red-950/60 border-red-500/30'
             : promptSuggestion.riskLevel === 'medium'
-              ? 'bg-orange-900/30 border border-orange-500/30'
-              : promptSuggestion.llmGenerated
-                ? 'bg-green-900/30 border border-green-500/30'
-                : promptSuggestion.smartEngine
-                  ? 'bg-blue-900/30 border border-blue-500/30'
-                  : 'bg-purple-900/30 border border-purple-500/30'
+              ? 'bg-orange-950/40 border-orange-500/20'
+              : 'bg-gray-800 border-gray-700'
         }`}>
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2">
+          {/* What the AI detected */}
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 min-w-0">
               {promptSuggestion.riskLevel === 'critical' || promptSuggestion.riskLevel === 'high' ? (
-                <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
-              ) : promptSuggestion.riskLevel === 'medium' ? (
-                <Shield className="w-4 h-4 text-orange-400 flex-shrink-0" />
-              ) : promptSuggestion.llmGenerated ? (
-                <Cpu className="w-4 h-4 text-green-400 flex-shrink-0" />
-              ) : promptSuggestion.smartEngine ? (
-                <Brain className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                <AlertTriangle className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
               ) : (
-                <Bot className="w-4 h-4 text-purple-400 flex-shrink-0" />
+                <Bot className="w-3.5 h-3.5 text-purple-400 flex-shrink-0" />
               )}
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className={`text-xs font-medium ${
-                    promptSuggestion.riskLevel === 'critical' || promptSuggestion.riskLevel === 'high'
-                      ? 'text-red-300'
-                      : promptSuggestion.riskLevel === 'medium'
-                        ? 'text-orange-300'
-                        : promptSuggestion.llmGenerated
-                          ? 'text-green-300'
-                          : promptSuggestion.smartEngine
-                            ? 'text-blue-300'
-                            : 'text-purple-300'
-                  }`}>
-                    {promptSuggestion.riskLevel === 'critical' || promptSuggestion.riskLevel === 'high'
-                      ? `⚠️ ${promptSuggestion.riskLevel.toUpperCase()} RISK: ${promptSuggestion.pattern?.name || 'Security Alert'}`
-                      : promptSuggestion.pattern?.name || 'AI Question Detected'}
-                  </p>
-                  {promptSuggestion.llmGenerated && (
-                    <span className="text-[10px] px-1.5 py-0.5 bg-green-500/20 text-green-300 rounded flex items-center gap-1">
-                      <Sparkles className="w-2.5 h-2.5" />
-                      LLM
-                    </span>
-                  )}
-                  {promptSuggestion.smartEngine && !promptSuggestion.llmGenerated && promptSuggestion.confidence && (
-                    <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/20 text-blue-300 rounded">
-                      {Math.round(promptSuggestion.confidence * 100)}% conf
-                    </span>
-                  )}
-                </div>
-                <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-1">
-                  {promptSuggestion.matchedText}
-                </p>
-                {promptSuggestion.riskReasons?.length > 0 && (
-                  <p className="text-[10px] text-red-400 mt-1">
-                    {promptSuggestion.riskReasons.join(', ')}
-                  </p>
-                )}
-                {promptSuggestion.reasoning?.length > 0 && !promptSuggestion.riskReasons?.length && (
-                  <p className="text-[10px] text-gray-500 mt-1 italic">
-                    {promptSuggestion.reasoning[0]}
-                  </p>
-                )}
-              </div>
+              <span className="text-[11px] text-gray-300 truncate">
+                {promptSuggestion.pattern?.name || 'AI asking a question'}
+              </span>
+              {promptSuggestion.confidence && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
+                  promptSuggestion.confidence >= 0.8 ? 'bg-green-500/20 text-green-300' :
+                  promptSuggestion.confidence >= 0.5 ? 'bg-yellow-500/20 text-yellow-300' :
+                  'bg-red-500/20 text-red-300'
+                }`}>
+                  {Math.round(promptSuggestion.confidence * 100)}%
+                </span>
+              )}
             </div>
-            <button
-              onClick={dismissSuggestion}
-              className="p-1 hover:bg-gray-700 rounded text-gray-500"
-            >
+            <button onClick={dismissSuggestion} className="p-0.5 hover:bg-gray-700 rounded text-gray-500">
               <X className="w-3 h-3" />
             </button>
           </div>
 
-          <div className="flex items-center gap-2 mt-2">
-            <span className="text-[10px] text-gray-500">Quick response:</span>
-            {promptSuggestion.responses?.map((response, i) => (
+          {/* What was detected */}
+          <p className="text-[10px] text-gray-500 mb-2 truncate">{promptSuggestion.matchedText}</p>
+
+          {/* Risk warnings */}
+          {promptSuggestion.riskReasons?.length > 0 && (
+            <p className="text-[10px] text-red-400 mb-2">{promptSuggestion.riskReasons.join(' | ')}</p>
+          )}
+
+          {/* Quick response buttons */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {promptSuggestion.responses?.map((response, i) => {
+              const isSuggested = response === promptSuggestion.suggestedResponse;
+              return (
+                <button
+                  key={i}
+                  onClick={() => sendPromptResponse(response)}
+                  className={`px-2.5 py-1 text-xs rounded font-medium transition-colors ${
+                    isSuggested
+                      ? promptSuggestion.riskLevel === 'critical' || promptSuggestion.riskLevel === 'high'
+                        ? 'bg-red-500 text-white hover:bg-red-600'
+                        : 'bg-purple-500 text-white hover:bg-purple-600'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  {response || '(enter)'}
+                  {isSuggested && ' \u2190 suggested'}
+                </button>
+              );
+            })}
+
+            {/* Custom response input */}
+            <div className="flex items-center gap-1 flex-1 min-w-32">
+              <input
+                type="text"
+                value={customResponse}
+                onChange={(e) => setCustomResponse(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && customResponse.trim()) {
+                    sendPromptResponse(customResponse.trim());
+                    setCustomResponse('');
+                  }
+                }}
+                className="flex-1 px-2 py-1 text-xs bg-gray-900 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:ring-1 focus:ring-purple-500"
+                placeholder="Custom response..."
+              />
               <button
-                key={i}
-                onClick={() => sendPromptResponse(response)}
-                className={`px-2 py-1 text-xs rounded transition-colors ${
-                  response === promptSuggestion.suggestedResponse
-                    ? promptSuggestion.riskLevel === 'critical' || promptSuggestion.riskLevel === 'high'
-                      ? 'bg-red-500 text-white'
-                      : promptSuggestion.riskLevel === 'medium'
-                        ? 'bg-orange-500 text-white'
-                        : promptSuggestion.llmGenerated
-                          ? 'bg-green-500 text-white'
-                          : promptSuggestion.smartEngine
-                            ? 'bg-blue-500 text-white'
-                            : 'bg-purple-500 text-white'
-                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                }`}
+                onClick={() => {
+                  if (customResponse.trim()) {
+                    sendPromptResponse(customResponse.trim());
+                    setCustomResponse('');
+                  }
+                }}
+                disabled={!customResponse.trim()}
+                className="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-gray-300 rounded transition-colors"
               >
-                {response || '(enter)'}
+                Send
               </button>
-            ))}
+            </div>
           </div>
         </div>
       )}

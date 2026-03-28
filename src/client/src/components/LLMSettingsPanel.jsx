@@ -22,7 +22,7 @@ import {
   RotateCcw,
 } from 'lucide-react';
 
-const API_BASE = 'http://localhost:55590/api';
+const API_BASE = '/api';
 
 export default function LLMSettingsPanel({ isOpen, onClose }) {
   const [settings, setSettings] = useState(null);
