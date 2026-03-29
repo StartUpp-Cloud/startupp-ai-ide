@@ -8,6 +8,7 @@ import FilesPanel from '../components/FilesPanel';
 import BigProjectPanel from '../components/BigProjectPanel';
 import ActivityFeed from '../components/ActivityFeed';
 import SchedulerPanel from '../components/SchedulerPanel';
+import QuickCommandsBar from '../components/QuickCommandsBar';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import {
   FolderOpen,
@@ -41,6 +42,8 @@ import {
   GitBranch,
   Clock,
   ChevronUp,
+  Paperclip,
+  Monitor,
 } from 'lucide-react';
 
 // Storage keys
@@ -89,6 +92,7 @@ export default function IDE() {
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiError, setAiError] = useState('');
   const [panelMode, setPanelMode] = useState('prompt'); // 'prompt' | 'plan'
+  const [attachments, setAttachments] = useState([]); // Array of { id, type, label, content }
 
   // Plan state
   const [planSteps, setPlanSteps] = useState(null);
@@ -103,7 +107,8 @@ export default function IDE() {
   });
 
   // Utility terminal state
-  const [utilTerminalCollapsed, setUtilTerminalCollapsed] = useState(true);
+  const [utilTerminalCollapsed, setUtilTerminalCollapsed] = useState(false);
+  const [utilSessionId, setUtilSessionId] = useState(null);
 
   // Resizer state
   const [isResizing, setIsResizing] = useState(null);
@@ -182,12 +187,22 @@ export default function IDE() {
       setAiGenerating(true);
       setAiError('');
       setGeneratedPrompt('');
+
+      // Build description with attachments
+      let fullDescription = promptText.trim();
+      if (attachments.length > 0) {
+        fullDescription += '\n\n--- Attached Context ---';
+        for (const att of attachments) {
+          fullDescription += `\n\n### ${att.label} (${att.type})\n${att.content}`;
+        }
+      }
+
       const res = await fetch('/api/llm/generate-prompt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           projectId: selectedProjectId,
-          description: promptText.trim(),
+          description: fullDescription,
           targetCLI: 'claude',
         }),
       });
@@ -212,12 +227,22 @@ export default function IDE() {
       setPlanTitle('');
       setPlanCurrentStep(0);
       setPlanRunning(false);
+
+      // Build goal with attachments
+      let fullGoal = promptText.trim();
+      if (attachments.length > 0) {
+        fullGoal += '\n\n--- Attached Context ---';
+        for (const att of attachments) {
+          fullGoal += `\n\n### ${att.label} (${att.type})\n${att.content}`;
+        }
+      }
+
       const res = await fetch('/api/llm/generate-plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           projectId: selectedProjectId,
-          goal: promptText.trim(),
+          goal: fullGoal,
           targetCLI: 'claude',
         }),
       });
@@ -312,6 +337,57 @@ export default function IDE() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Add a context attachment
+  const addAttachment = (type, label, content) => {
+    setAttachments(prev => [...prev, { id: Date.now(), type, label, content: content.slice(0, 10000) }]);
+  };
+
+  const removeAttachment = (id) => {
+    setAttachments(prev => prev.filter(a => a.id !== id));
+  };
+
+  // Handle file attachment
+  const handleFileAttach = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const text = await file.text();
+      addAttachment('file', file.name, text);
+    } catch {
+      notify('Could not read file', 'error');
+    }
+  };
+
+  // Capture terminal output as attachment
+  const handleCaptureTerminal = () => {
+    const output = window._getTerminalOutput?.();
+    if (output) {
+      addAttachment('terminal', 'Terminal output', output.slice(-3000));
+      notify('Terminal output captured');
+    } else {
+      notify('No terminal output to capture', 'error');
+    }
+  };
+
+  // Capture git diff as attachment
+  const handleCaptureDiff = async () => {
+    if (!selectedProject?.folderPath) return;
+    try {
+      const res = await fetch('/api/prompt-from-file/from-git-diff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: selectedProject.folderPath, projectId: selectedProjectId }),
+      });
+      const data = await res.json();
+      if (data.prompt) {
+        addAttachment('diff', 'Git diff', data.sourceContent || 'Diff captured');
+      }
+    } catch {
+      notify('Could not capture git diff', 'error');
+    }
+  };
+
   // Handle big project launch - sends prompt to terminal
   const handleBigProjectLaunch = useCallback(({ prompt, projectId: bigProjectProjectId, bigProjectId, iterationId, workflowStep }) => {
     if (!prompt) return;
@@ -355,6 +431,16 @@ export default function IDE() {
       document.removeEventListener('mouseup', handleMouseUp);
     };
   }, [isResizing, handleMouseMove, handleMouseUp]);
+
+  // Wire terminal error capture to prompt panel
+  useEffect(() => {
+    window._onCaptureTerminalOutput = (output) => {
+      addAttachment('error', 'Terminal error', output);
+      setPanelMode('prompt');
+      setPromptText(prev => prev || 'Fix the error shown in the terminal output');
+    };
+    return () => { window._onCaptureTerminalOutput = null; };
+  }, []);
 
   const renderLeftPanelContent = () => {
     switch (leftPanelTab) {
@@ -623,6 +709,48 @@ export default function IDE() {
                       className="w-full px-2 py-1.5 text-xs bg-surface-850 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500 resize-none"
                       placeholder="Describe the task... e.g. 'Add user authentication with JWT tokens' or 'Fix the login form validation bug'"
                     />
+                  </div>
+
+                  {/* Context Attachments */}
+                  <div className="space-y-2">
+                    {/* Attachment buttons */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <label className="flex items-center gap-1 px-2 py-1 text-[11px] bg-surface-850 border border-surface-700 rounded cursor-pointer hover:border-surface-600 text-surface-400 hover:text-surface-200 transition-colors">
+                        <Paperclip className="w-3 h-3" />
+                        <span>File</span>
+                        <input type="file" onChange={handleFileAttach} className="hidden" accept=".txt,.md,.js,.ts,.jsx,.tsx,.py,.json,.yaml,.yml,.html,.css,.sql,.sh,.csv,.go,.rs" />
+                      </label>
+                      <button
+                        onClick={handleCaptureTerminal}
+                        className="flex items-center gap-1 px-2 py-1 text-[11px] bg-surface-850 border border-surface-700 rounded hover:border-surface-600 text-surface-400 hover:text-surface-200 transition-colors"
+                      >
+                        <Monitor className="w-3 h-3" />
+                        <span>Terminal</span>
+                      </button>
+                      {selectedProject?.folderPath && (
+                        <button
+                          onClick={handleCaptureDiff}
+                          className="flex items-center gap-1 px-2 py-1 text-[11px] bg-surface-850 border border-surface-700 rounded hover:border-surface-600 text-surface-400 hover:text-surface-200 transition-colors"
+                        >
+                          <GitBranch className="w-3 h-3" />
+                          <span>Git Diff</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Attached items */}
+                    {attachments.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {attachments.map(att => (
+                          <div key={att.id} className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] bg-primary-500/10 text-primary-300 border border-primary-500/20 rounded">
+                            <span className="truncate max-w-24">{att.label}</span>
+                            <button onClick={() => removeAttachment(att.id)} className="hover:text-white">
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Generate with AI */}
@@ -950,10 +1078,14 @@ export default function IDE() {
         {/* Utility Terminal (manual commands) */}
         {!utilTerminalCollapsed && (
           <div className="flex flex-col min-h-0" style={{ flex: 0.35 }}>
+            <QuickCommandsBar
+              projectId={selectedProjectId}
+              sessionId={utilSessionId}
+            />
             <Terminal
               projectId={selectedProjectId}
               projects={projects}
-              onSessionChange={() => {}}
+              onSessionChange={setUtilSessionId}
               isUtility={true}
             />
           </div>

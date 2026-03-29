@@ -33,6 +33,7 @@ import memoryRoutes from "./routes/memory.js";
 import safetyRoutes from "./routes/safety.js";
 import contextRoutes from "./routes/context.js";
 import schedulerRoutes from "./routes/scheduler.js";
+import promptFromFileRoutes from "./routes/promptFromFile.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
 import { scheduler } from "./scheduler.js";
@@ -110,6 +111,8 @@ async function startServer() {
     app.use("/api/safety", safetyRoutes);
     app.use("/api/context", contextRoutes);
     app.use("/api/schedules", schedulerRoutes);
+    app.use("/api/prompt-from-file", promptFromFileRoutes);
+    app.use("/api/projects/:projectId/quick-commands", (await import("./routes/quickCommands.js")).default);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

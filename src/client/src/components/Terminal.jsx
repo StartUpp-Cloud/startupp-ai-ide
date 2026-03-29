@@ -35,6 +35,10 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
   const [promptSuggestion, setPromptSuggestion] = useState(null);
   const [autoResponderEnabled, setAutoResponderEnabled] = useState(true);
 
+  // Error auto-capture state
+  const [capturedError, setCapturedError] = useState(null); // { text, timestamp }
+  const [terminalOutputBuffer, setTerminalOutputBuffer] = useState(''); // Recent output for context capture
+
   // Settings panel state
   const [showLLMSettings, setShowLLMSettings] = useState(false);
 
@@ -217,6 +221,35 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
 
       case 'output':
         xtermRef.current?.write(msg.data);
+
+        // Buffer recent output for context capture (keep last 5000 chars)
+        setTerminalOutputBuffer(prev => {
+          const updated = prev + (msg.data || '');
+          return updated.length > 5000 ? updated.slice(-5000) : updated;
+        });
+
+        // Auto-detect errors in output (only for main terminal)
+        if (!isUtility) {
+          const cleanData = (msg.data || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''); // strip ANSI
+          const errorPatterns = [
+            /Error:/i, /FAILED/i, /fatal:/i, /panic:/i,
+            /Traceback \(most recent/i, /SyntaxError/i, /TypeError/i,
+            /ReferenceError/i, /Cannot find module/i, /ENOENT/i,
+            /Build failed/i, /Compilation failed/i,
+          ];
+          if (errorPatterns.some(p => p.test(cleanData))) {
+            // Debounce: only capture if no recent capture (5s cooldown)
+            setCapturedError(prev => {
+              if (prev && Date.now() - prev.timestamp < 5000) return prev;
+              return { text: cleanData.trim().slice(0, 500), timestamp: Date.now() };
+            });
+            // Auto-dismiss after 15 seconds
+            setTimeout(() => setCapturedError(prev => {
+              if (prev && Date.now() - prev.timestamp >= 14000) return null;
+              return prev;
+            }), 15000);
+          }
+        }
         break;
 
       case 'exit':
@@ -445,6 +478,13 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
       window.sendToTerminal = sendToTerminal;
     }
   }, [sendToTerminal, isUtility]);
+
+  // Expose terminal output capture for "Fix this" integration
+  useEffect(() => {
+    if (window && !isUtility) {
+      window._getTerminalOutput = () => terminalOutputBuffer;
+    }
+  }, [terminalOutputBuffer, isUtility]);
 
   // Custom response input state
   const [customResponse, setCustomResponse] = useState('');
@@ -681,6 +721,38 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
                 className="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-gray-300 rounded transition-colors"
               >
                 Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Error capture bar */}
+      {!isUtility && capturedError && !promptSuggestion && (
+        <div className="px-3 py-2 border-b border-red-500/20 bg-red-950/40 flex-shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertTriangle className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
+              <span className="text-[11px] text-red-300 truncate">{capturedError.text}</span>
+            </div>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <button
+                onClick={() => {
+                  // Copy last 2000 chars of terminal output to be used as context
+                  if (window._onCaptureTerminalOutput) {
+                    window._onCaptureTerminalOutput(terminalOutputBuffer.slice(-2000));
+                  }
+                  setCapturedError(null);
+                }}
+                className="px-2 py-0.5 text-[11px] bg-red-600 hover:bg-red-500 text-white rounded transition-colors font-medium"
+              >
+                Fix this
+              </button>
+              <button
+                onClick={() => setCapturedError(null)}
+                className="p-0.5 hover:bg-gray-700 rounded text-gray-500"
+              >
+                <X className="w-3 h-3" />
               </button>
             </div>
           </div>
