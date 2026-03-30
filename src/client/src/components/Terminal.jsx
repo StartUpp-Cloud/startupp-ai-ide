@@ -28,6 +28,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
     sessionIdRef.current = sessionId;
   }, [sessionId]);
   const [sessions, setSessions] = useState([]);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [selectedCLI, setSelectedCLI] = useState('shell');
   const [status, setStatus] = useState('disconnected');
 
@@ -279,6 +280,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
             map.set(s.projectId, s.id);
           }
         }
+        setSessionsLoaded(true);
         break;
 
       case 'error':
@@ -363,17 +365,17 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
   }, [onSessionChange, autoResponderEnabled]);
 
   // Auto-create or attach session when projectId changes
+  // Waits for sessionsLoaded so we know about existing server-side sessions before deciding
   useEffect(() => {
-    if (isUtility) return; // Utility terminal doesn't auto-create sessions
-    if (!projectId || !connected || !wsRef.current) return;
+    if (isUtility) return;
+    if (!projectId || !connected || !sessionsLoaded || !wsRef.current) return;
 
     const existingSessionId = projectSessionsRef.current.get(projectId);
 
     if (existingSessionId) {
-      // Attach to existing session for this project
+      // Attach to existing session for this project (server sends scrollback)
       if (existingSessionId !== sessionIdRef.current) {
         xtermRef.current?.clear();
-        xtermRef.current?.writeln('\x1b[36m\u25CF Switching to project session...\x1b[0m\n');
         wsRef.current.send(JSON.stringify({
           type: 'attach',
           sessionId: existingSessionId,
@@ -386,12 +388,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
       wsRef.current.send(JSON.stringify({
         type: 'create-session',
         projectId,
-        cliTool: null, // Start with shell
+        cliTool: null,
         cols: xtermRef.current?.cols || 120,
         rows: xtermRef.current?.rows || 30,
       }));
     }
-  }, [projectId, connected, isUtility]);
+  }, [projectId, connected, sessionsLoaded, isUtility]);
 
   // Create new session (manual)
   const createSession = useCallback(() => {

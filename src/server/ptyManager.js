@@ -70,6 +70,7 @@ class PTYManager extends EventEmitter {
         createdAt: new Date().toISOString(),
         lastActivity: new Date().toISOString(),
         history: [], // Store conversation history
+        scrollback: '', // Rolling buffer of recent output for reconnection replay
         cols,
         rows,
       };
@@ -77,6 +78,11 @@ class PTYManager extends EventEmitter {
       // Handle PTY output
       ptyProcess.onData((data) => {
         session.lastActivity = new Date().toISOString();
+        // Append to scrollback buffer (keep last 100KB)
+        session.scrollback += data;
+        if (session.scrollback.length > 100000) {
+          session.scrollback = session.scrollback.slice(-100000);
+        }
         this.emit('data', { sessionId, data });
       });
 
@@ -153,6 +159,14 @@ class PTYManager extends EventEmitter {
       rows: session.rows,
       exitCode: session.exitCode,
     };
+  }
+
+  /**
+   * Get the scrollback buffer for a session (for replay on reconnect)
+   */
+  getScrollback(sessionId) {
+    const session = this.sessions.get(sessionId);
+    return session?.scrollback || '';
   }
 
   /**

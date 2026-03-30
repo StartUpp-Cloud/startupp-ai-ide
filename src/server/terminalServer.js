@@ -378,6 +378,16 @@ class TerminalServer {
 
     this.attachClient(ws, sessionId);
 
+    // Send scrollback buffer so the client sees recent output history
+    const scrollback = ptyManager.getScrollback(sessionId);
+    if (scrollback) {
+      this.send(ws, {
+        type: 'output',
+        sessionId,
+        data: scrollback,
+      });
+    }
+
     this.send(ws, {
       type: 'attached',
       session,
