@@ -34,9 +34,11 @@ import safetyRoutes from "./routes/safety.js";
 import contextRoutes from "./routes/context.js";
 import schedulerRoutes from "./routes/scheduler.js";
 import promptFromFileRoutes from "./routes/promptFromFile.js";
+import skillRoutes from "./routes/skills.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
 import { scheduler } from "./scheduler.js";
+import { skillManager } from "./skillManager.js";
 
 // Load environment variables
 dotenv.config();
@@ -93,6 +95,10 @@ async function startServer() {
     await scheduler.init();
     console.log("Scheduler ready");
 
+    // Initialize skill manager
+    await skillManager.init();
+    console.log("Skill manager ready");
+
     // API routes
     app.use("/api/projects", projectRoutes);
     app.use("/api/projects", promptRoutes); // This will handle /api/projects/:id/prompts
@@ -113,6 +119,7 @@ async function startServer() {
     app.use("/api/schedules", schedulerRoutes);
     app.use("/api/prompt-from-file", promptFromFileRoutes);
     app.use("/api/projects/:projectId/quick-commands", (await import("./routes/quickCommands.js")).default);
+    app.use("/api/skills", skillRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

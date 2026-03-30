@@ -1,0 +1,41 @@
+{
+  "id": "react-testing",
+  "name": "React Testing",
+  "description": "Best practices for testing React components with Testing Library and Jest/Vitest",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "test-tube",
+  "category": "testing",
+  "rules": [
+    "Use React Testing Library for component tests, never Enzyme",
+    "Test user behavior and interactions, not implementation details",
+    "Use screen.getByRole, screen.getByText for queries -- avoid getByTestId unless necessary",
+    "Mock external dependencies (API calls, modules) but never mock React internals",
+    "Write integration tests that cover full user flows, not just unit tests",
+    "Use userEvent over fireEvent for realistic interaction simulation",
+    "Assert on visible output, not internal state"
+  ],
+  "promptTemplates": [
+    {
+      "name": "Test Component",
+      "description": "Generate tests for a React component",
+      "template": "Write comprehensive tests for the {{componentName}} component. Cover: rendering, user interactions, edge cases, and error states. Use React Testing Library and {{testRunner}}."
+    },
+    {
+      "name": "Test Custom Hook",
+      "description": "Generate tests for a React custom hook",
+      "template": "Write tests for the {{hookName}} custom hook using @testing-library/react-hooks renderHook. Test all return values, state changes, and edge cases."
+    }
+  ],
+  "quickCommands": [
+    { "name": "Run Tests", "command": "npm test", "icon": "test-tube", "color": "green" },
+    { "name": "Test Coverage", "command": "npm test -- --coverage", "icon": "bar-chart", "color": "blue" }
+  ],
+  "conventions": "Testing conventions:\n- Test files live next to the component: Component.test.tsx\n- Use describe/it blocks for organization\n- Setup shared rendering in beforeEach when appropriate\n- Clean up after tests that modify global state\n- Name test files matching the component: MyComponent.test.tsx\n- Group related assertions in the same it() block when they test the same behavior",
+  "triggers": [
+    { "filePattern": "*.test.tsx", "description": "React TypeScript test files" },
+    { "filePattern": "*.test.jsx", "description": "React JavaScript test files" },
+    { "filePattern": "*.spec.tsx", "description": "React TypeScript spec files" },
+    { "filePattern": "*.spec.jsx", "description": "React JavaScript spec files" }
+  ]
+}

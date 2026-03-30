@@ -1,0 +1,45 @@
+{
+  "id": "git-workflow",
+  "name": "Git Workflow",
+  "description": "Git workflow rules for conventional commits, branch naming, PR descriptions, squash merging, and changelog generation",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "git-branch",
+  "category": "devops",
+  "rules": [
+    "Use Conventional Commits format: type(scope): description -- types are feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert",
+    "Keep commit subjects under 72 characters; use the body for detailed explanations and motivation",
+    "Branch names follow the pattern: type/short-description (e.g., feat/user-auth, fix/login-redirect, chore/update-deps)",
+    "Create feature branches from the main branch; never commit directly to main or develop",
+    "Write PR descriptions with: Summary (what and why), Changes (bullet list), Testing (how to verify), and Breaking Changes sections",
+    "Squash merge feature branches into main to keep a clean linear history; delete the branch after merge",
+    "Use interactive rebase to clean up commit history before opening a PR -- squash fixups, reword unclear messages",
+    "Tag releases with semantic versioning (v1.2.3) and generate changelogs from conventional commit messages",
+    "Never force-push to shared branches (main, develop, release/*); only force-push to your own feature branches",
+    "Reference issue numbers in commits and PR descriptions (e.g., fixes #123, closes #456) for automatic issue linking"
+  ],
+  "promptTemplates": [
+    {
+      "name": "Write Commit Message",
+      "description": "Generate a conventional commit message for changes",
+      "template": "Write a conventional commit message for the following changes: {{changes}}. Use the correct type (feat/fix/refactor/etc.), include a scope if applicable, keep the subject under 72 characters, and add a body explaining the motivation if the change is non-trivial."
+    },
+    {
+      "name": "Write PR Description",
+      "description": "Generate a pull request description",
+      "template": "Write a pull request description for a branch that {{branchPurpose}}. Include: a Summary section explaining what and why, a Changes section with a bullet list of modifications, a Testing section describing how to verify the changes, and a Breaking Changes section if applicable."
+    }
+  ],
+  "quickCommands": [
+    { "name": "Git Status", "command": "git status", "icon": "git-branch", "color": "blue" },
+    { "name": "Git Log (Graph)", "command": "git log --oneline --graph -20", "icon": "git-commit", "color": "purple" }
+  ],
+  "conventions": "Git workflow conventions:\n- main branch is always deployable; protect it with required PR reviews and CI checks\n- Feature branches are short-lived: merge within a few days, not weeks\n- Commit frequently with small, focused changes; each commit should be independently meaningful\n- Use git hooks (Husky + lint-staged) to enforce linting and commit message format\n- Release branches (release/v1.2.0) are cut from main when preparing a release\n- Hotfix branches (hotfix/critical-bug) branch from the latest release tag and merge to both main and the release branch\n- Keep .gitignore comprehensive: node_modules, build output, IDE files, OS files, .env",
+  "triggers": [
+    { "filePattern": ".gitignore", "description": "Git ignore configuration" },
+    { "filePattern": ".gitattributes", "description": "Git attributes configuration" },
+    { "filePattern": ".husky/*", "description": "Husky git hooks" },
+    { "filePattern": "commitlint.config.*", "description": "Commit lint configuration" },
+    { "filePattern": "CHANGELOG.md", "description": "Changelog file" }
+  ]
+}

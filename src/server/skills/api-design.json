@@ -1,0 +1,48 @@
+{
+  "id": "api-design",
+  "name": "REST API Design",
+  "description": "REST API design best practices: proper status codes, consistent error responses, pagination, versioning, rate limiting, and OpenAPI documentation",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "globe",
+  "category": "general",
+  "rules": [
+    "Use correct HTTP status codes: 200 for success, 201 for created, 204 for no content, 400 for bad request, 401 for unauthorized, 403 for forbidden, 404 for not found, 409 for conflict, 422 for validation errors, 429 for rate limited, 500 for server errors",
+    "Return a consistent error response shape: { error: string, message: string, details?: object } across all endpoints",
+    "Use plural nouns for resource collections (/api/users, not /api/user) and nest sub-resources logically (/api/users/:id/orders)",
+    "Implement cursor-based or offset pagination for all list endpoints; always return { data: T[], pagination: { total, page, pageSize, hasMore } }",
+    "Version the API via URL prefix (/api/v1/) or Accept header; never make breaking changes without a version bump",
+    "Use PATCH for partial updates and PUT for full replacements; accept and validate only the fields being updated in PATCH",
+    "Implement request validation with a schema library (Zod, Joi, or Yup) at the controller layer before business logic",
+    "Apply rate limiting per-endpoint based on sensitivity: stricter limits on auth routes, moderate on writes, lenient on reads",
+    "Include standard response headers: X-Request-Id for tracing, X-RateLimit-Remaining, and Content-Type with charset",
+    "Document every endpoint in OpenAPI/Swagger format with request/response schemas, examples, and authentication requirements"
+  ],
+  "promptTemplates": [
+    {
+      "name": "Design REST Endpoint",
+      "description": "Design a REST API endpoint with all best practices",
+      "template": "Design a REST API endpoint for {{resourceDescription}}. Include: HTTP method, URL path, request body schema, query parameters, response schema with examples, error responses, authentication requirements, and rate limit considerations. Follow RESTful conventions."
+    },
+    {
+      "name": "Generate OpenAPI Spec",
+      "description": "Generate OpenAPI documentation for endpoints",
+      "template": "Generate an OpenAPI 3.0 specification for the following endpoints: {{endpoints}}. Include schemas for all request/response bodies, path and query parameters, authentication (Bearer JWT), error responses for each status code, and example values."
+    }
+  ],
+  "quickCommands": [
+    { "name": "Validate OpenAPI", "command": "npx @redocly/cli lint openapi.yaml", "icon": "file-text", "color": "blue" },
+    { "name": "Generate API Docs", "command": "npx @redocly/cli build-docs openapi.yaml -o docs/api.html", "icon": "book-open", "color": "green" }
+  ],
+  "conventions": "API design conventions:\n- All endpoints live under /api/v1/ prefix\n- Controllers handle HTTP concerns (parsing, status codes); services handle business logic\n- Request validation happens in middleware or at the top of the controller\n- Use consistent naming: camelCase for JSON fields, kebab-case for URLs\n- Every endpoint returns JSON with Content-Type: application/json\n- List endpoints accept ?page, ?pageSize, ?sort, ?order query parameters\n- Use ISO 8601 for all date/time fields\n- Include createdAt and updatedAt timestamps on all resources",
+  "triggers": [
+    { "filePattern": "openapi.yaml", "description": "OpenAPI specification" },
+    { "filePattern": "openapi.json", "description": "OpenAPI specification (JSON)" },
+    { "filePattern": "swagger.yaml", "description": "Swagger specification" },
+    { "filePattern": "swagger.json", "description": "Swagger specification (JSON)" },
+    { "filePattern": "*/routes/*.ts", "description": "Route definition files" },
+    { "filePattern": "*/routes/*.js", "description": "Route definition files" },
+    { "filePattern": "*/controllers/*.ts", "description": "Controller files" },
+    { "filePattern": "*/controllers/*.js", "description": "Controller files" }
+  ]
+}

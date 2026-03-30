@@ -1,0 +1,46 @@
+{
+  "id": "docker-deploy",
+  "name": "Docker & Deployment",
+  "description": "Docker containerization best practices, multi-stage builds, docker-compose, and deployment workflows",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "container",
+  "category": "deployment",
+  "rules": [
+    "Always use multi-stage builds to minimize final image size -- separate build and runtime stages",
+    "Pin base image versions explicitly (e.g., node:20.11-alpine) instead of using :latest",
+    "Run containers as a non-root user; add a USER directive after installing dependencies",
+    "Use .dockerignore to exclude node_modules, .git, .env, and build artifacts from the build context",
+    "Order Dockerfile instructions from least to most frequently changing to maximize layer caching",
+    "Copy package.json and lockfile first, run npm ci, then copy source code for optimal caching",
+    "Use HEALTHCHECK directives for production containers to enable orchestrator health monitoring",
+    "Set NODE_ENV=production in the runtime stage and only install production dependencies",
+    "Never store secrets in Docker images or environment variables baked into layers; use runtime secrets",
+    "Use docker-compose profiles to separate dev, test, and production service configurations"
+  ],
+  "promptTemplates": [
+    {
+      "name": "Generate Dockerfile",
+      "description": "Create a production Dockerfile for the project",
+      "template": "Create a production-ready multi-stage Dockerfile for a {{framework}} application. Use {{baseImage}} as the base. Include: optimized layer caching, non-root user, health check, and proper signal handling. The app listens on port {{port}}."
+    },
+    {
+      "name": "Docker Compose Setup",
+      "description": "Generate a docker-compose.yml for local development",
+      "template": "Create a docker-compose.yml for local development with the following services: {{services}}. Include volume mounts for live reload, a shared network, environment variables from .env, and health checks for each service."
+    }
+  ],
+  "quickCommands": [
+    { "name": "Build Image", "command": "docker build -t app:latest .", "icon": "hammer", "color": "blue" },
+    { "name": "Docker Compose Up", "command": "docker compose up -d", "icon": "play", "color": "green" },
+    { "name": "Docker Compose Down", "command": "docker compose down", "icon": "square", "color": "red" }
+  ],
+  "conventions": "Docker conventions:\n- Dockerfile lives at the project root\n- docker-compose.yml at the project root; docker-compose.override.yml for local dev overrides\n- Use named volumes for persistent data (databases, uploads)\n- Environment variables go in .env (never committed) with .env.example as a template\n- Tag images with git SHA or semver for production, :latest for development only\n- Document all exposed ports and required environment variables in the README",
+  "triggers": [
+    { "filePattern": "Dockerfile", "description": "Dockerfile" },
+    { "filePattern": "Dockerfile.*", "description": "Dockerfile variants" },
+    { "filePattern": "docker-compose.yml", "description": "Docker Compose file" },
+    { "filePattern": "docker-compose.*.yml", "description": "Docker Compose override files" },
+    { "filePattern": ".dockerignore", "description": "Docker ignore file" }
+  ]
+}

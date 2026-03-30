@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import { getDB } from './db.js';
+import { skillManager } from './skillManager.js';
 
 // Security risk levels
 export const RISK_LEVELS = {
@@ -405,6 +406,9 @@ class SessionContext {
       // Rules
       promptRules: session.promptRules,
       globalRules: session.globalRules?.map(r => r.text) || [],
+
+      // Active skill context
+      skillContext: session.projectId ? skillManager.buildSkillContext(session.projectId) : '',
 
       // History
       recentHistory,

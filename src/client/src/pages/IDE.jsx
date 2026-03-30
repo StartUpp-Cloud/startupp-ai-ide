@@ -9,6 +9,7 @@ import BigProjectPanel from '../components/BigProjectPanel';
 import ActivityFeed from '../components/ActivityFeed';
 import SchedulerPanel from '../components/SchedulerPanel';
 import QuickCommandsBar from '../components/QuickCommandsBar';
+import SkillsPanel from '../components/SkillsPanel';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import {
   FolderOpen,
@@ -485,6 +486,10 @@ export default function IDE() {
             projectPath={selectedProject?.folderPath}
           />
         );
+      case 'skills':
+        return (
+          <SkillsPanel projectId={selectedProjectId} />
+        );
       default:
         return (
           <ProjectManagerPanel
@@ -610,6 +615,18 @@ export default function IDE() {
               >
                 <Clock className="w-3.5 h-3.5" />
                 <span>Cron</span>
+              </button>
+              <button
+                onClick={() => setLeftPanelTab('skills')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs transition-colors ${
+                  leftPanelTab === 'skills'
+                    ? 'text-primary-400 bg-primary-500/10 border-b-2 border-primary-500'
+                    : 'text-surface-400 hover:text-surface-200'
+                }`}
+                title="Skills"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Skills</span>
               </button>
               <button
                 onClick={() => setLeftPanelCollapsed(true)}

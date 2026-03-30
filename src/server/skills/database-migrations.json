@@ -1,0 +1,46 @@
+{
+  "id": "database-migrations",
+  "name": "Database Migrations",
+  "description": "Safe database migration practices for Prisma, Drizzle, Knex, and raw SQL with rollback strategies",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "database",
+  "category": "database",
+  "rules": [
+    "Every migration must be reversible -- always write both up and down (rollback) logic",
+    "Never modify or delete a migration that has already been applied to a shared environment",
+    "Add new columns as nullable or with a default value to avoid breaking existing queries during deployment",
+    "Split large data migrations from schema migrations; run data migrations as separate scripts",
+    "Use transactions for schema changes when the database supports transactional DDL (PostgreSQL, SQLite)",
+    "Test migrations against a copy of production data before deploying, not just an empty database",
+    "Include a rollback plan in every migration PR description with the exact revert command",
+    "Never drop columns or tables directly; deprecate first, then remove in a subsequent release after confirming no code references remain",
+    "Use explicit column types and lengths instead of relying on ORM defaults for cross-database compatibility",
+    "Name migrations descriptively: YYYYMMDD_HHMMSS_add_user_email_index.ts not migration_042.ts"
+  ],
+  "promptTemplates": [
+    {
+      "name": "Create Migration",
+      "description": "Generate a safe database migration",
+      "template": "Create a {{orm}} migration that {{migrationDescription}}. Include both up and down functions. Use a transaction where supported. The target database is {{database}}. Consider data preservation and backward compatibility."
+    },
+    {
+      "name": "Migration Rollback Plan",
+      "description": "Generate a rollback strategy for a migration",
+      "template": "Create a rollback plan for the following migration: {{migrationDescription}}. Include the down migration code, verification queries to confirm the rollback succeeded, and any data recovery steps needed."
+    }
+  ],
+  "quickCommands": [
+    { "name": "Run Migrations", "command": "npx prisma migrate deploy", "icon": "database", "color": "green" },
+    { "name": "Migration Status", "command": "npx prisma migrate status", "icon": "list", "color": "blue" }
+  ],
+  "conventions": "Migration conventions:\n- Migrations are stored in prisma/migrations/ (Prisma) or db/migrations/ (Drizzle/Knex)\n- Each migration is a single file with a timestamp prefix\n- Never edit applied migrations; create a new corrective migration instead\n- Seed data goes in a separate seed script, not in migrations\n- Keep a MIGRATION_LOG.md or use PR descriptions to document what each migration does and why\n- Always backup the database before running migrations in production",
+  "triggers": [
+    { "filePattern": "*/migrations/*.sql", "description": "SQL migration files" },
+    { "filePattern": "*/migrations/*.ts", "description": "TypeScript migration files" },
+    { "filePattern": "*/migrations/*.js", "description": "JavaScript migration files" },
+    { "filePattern": "schema.prisma", "description": "Prisma schema file" },
+    { "filePattern": "drizzle.config.ts", "description": "Drizzle config file" },
+    { "filePattern": "knexfile.js", "description": "Knex config file" }
+  ]
+}

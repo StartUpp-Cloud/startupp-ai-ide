@@ -6,6 +6,7 @@
 import express from 'express';
 import { llmProvider } from '../llmProvider.js';
 import Project from '../models/Project.js';
+import { skillManager } from '../skillManager.js';
 
 const router = express.Router();
 
@@ -269,8 +270,9 @@ router.post('/generate-prompt', async (req, res) => {
       return res.status(400).json({ error: 'LLM is not enabled. Enable it in LLM Settings.' });
     }
 
-    // Build project context
+    // Build project context + skill context
     let projectContext = '';
+    let skillContext = '';
     if (projectId) {
       const project = Project.findById(projectId);
       if (project) {
@@ -282,6 +284,8 @@ router.post('/generate-prompt', async (req, res) => {
           projectContext += `\nWorkspace: ${project.folderPath}`;
         }
       }
+      // Inject active skill rules and conventions
+      skillContext = skillManager.buildSkillContext(projectId);
     }
 
     const cli = targetCLI || 'claude';
@@ -293,10 +297,10 @@ router.post('/generate-prompt', async (req, res) => {
 - Do NOT wrap your response in thinking tags or reasoning blocks. Output the prompt directly.
 - The prompt should be comprehensive but concise — aim for 200-500 words max.
 - Include specific file paths, function names, or patterns when relevant to the project.
-- Reference the project rules so the AI assistant follows them.
+- Reference the project rules AND any active skill rules so the AI assistant follows them.
 - Be explicit about what the expected outcome should be.
 - Structure the prompt with clear sections if the task has multiple parts.
-${projectContext}`;
+${projectContext}${skillContext ? `\n${skillContext}` : ''}`;
 
     const result = await llmProvider.generateResponse(description, {
       systemPrompt,
@@ -333,8 +337,9 @@ router.post('/generate-plan', async (req, res) => {
       return res.status(400).json({ error: 'LLM is not enabled. Enable it in LLM Settings.' });
     }
 
-    // Build project context
+    // Build project context + skill context
     let projectContext = '';
+    let skillContext = '';
     if (projectId) {
       const project = Project.findById(projectId);
       if (project) {
@@ -346,6 +351,7 @@ router.post('/generate-plan', async (req, res) => {
           projectContext += `\nWorkspace: ${project.folderPath}`;
         }
       }
+      skillContext = skillManager.buildSkillContext(projectId);
     }
 
     const cli = targetCLI || 'claude';
@@ -373,7 +379,7 @@ Respond with valid JSON only. No markdown, no wrapping, no thinking tags. Output
 - Include context from previous steps in later prompts when needed (e.g., "In the previous step we created X, now...").
 - Reference project rules so the AI assistant follows them.
 - Aim for 3-8 steps. Split large tasks, but don't over-fragment.
-${projectContext}`;
+${projectContext}${skillContext ? `\n${skillContext}` : ''}`;
 
     const result = await llmProvider.generateResponse(goal, {
       systemPrompt,

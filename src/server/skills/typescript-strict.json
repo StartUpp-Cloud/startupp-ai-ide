@@ -1,0 +1,44 @@
+{
+  "id": "typescript-strict",
+  "name": "TypeScript Strict Mode",
+  "description": "Strict TypeScript rules for maximum type safety: no any, proper generics, discriminated unions, exhaustive matching, and Result types",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "file-type",
+  "category": "framework",
+  "rules": [
+    "Never use 'any' type -- use 'unknown' when the type is truly unknown, then narrow with type guards",
+    "Enable all strict compiler options: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes, noImplicitReturns",
+    "Use discriminated unions with a literal 'type' or 'kind' field for modeling variants, not optional fields or type unions without discriminants",
+    "Implement exhaustive pattern matching with 'never' in switch default cases to catch unhandled variants at compile time",
+    "Prefer Result<T, E> types (e.g., { ok: true, data: T } | { ok: false, error: E }) over throwing exceptions for expected error paths",
+    "Use 'satisfies' operator to validate object literals against types while preserving the narrowest inferred type",
+    "Define function return types explicitly for public APIs and module exports; inferred types are fine for local helpers",
+    "Use branded types (nominal typing via intersection with { readonly __brand: unique symbol }) for domain IDs to prevent mixing UserId with OrderId",
+    "Prefer readonly arrays and readonly properties by default; only make mutable when mutation is necessary",
+    "Use template literal types and mapped types to derive related types from a single source of truth instead of manually keeping types in sync"
+  ],
+  "promptTemplates": [
+    {
+      "name": "Type-Safe Refactor",
+      "description": "Refactor code to be strictly typed",
+      "template": "Refactor the following {{language}} code to use strict TypeScript. Replace all 'any' types, add discriminated unions where appropriate, use Result types for error handling, and ensure exhaustive pattern matching. Explain each change.\n\nCode:\n{{code}}"
+    },
+    {
+      "name": "Create Type-Safe API Client",
+      "description": "Generate a fully typed API client",
+      "template": "Create a type-safe API client for the following endpoints: {{endpoints}}. Use branded types for IDs, Result types for responses, and ensure all error cases are explicitly typed. Include request/response type definitions."
+    }
+  ],
+  "quickCommands": [
+    { "name": "Type Check", "command": "npx tsc --noEmit", "icon": "check-circle", "color": "blue" },
+    { "name": "Type Check (Watch)", "command": "npx tsc --noEmit --watch", "icon": "eye", "color": "purple" }
+  ],
+  "conventions": "TypeScript conventions:\n- Use .ts/.tsx extensions; never .js in a TypeScript project\n- Shared types go in src/types/ directory\n- Export types from index.ts barrel files per module\n- Use 'interface' for object shapes that may be extended; use 'type' for unions, intersections, and computed types\n- Avoid enums; prefer const objects with 'as const' assertion and derive types from them\n- Place type guards in a utils/typeGuards.ts file\n- Run tsc --noEmit in CI to catch type errors without producing output",
+  "triggers": [
+    { "filePattern": "tsconfig.json", "description": "TypeScript configuration" },
+    { "filePattern": "tsconfig.*.json", "description": "TypeScript configuration variants" },
+    { "filePattern": "*.ts", "description": "TypeScript files" },
+    { "filePattern": "*.tsx", "description": "TypeScript React files" }
+  ]
+}

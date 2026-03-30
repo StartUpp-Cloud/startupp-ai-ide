@@ -1,0 +1,44 @@
+{
+  "id": "security-audit",
+  "name": "Security Audit",
+  "description": "Security-focused development rules covering OWASP Top 10, input validation, authentication, secrets management, and dependency auditing",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "shield-check",
+  "category": "security",
+  "rules": [
+    "Validate and sanitize ALL user input on the server side, even if validated on the client -- never trust client data",
+    "Use parameterized queries or ORM methods for all database operations; never concatenate user input into SQL strings",
+    "Store secrets (API keys, database credentials, tokens) in environment variables or a secrets manager, never in source code or config files committed to git",
+    "Implement rate limiting on authentication endpoints and sensitive API routes to prevent brute-force attacks",
+    "Use bcrypt or argon2 for password hashing with a work factor of at least 10; never use MD5, SHA1, or plain SHA256 for passwords",
+    "Set HTTP security headers: Content-Security-Policy, X-Content-Type-Options, Strict-Transport-Security, X-Frame-Options",
+    "Validate JWT tokens on every request: check expiration, issuer, audience, and signature algorithm; reject 'none' algorithm",
+    "Apply the principle of least privilege: database users, API keys, and service accounts should have minimal required permissions",
+    "Run npm audit or equivalent dependency scan in CI/CD pipelines and block merges with critical vulnerabilities",
+    "Log security-relevant events (login attempts, permission changes, data access) with sufficient context for forensic analysis, but never log sensitive data like passwords or tokens"
+  ],
+  "promptTemplates": [
+    {
+      "name": "Security Review",
+      "description": "Perform a security review of code",
+      "template": "Perform a security review of the following code. Check for: SQL injection, XSS, CSRF, authentication bypass, insecure deserialization, sensitive data exposure, and missing input validation. Rate each finding as critical/high/medium/low.\n\nCode to review:\n{{code}}"
+    },
+    {
+      "name": "Auth Implementation",
+      "description": "Generate secure authentication code",
+      "template": "Implement secure {{authType}} authentication for a {{framework}} application. Include: password hashing with bcrypt, JWT token generation and validation, refresh token rotation, rate limiting on login, and proper error messages that do not leak user existence."
+    }
+  ],
+  "quickCommands": [
+    { "name": "Audit Dependencies", "command": "npm audit", "icon": "shield", "color": "orange" },
+    { "name": "Fix Audit Issues", "command": "npm audit fix", "icon": "shield-check", "color": "green" }
+  ],
+  "conventions": "Security conventions:\n- All API routes require authentication unless explicitly marked as public\n- Use .env for local secrets with .env.example committed as a template (no real values)\n- Add a .gitignore entry for .env, *.pem, *.key, and credential files\n- Rotate secrets on any suspected compromise, not just on schedule\n- Document all public endpoints in the API specification\n- Perform dependency audits weekly and before every production release\n- Use HTTPS everywhere; redirect HTTP to HTTPS in production",
+  "triggers": [
+    { "filePattern": "*.env", "description": "Environment files with potential secrets" },
+    { "filePattern": "*.env.*", "description": "Environment file variants" },
+    { "filePattern": "*auth*", "description": "Authentication-related files" },
+    { "filePattern": "*middleware*", "description": "Middleware files (often contain auth logic)" }
+  ]
+}
