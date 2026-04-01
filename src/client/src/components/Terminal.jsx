@@ -161,12 +161,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
         setStatus('connected');
         wsRef.current = ws;
 
-        // Re-attach to current session if we had one (reconnection case)
-        if (sessionIdRef.current) {
-          ws.send(JSON.stringify({ type: 'attach', sessionId: sessionIdRef.current }));
-        }
-
-        // Request session list
+        // Only request session list — the auto-session useEffect handles attach/create
+        // to avoid double-attach on reconnection
         ws.send(JSON.stringify({ type: 'list-sessions' }));
       };
 
@@ -208,7 +204,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
   const handleWebSocketMessage = useCallback((msg) => {
     switch (msg.type) {
       case 'connected':
-        xtermRef.current?.writeln('\x1b[32m\u25CF Connected to terminal server\x1b[0m\n');
+        // Silent — the status dot in the toolbar shows connection state
         break;
 
       case 'session-created':
@@ -230,7 +226,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
       case 'attached':
         setSessionId(msg.session.id);
         onSessionChange?.(msg.session.id);
-        xtermRef.current?.writeln(`\x1b[32m\u25CF Attached to session\x1b[0m\n`);
+        // No status message — scrollback replay shows the terminal state
         xtermRef.current?.focus();
         break;
 
@@ -389,7 +385,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
     if (existingSessionId) {
       // Attach to existing session for this project (server sends scrollback)
       if (existingSessionId !== sessionIdRef.current) {
-        xtermRef.current?.clear();
+        xtermRef.current?.reset(); // Full reset before scrollback replay
         wsRef.current.send(JSON.stringify({
           type: 'attach',
           sessionId: existingSessionId,
@@ -397,8 +393,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
       }
     } else {
       // Create a new session for this project
-      xtermRef.current?.clear();
-      xtermRef.current?.writeln('\x1b[36m\u25CF Starting session for project...\x1b[0m\n');
+      xtermRef.current?.reset();
       wsRef.current.send(JSON.stringify({
         type: 'create-session',
         projectId,
