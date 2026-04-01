@@ -147,12 +147,16 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
+    let mounted = true;
+    let reconnectTimer = null;
 
     const connect = () => {
+      if (!mounted) return; // Don't connect if unmounted (StrictMode cleanup)
       setStatus('connecting');
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
+        if (!mounted) { ws.close(); return; }
         setConnected(true);
         setStatus('connected');
         wsRef.current = ws;
@@ -167,17 +171,19 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
       };
 
       ws.onmessage = (event) => {
+        if (!mounted) return;
         const msg = JSON.parse(event.data);
         handleWebSocketMessage(msg);
       };
 
       ws.onclose = () => {
+        if (!mounted) return; // Don't reconnect if component was unmounted
         setConnected(false);
         setStatus('disconnected');
         wsRef.current = null;
 
         // Reconnect after delay
-        setTimeout(connect, 3000);
+        reconnectTimer = setTimeout(connect, 3000);
       };
 
       ws.onerror = (error) => {
@@ -189,8 +195,11 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
     connect();
 
     return () => {
+      mounted = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
     };
   }, []);
