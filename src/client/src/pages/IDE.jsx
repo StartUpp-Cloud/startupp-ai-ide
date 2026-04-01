@@ -95,6 +95,9 @@ export default function IDE() {
   const [panelMode, setPanelMode] = useState('prompt'); // 'prompt' | 'plan'
   const [attachments, setAttachments] = useState([]); // Array of { id, type, label, content }
 
+  // Git branch state
+  const [currentBranch, setCurrentBranch] = useState(null); // { branch, isMainBranch, hasChanges }
+
   // Plan state
   const [planSteps, setPlanSteps] = useState(null);
   const [planTitle, setPlanTitle] = useState('');
@@ -153,6 +156,26 @@ export default function IDE() {
   useEffect(() => {
     loadGlobalRules();
   }, []);
+
+  // Load git branch info for current project
+  useEffect(() => {
+    if (!selectedProject?.folderPath) {
+      setCurrentBranch(null);
+      return;
+    }
+    const fetchBranch = () => {
+      fetch(`/api/orchestrator/git-info?projectPath=${encodeURIComponent(selectedProject.folderPath)}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.isGitRepo) setCurrentBranch(data);
+          else setCurrentBranch(null);
+        })
+        .catch(() => setCurrentBranch(null));
+    };
+    fetchBranch();
+    const interval = setInterval(fetchBranch, 15000); // Refresh every 15s
+    return () => clearInterval(interval);
+  }, [selectedProject?.folderPath]);
 
   // Load selected project
   useEffect(() => {
@@ -504,15 +527,42 @@ export default function IDE() {
   };
 
   return (
-    <div className="h-screen flex bg-surface-900 overflow-hidden">
-      {/* Kill Switch Bar - shown when orchestrator is running */}
-      {executionId && planRunning && (
-        <div className="absolute top-0 left-0 right-0 z-50 flex items-center justify-between px-4 py-1.5 bg-red-950/90 border-b border-red-500/30 backdrop-blur-sm">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-            <span className="text-xs text-red-300 font-medium">Autonomous execution in progress</span>
-            <span className="text-xs text-red-400/60">{planTitle}</span>
-          </div>
+    <div className="h-screen flex flex-col bg-surface-900 overflow-hidden">
+      {/* ── Top Status Bar ── */}
+      <div className="flex items-center justify-between px-3 py-1 bg-surface-850 border-b border-surface-700 flex-shrink-0">
+        <div className="flex items-center gap-3">
+          {/* Brand */}
+          <span className="text-[11px] font-semibold text-surface-400 tracking-wide uppercase">StartUpp AI IDE</span>
+
+          {/* Project name */}
+          {selectedProject && (
+            <>
+              <span className="text-surface-600">/</span>
+              <span className="text-[11px] font-medium text-surface-200">{selectedProject.name}</span>
+            </>
+          )}
+
+          {/* Git branch */}
+          {currentBranch && (
+            <>
+              <span className="text-surface-600">/</span>
+              <div className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-medium ${
+                currentBranch.isMainBranch
+                  ? 'bg-yellow-500/15 text-yellow-300 border border-yellow-500/25'
+                  : 'bg-green-500/15 text-green-300 border border-green-500/25'
+              }`}>
+                <GitBranch className="w-3 h-3" />
+                <span>{currentBranch.branch}</span>
+                {currentBranch.hasChanges && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 flex-shrink-0" title="Uncommitted changes" />
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Right side: kill switch when running */}
+        {executionId && planRunning && (
           <button
             onClick={() => {
               fetch(`/api/orchestrator/kill/${executionId}`, { method: 'POST' });
@@ -520,12 +570,16 @@ export default function IDE() {
               setExecutionId(null);
               notify('Execution killed', 'error');
             }}
-            className="px-3 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded font-medium transition-colors"
+            className="flex items-center gap-1.5 px-3 py-0.5 text-[11px] bg-red-600 hover:bg-red-500 text-white rounded font-medium transition-colors"
           >
+            <div className="w-1.5 h-1.5 rounded-full bg-red-300 animate-pulse" />
             KILL SWITCH
           </button>
-        </div>
-      )}
+        )}
+      </div>
+
+      {/* ── Main IDE Layout ── */}
+      <div className="flex-1 flex overflow-hidden">
 
       {/* Left Panel */}
       {!leftPanelCollapsed && (
@@ -1108,6 +1162,7 @@ export default function IDE() {
           </div>
         )}
       </div>
+      </div>{/* close flex-1 flex overflow-hidden */}
     </div>
   );
 }
