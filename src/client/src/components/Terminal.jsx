@@ -101,6 +101,9 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
           sessionId: sessionIdRef.current,
           data,
         }));
+      } else if (!sessionIdRef.current) {
+        // No active session — give user feedback instead of silently dropping input
+        xterm.writeln('\x1b[33mNo active session. Click "Start" to create one.\x1b[0m');
       }
     });
 
@@ -212,12 +215,14 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
         }
         onSessionChange?.(msg.sessionId);
         xtermRef.current?.writeln(`\x1b[32m\u25CF Session started\x1b[0m\n`);
+        xtermRef.current?.focus();
         break;
 
       case 'attached':
         setSessionId(msg.session.id);
         onSessionChange?.(msg.session.id);
         xtermRef.current?.writeln(`\x1b[32m\u25CF Attached to session\x1b[0m\n`);
+        xtermRef.current?.focus();
         break;
 
       case 'output':
@@ -490,9 +495,19 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
 
   // Custom response input state
   const [customResponse, setCustomResponse] = useState('');
+  const [terminalFocused, setTerminalFocused] = useState(false);
 
   return (
-    <div className="flex flex-col h-full bg-[#1a1b26] rounded-lg overflow-hidden border border-gray-700">
+    <div
+      className={`flex flex-col h-full bg-[#1a1b26] rounded-lg overflow-hidden border transition-colors ${
+        terminalFocused ? 'border-primary-500/50' : 'border-gray-700'
+      }`}
+      onFocus={() => setTerminalFocused(true)}
+      onBlur={(e) => {
+        // Only unfocus if focus left the entire terminal container
+        if (!e.currentTarget.contains(e.relatedTarget)) setTerminalFocused(false);
+      }}
+    >
       {/* ── Top Control Bar ── */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-gray-800/80 border-b border-gray-700 flex-shrink-0">
         {isUtility ? (
@@ -766,6 +781,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
         ref={terminalRef}
         className="flex-1 p-2"
         style={{ minHeight: isUtility ? '120px' : '300px' }}
+        onClick={() => xtermRef.current?.focus()}
       />
 
       {/* LLM Settings Panel */}
