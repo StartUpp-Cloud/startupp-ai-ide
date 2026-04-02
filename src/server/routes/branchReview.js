@@ -42,68 +42,108 @@ function mapGitStatus(letter) {
  *   baseBranch  - base branch to compare against (default: 'main')
  *   commitCount - number of recent commits for 'recent' mode (default: 5)
  */
+/**
+ * GET /api/branch-review/commits
+ * Returns recent commits for the user to select which ones to review.
+ */
+router.get('/commits', (req, res) => {
+  try {
+    const { projectPath, count = 20 } = req.query;
+    if (!projectPath) return res.status(400).json({ error: 'projectPath is required' });
+
+    const opts = GIT_EXEC_OPTIONS(projectPath);
+    const n = Math.max(1, Math.min(parseInt(count, 10) || 20, 100));
+
+    let branch;
+    try { branch = execSync('git branch --show-current', opts).trim(); }
+    catch { branch = 'unknown'; }
+
+    const logOutput = execSync(
+      `git log --oneline --format="%H||%h||%s||%an||%ar" -${n}`,
+      opts,
+    ).trim();
+
+    const commits = logOutput ? logOutput.split('\n').map(line => {
+      const [hash, shortHash, message, author, timeAgo] = line.split('||');
+      return { hash, shortHash, message, author, timeAgo };
+    }) : [];
+
+    res.json({ branch, commits });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get commits', message: error.message });
+  }
+});
+
+/**
+ * GET /api/branch-review/changes
+ * Returns changed files. Modes:
+ *   - commits: diff between two commit hashes (fromCommit..toCommit)
+ *   - working: uncommitted changes (staged + unstaged + untracked)
+ */
 router.get('/changes', (req, res) => {
   try {
-    const { projectPath, mode = 'branch', baseBranch = 'main', commitCount = 5 } = req.query;
+    const { projectPath, fromCommit, toCommit, mode = 'commits' } = req.query;
 
     if (!projectPath) {
       return res.status(400).json({ error: 'projectPath is required' });
     }
 
     const opts = GIT_EXEC_OPTIONS(projectPath);
-    const count = Math.max(1, Math.min(parseInt(commitCount, 10) || 5, 50));
 
-    // Get current branch name
     let currentBranch;
-    try {
-      currentBranch = execSync('git branch --show-current', opts).trim();
-    } catch {
-      currentBranch = 'unknown';
-    }
+    try { currentBranch = execSync('git branch --show-current', opts).trim(); }
+    catch { currentBranch = 'unknown'; }
 
-    // Build the diff range based on mode
     let diffRange;
     let effectiveMode = mode;
 
-    if (mode === 'recent') {
-      diffRange = `HEAD~${count}..HEAD`;
+    if (mode === 'working') {
+      // Uncommitted changes — use HEAD as reference
+      diffRange = 'HEAD';
     } else {
-      // Branch mode: compare vs base branch
-      // First check if the diff is reasonable (< 200 files)
-      // If too large, auto-fall back to recent commits
-      diffRange = `${baseBranch}...HEAD`;
-      try {
-        const quickCheck = execSync(`git diff --name-only ${diffRange}`, opts).trim();
-        const fileCount = quickCheck ? quickCheck.split('\n').length : 0;
-        if (fileCount > 200) {
-          // Branch diverged too far — fall back to recent commits for a useful review
-          diffRange = `HEAD~${count}..HEAD`;
-          effectiveMode = 'recent-auto';
-        }
-      } catch {
-        // Base branch might not exist — fall back to recent commits
-        diffRange = `HEAD~${count}..HEAD`;
-        effectiveMode = 'recent-auto';
+      // Commit range
+      if (!fromCommit) {
+        return res.status(400).json({ error: 'fromCommit is required for commits mode' });
       }
+      diffRange = toCommit ? `${fromCommit}..${toCommit}` : `${fromCommit}..HEAD`;
     }
 
     // Get list of changed files with status
-    let nameStatusOutput;
+    let nameStatusOutput = '';
     try {
-      nameStatusOutput = execSync(`git diff --name-status ${diffRange}`, opts).trim();
+      if (mode === 'working') {
+        // Combine staged + unstaged changes
+        const staged = execSync('git diff --cached --name-status', opts).trim();
+        const unstaged = execSync('git diff --name-status', opts).trim();
+        const untracked = execSync('git ls-files --others --exclude-standard', opts).trim();
+
+        const parts = [];
+        if (staged) parts.push(staged);
+        if (unstaged) parts.push(unstaged);
+        if (untracked) {
+          // Untracked files are new (Added)
+          parts.push(untracked.split('\n').filter(Boolean).map(f => `A\t${f}`).join('\n'));
+        }
+        nameStatusOutput = parts.join('\n');
+
+        // Deduplicate by file path (staged + unstaged might overlap)
+        const seen = new Set();
+        nameStatusOutput = nameStatusOutput.split('\n').filter(line => {
+          const filePath = line.split('\t').slice(-1)[0];
+          if (seen.has(filePath)) return false;
+          seen.add(filePath);
+          return true;
+        }).join('\n');
+      } else {
+        nameStatusOutput = execSync(`git diff --name-status ${diffRange}`, opts).trim();
+      }
     } catch (error) {
-      return res.status(400).json({
-        error: 'Failed to get git diff',
-        message: error.message,
-      });
+      return res.status(400).json({ error: 'Failed to get git diff', message: error.message });
     }
 
     if (!nameStatusOutput) {
       return res.json({
-        branch: currentBranch,
-        baseBranch: mode === 'branch' ? baseBranch : null,
-        mode,
-        files: [],
+        branch: currentBranch, mode: effectiveMode, files: [],
         summary: { added: 0, modified: 0, deleted: 0, renamed: 0, total: 0 },
       });
     }
@@ -112,22 +152,31 @@ router.get('/changes', (req, res) => {
     const summary = { added: 0, modified: 0, deleted: 0, renamed: 0, total: 0 };
 
     const files = lines.map((line) => {
-      // Format: "M\tsrc/file.ts" or "R100\told.ts\tnew.ts"
       const parts = line.split('\t');
       const statusLetter = parts[0].charAt(0);
       const filePath = statusLetter === 'R' ? parts[2] : parts[1];
       const status = mapGitStatus(statusLetter);
 
-      // Count by status
-      if (summary[status] !== undefined) {
-        summary[status]++;
-      }
+      if (summary[status] !== undefined) summary[status]++;
       summary.total++;
 
       // Get the diff for this file
       let diff = '';
       try {
-        diff = execSync(`git diff ${diffRange} -- "${filePath}"`, opts).trim();
+        if (mode === 'working') {
+          // Try staged first, then unstaged
+          diff = execSync(`git diff --cached -- "${filePath}"`, opts).trim();
+          if (!diff) diff = execSync(`git diff -- "${filePath}"`, opts).trim();
+          if (!diff && status === 'added') {
+            // New untracked file — show content
+            try {
+              const content = execSync(`head -100 "${filePath}"`, opts).trim();
+              diff = `(new file)\n${content}`;
+            } catch { diff = '(new untracked file)'; }
+          }
+        } else {
+          diff = execSync(`git diff ${diffRange} -- "${filePath}"`, opts).trim();
+        }
         if (diff.length > MAX_DIFF_LENGTH) {
           diff = diff.slice(0, MAX_DIFF_LENGTH) + '\n... [truncated]';
         }
@@ -136,9 +185,7 @@ router.get('/changes', (req, res) => {
       }
 
       return {
-        path: filePath,
-        status,
-        diff,
+        path: filePath, status, diff,
         directory: path.dirname(filePath),
         extension: path.extname(filePath),
       };
@@ -146,11 +193,9 @@ router.get('/changes', (req, res) => {
 
     res.json({
       branch: currentBranch,
-      baseBranch: effectiveMode === 'branch' ? baseBranch : null,
       mode: effectiveMode,
-      note: effectiveMode === 'recent-auto'
-        ? `Branch has too many changes vs ${baseBranch}. Showing last ${count} commits instead.`
-        : null,
+      fromCommit: mode === 'commits' ? fromCommit : null,
+      toCommit: mode === 'commits' ? (toCommit || 'HEAD') : null,
       files,
       summary,
     });

@@ -100,10 +100,14 @@ export default function BranchReview() {
 
   // Config state
   const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [mode, setMode] = useState("branch");
-  const [baseBranch, setBaseBranch] = useState("main");
-  const [commitCount, setCommitCount] = useState(5);
-  const [currentBranch, setCurrentBranch] = useState(null); // current branch name for display
+  const [currentBranch, setCurrentBranch] = useState(null);
+
+  // Commit selection
+  const [commits, setCommits] = useState([]);
+  const [loadingCommits, setLoadingCommits] = useState(false);
+  const [selectedFromIdx, setSelectedFromIdx] = useState(null); // index in commits array (older)
+  const [selectedToIdx, setSelectedToIdx] = useState(null); // index in commits array (newer, 0 = most recent)
+  const [reviewMode, setReviewMode] = useState('commits'); // 'commits' | 'working'
 
   // Analysis state
   const [phase, setPhase] = useState("idle"); // idle | loading | analyzing | done | error
@@ -150,6 +154,27 @@ export default function BranchReview() {
       .catch(() => setCurrentBranch(null));
   }, [selectedProject?.folderPath]);
 
+  // Fetch recent commits when project changes
+  useEffect(() => {
+    if (!selectedProject?.folderPath) { setCommits([]); return; }
+    setLoadingCommits(true);
+    fetch(`/api/branch-review/commits?projectPath=${encodeURIComponent(selectedProject.folderPath)}&count=20`)
+      .then(r => r.json())
+      .then(data => {
+        setCommits(data.commits || []);
+        // Auto-select last 3 commits by default
+        if (data.commits?.length >= 3) {
+          setSelectedToIdx(0);
+          setSelectedFromIdx(2);
+        } else if (data.commits?.length > 0) {
+          setSelectedToIdx(0);
+          setSelectedFromIdx(data.commits.length - 1);
+        }
+      })
+      .catch(() => setCommits([]))
+      .finally(() => setLoadingCommits(false));
+  }, [selectedProject?.folderPath]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -179,10 +204,16 @@ export default function BranchReview() {
       // Step 1: Fetch changed files
       const params = new URLSearchParams({
         projectPath: selectedProject.folderPath,
-        mode,
-        baseBranch,
-        ...(mode === "commits" && { commitCount: commitCount.toString() }),
+        mode: reviewMode,
       });
+
+      if (reviewMode === 'commits' && commits.length > 0 && selectedFromIdx !== null) {
+        params.set('fromCommit', commits[selectedFromIdx].hash);
+        if (selectedToIdx !== null && selectedToIdx > 0) {
+          params.set('toCommit', commits[selectedToIdx].hash);
+        }
+        // toCommit defaults to HEAD on the server
+      }
 
       const changesRes = await fetch(`/api/branch-review/changes?${params}`, {
         signal: controller.signal,
@@ -195,13 +226,7 @@ export default function BranchReview() {
 
       const changesData = await changesRes.json();
       const changedFiles = changesData.files || [];
-
-      // Show note if the server auto-switched to recent mode
-      if (changesData.note) {
-        setAnalysisNote(changesData.note);
-      } else {
-        setAnalysisNote(null);
-      }
+      setAnalysisNote(null);
 
       if (changedFiles.length === 0) {
         setPhase("done");
@@ -308,7 +333,7 @@ export default function BranchReview() {
       setGlobalError(err.message);
       setPhase("error");
     }
-  }, [selectedProject, mode, baseBranch, commitCount]);
+  }, [selectedProject, reviewMode, commits, selectedFromIdx, selectedToIdx]);
 
   // ── Computed data ────────────────────────────────────────────────────────
 
@@ -388,61 +413,100 @@ export default function BranchReview() {
             </select>
           </div>
 
-          {/* Current branch + Analyze button */}
+          {/* Current branch */}
           {currentBranch && (
             <>
               <div className="h-5 w-px bg-surface-700" />
-              <div className="flex items-center gap-2 px-2.5 py-1 bg-green-500/10 border border-green-500/20 rounded-md">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-green-500/10 border border-green-500/20 rounded-md">
                 <GitBranch className="w-3.5 h-3.5 text-green-400" />
                 <span className="text-sm font-mono font-medium text-green-300">{currentBranch}</span>
-                <span className="text-[10px] text-surface-500">vs {baseBranch}</span>
               </div>
             </>
           )}
 
-          {/* Analyze button — right next to branch */}
+          <div className="h-5 w-px bg-surface-700" />
+
+          {/* Review mode */}
+          <div className="flex items-center gap-1 bg-surface-800 rounded-md p-0.5">
+            <button
+              onClick={() => setReviewMode('commits')}
+              className={`px-2.5 py-1 text-[12px] rounded transition-colors ${
+                reviewMode === 'commits' ? 'bg-primary-500/20 text-primary-300' : 'text-surface-400 hover:text-surface-200'
+              }`}
+            >
+              Commits
+            </button>
+            <button
+              onClick={() => setReviewMode('working')}
+              className={`px-2.5 py-1 text-[12px] rounded transition-colors ${
+                reviewMode === 'working' ? 'bg-primary-500/20 text-primary-300' : 'text-surface-400 hover:text-surface-200'
+              }`}
+            >
+              Uncommitted
+            </button>
+          </div>
+
+          {/* Analyze button */}
           <button
             onClick={runAnalysis}
             disabled={
               !selectedProjectId ||
               phase === "loading" ||
-              phase === "analyzing"
+              phase === "analyzing" ||
+              (reviewMode === 'commits' && selectedFromIdx === null)
             }
             className="btn-primary !py-1.5 !px-4 !text-sm"
           >
             {phase === "loading" || phase === "analyzing" ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                {phase === "loading" ? "Fetching..." : "Analyzing..."}
-              </>
+              <><Loader2 className="w-3.5 h-3.5 animate-spin" />{phase === "loading" ? "Fetching..." : "Analyzing..."}</>
             ) : phase === "done" ? (
-              <>
-                <RefreshCw className="w-3.5 h-3.5" />
-                Re-analyze
-              </>
+              <><RefreshCw className="w-3.5 h-3.5" />Re-analyze</>
             ) : (
-              <>
-                <Sparkles className="w-3.5 h-3.5" />
-                Analyze
-              </>
+              <><Sparkles className="w-3.5 h-3.5" />Analyze</>
             )}
           </button>
 
           {/* Progress indicator */}
           {phase === "analyzing" && files.length > 0 && (
             <div className="flex items-center gap-2 ml-auto">
-              <span className="text-xs text-surface-400">
-                {analyzedCount}/{files.length} files
-              </span>
+              <span className="text-xs text-surface-400">{analyzedCount}/{files.length} files</span>
               <div className="w-32 h-1.5 bg-surface-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-primary-500 to-primary-400 rounded-full transition-all duration-500 ease-out"
-                  style={{ width: `${progress}%` }}
-                />
+                <div className="h-full bg-gradient-to-r from-primary-500 to-primary-400 rounded-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }} />
               </div>
             </div>
           )}
         </div>
+
+        {/* Commit picker (shown when mode is 'commits') */}
+        {reviewMode === 'commits' && selectedProject && commits.length > 0 && (
+          <div className="px-5 pb-3">
+            <p className="text-[11px] text-surface-500 mb-1.5">Click a commit to set the start point. The review covers from that commit to HEAD.</p>
+            <div className="max-h-40 overflow-y-auto border border-surface-700 rounded-md bg-surface-850">
+              {commits.map((c, idx) => {
+                const isFrom = idx === selectedFromIdx;
+                const inRange = selectedFromIdx !== null && idx <= selectedFromIdx && idx >= (selectedToIdx ?? 0);
+                return (
+                  <button
+                    key={c.hash}
+                    onClick={() => {
+                      setSelectedFromIdx(idx);
+                      setSelectedToIdx(0);
+                    }}
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left border-b border-surface-700/50 last:border-0 transition-colors ${
+                      isFrom ? 'bg-primary-500/15 text-primary-200' : inRange ? 'bg-primary-500/5 text-surface-200' : 'text-surface-400 hover:bg-surface-800'
+                    }`}
+                  >
+                    <GitCommit className="w-3 h-3 flex-shrink-0 text-surface-500" />
+                    <span className="text-[11px] font-mono text-surface-500 w-16 flex-shrink-0">{c.shortHash}</span>
+                    <span className={`text-[12px] flex-1 truncate ${inRange ? 'text-surface-200' : 'text-surface-400'}`}>{c.message}</span>
+                    <span className="text-[10px] text-surface-600 flex-shrink-0">{c.timeAgo}</span>
+                    {isFrom && <span className="text-[9px] px-1.5 py-0.5 bg-primary-500/20 text-primary-300 rounded flex-shrink-0">FROM</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Analysis note (auto-fallback warning) */}
