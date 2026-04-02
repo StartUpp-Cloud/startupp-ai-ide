@@ -63,7 +63,7 @@ export default function IDE() {
   // Sessions & notifications state
   const [allSessions, setAllSessions] = useState([]);
   const [notifications, setNotifications] = useState([]);
-  const [leftView, setLeftView] = useState('sessions');
+  const [leftView, setLeftView] = useState('projects');
 
   // Git branch state
   const [currentBranch, setCurrentBranch] = useState(null);

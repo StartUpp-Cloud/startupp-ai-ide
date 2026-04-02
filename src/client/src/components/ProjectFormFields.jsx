@@ -1,4 +1,4 @@
-import { Plus, X, GripVertical, ChevronDown, GitBranch, Terminal as TerminalIcon } from "lucide-react";
+import { Plus, X, GripVertical, ChevronDown, GitBranch, FolderOpen, Terminal as TerminalIcon } from "lucide-react";
 import PresetSelector from "./PresetSelector";
 
 const ProjectFormFields = ({
@@ -49,7 +49,25 @@ const ProjectFormFields = ({
         )}
       </div>
 
-      {/* Repositories */}
+      {/* Local Folder (fallback when Docker is not available) */}
+      <div>
+        <label className="label">
+          <FolderOpen className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
+          Local Folder <span className="text-surface-600 text-xs font-normal">— for local development without Docker</span>
+        </label>
+        <input
+          type="text"
+          value={formData.folderPath}
+          onChange={(e) => handleInputChange("folderPath", e.target.value)}
+          className="input"
+          placeholder="/home/user/projects/my-app"
+        />
+        <p className="text-hint mt-1">
+          Path on this machine where the terminal will open. Used when Docker is not available.
+        </p>
+      </div>
+
+      {/* Repositories (for Docker containers) */}
       <div>
         <label className="label">
           <GitBranch className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />

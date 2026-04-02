@@ -5,7 +5,8 @@ const defaultFormData = {
   description: "",
   rules: [""],
   selectedPresets: [],
-  repos: [{ url: "", folder: "" }], // Multiple repos for monorepo/multi-repo workspaces
+  folderPath: "", // Local folder (used when Docker is not available)
+  repos: [{ url: "", folder: "" }], // Multiple repos for Docker container workspaces
   ports: "",
 };
 
@@ -72,10 +73,11 @@ export default function useProjectForm(initialData) {
       description: project.description,
       rules: project.rules?.length > 0 ? [...project.rules] : [""],
       selectedPresets: project.selectedPresets || [],
+      folderPath: project.folderPath || "",
       repos: project.repos?.length > 0
         ? project.repos.map(r => ({ url: r.url || "", folder: r.folder || "" }))
         : project.gitUrl
-          ? [{ url: project.gitUrl, folder: "" }] // Backward compat: old single gitUrl
+          ? [{ url: project.gitUrl, folder: "" }]
           : [{ url: "", folder: "" }],
       ports: (project.containerPorts || []).join(", "),
     });

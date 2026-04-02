@@ -180,9 +180,13 @@ function ProjectGroup({
       {expanded && (
         <div className="ml-2 border-l border-surface-700/50 pl-0.5">
           {sessions.length === 0 ? (
-            <div className="px-3 py-1.5 text-[10px] text-surface-500 italic">
-              No active sessions
-            </div>
+            <button
+              onClick={() => onCreateSession(project.id)}
+              className="w-full px-3 py-1.5 text-[10px] text-primary-400 hover:text-primary-300 hover:bg-surface-700/40 rounded text-left flex items-center gap-1.5 transition-colors"
+            >
+              <Plus className="w-3 h-3" />
+              Start a session
+            </button>
           ) : (
             sessions.map((session) => (
               <SessionRow
@@ -273,7 +277,7 @@ export default function SessionManager({
             project={project}
             sessions={sessionsByProject.get(project.id) || []}
             activeSessionId={activeSessionId}
-            defaultExpanded={(sessionsByProject.get(project.id) || []).length > 0}
+            defaultExpanded={true}
             onSwitchSession={onSwitchSession}
             onCreateSession={onCreateSession}
             onKillSession={onKillSession}
