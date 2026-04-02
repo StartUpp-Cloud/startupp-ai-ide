@@ -285,7 +285,7 @@ export default function IDE() {
               style={{ width: leftPanelWidth }}
             >
               {/* Projects (top) */}
-              <div className="flex-1 overflow-hidden flex flex-col" style={{ flex: '0 0 60%' }}>
+              <div className="flex-1 overflow-hidden flex flex-col">
                 <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-700">
                   <span className="text-[11px] font-medium text-surface-300 uppercase tracking-wide">Projects</span>
                   <button
@@ -306,11 +306,36 @@ export default function IDE() {
                 </div>
               </div>
 
-              {/* Divider */}
-              <div className="h-px bg-surface-700 flex-shrink-0" />
+              {/* ── Git Branch (middle drawer) ── */}
+              {currentBranch && selectedProject && (
+                <div className="flex-shrink-0 px-3 py-2 bg-surface-800/50 border-y border-surface-700">
+                  <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md ${
+                    currentBranch.isMainBranch
+                      ? 'bg-yellow-500/10 border border-yellow-500/20'
+                      : 'bg-green-500/10 border border-green-500/20'
+                  }`}>
+                    <GitBranch className={`w-4 h-4 flex-shrink-0 ${
+                      currentBranch.isMainBranch ? 'text-yellow-400' : 'text-green-400'
+                    }`} />
+                    <div className="flex-1 min-w-0">
+                      <div className={`text-[12px] font-mono font-semibold truncate ${
+                        currentBranch.isMainBranch ? 'text-yellow-300' : 'text-green-300'
+                      }`}>
+                        {currentBranch.branch}
+                      </div>
+                      {currentBranch.hasChanges && (
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
+                          <span className="text-[10px] text-yellow-400/80">Uncommitted changes</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Quick Actions (bottom) */}
-              <div className="flex-1 overflow-hidden" style={{ flex: '0 0 40%' }}>
+              <div className="overflow-hidden" style={{ minHeight: '120px', maxHeight: '40%' }}>
                 <QuickActionsPanel
                   projectId={selectedProjectId}
                   projectPath={selectedProject?.folderPath}
