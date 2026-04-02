@@ -536,6 +536,48 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
   const [customResponse, setCustomResponse] = useState('');
   const [terminalFocused, setTerminalFocused] = useState(false);
 
+  // AI command helper state (utility terminal only)
+  const [aiCommandQuery, setAiCommandQuery] = useState('');
+  const [aiCommandResult, setAiCommandResult] = useState(null); // { command, generating }
+  const [aiCommandGenerating, setAiCommandGenerating] = useState(false);
+
+  const handleAiCommandGenerate = async () => {
+    if (!aiCommandQuery.trim() || aiCommandGenerating) return;
+    setAiCommandGenerating(true);
+    setAiCommandResult(null);
+    try {
+      const res = await fetch('/api/llm/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: aiCommandQuery.trim(),
+          context: {
+            systemPrompt: 'You are a shell command expert. Given a natural language description, return ONLY the exact shell command to run. No explanation, no markdown, no quotes around the command. Just the command itself. If multiple commands are needed, separate them with && on one line.',
+            maxTokens: 200,
+            temperature: 0.1,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (data.response) {
+        const cmd = data.response.replace(/<think>[\s\S]*?<\/think>/g, '').trim().split('\n')[0];
+        setAiCommandResult(cmd);
+      }
+    } catch {
+      setAiCommandResult(null);
+    } finally {
+      setAiCommandGenerating(false);
+    }
+  };
+
+  const handleAiCommandSend = () => {
+    if (!aiCommandResult || !sessionId) return;
+    sendToTerminal(aiCommandResult + '\n');
+    setAiCommandQuery('');
+    setAiCommandResult(null);
+    xtermRef.current?.focus();
+  };
+
   return (
     <div
       className={`flex flex-col h-full bg-[#1a1b26] rounded-lg overflow-hidden border transition-colors ${
@@ -550,9 +592,9 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
       {/* ── Top Control Bar ── */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-gray-800/80 border-b border-gray-700 flex-shrink-0">
         {isUtility ? (
-          <>
-            {/* Utility: minimal toolbar */}
-            <div className="flex items-center gap-2 min-w-0 flex-1">
+          <div className="flex flex-col gap-1 w-full">
+            {/* Row 1: session controls */}
+            <div className="flex items-center gap-2">
               <button
                 onClick={createSession}
                 disabled={!connected}
@@ -569,9 +611,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
                   Kill
                 </button>
               )}
-            </div>
 
-            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <div className="flex-1" />
               <div className={`w-2 h-2 rounded-full ${
                 status === 'connected' ? 'bg-green-500' :
                 status === 'connecting' ? 'bg-yellow-500 animate-pulse' :
@@ -579,7 +620,56 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
                 'bg-gray-500'
               }`} title={status} />
             </div>
-          </>
+
+            {/* Row 2: AI command helper */}
+            {sessionId && (
+              <div className="flex items-center gap-1.5">
+                <Sparkles className="w-3 h-3 text-purple-400 flex-shrink-0" />
+                <input
+                  type="text"
+                  value={aiCommandQuery}
+                  onChange={(e) => { setAiCommandQuery(e.target.value); setAiCommandResult(null); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      if (aiCommandResult) handleAiCommandSend();
+                      else handleAiCommandGenerate();
+                    }
+                    if (e.key === 'Escape') { setAiCommandQuery(''); setAiCommandResult(null); }
+                  }}
+                  placeholder="Describe a command... (e.g. find large files)"
+                  className="flex-1 px-2 py-0.5 text-[11px] bg-gray-900 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:ring-1 focus:ring-purple-500/50 focus:border-purple-500/50 outline-none"
+                />
+                {aiCommandResult ? (
+                  <>
+                    <code className="px-1.5 py-0.5 text-[11px] bg-purple-500/10 text-purple-300 border border-purple-500/20 rounded truncate max-w-[200px]" title={aiCommandResult}>
+                      {aiCommandResult}
+                    </code>
+                    <button
+                      onClick={handleAiCommandSend}
+                      className="px-2 py-0.5 text-[10px] bg-green-600 hover:bg-green-700 text-white rounded transition-colors font-medium"
+                    >
+                      Run
+                    </button>
+                    <button
+                      onClick={() => setAiCommandResult(null)}
+                      className="p-0.5 text-gray-500 hover:text-gray-300"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={handleAiCommandGenerate}
+                    disabled={!aiCommandQuery.trim() || aiCommandGenerating}
+                    className="px-2 py-0.5 text-[10px] bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors font-medium"
+                  >
+                    {aiCommandGenerating ? '...' : 'Ask'}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         ) : (
           <>
             {/* Main terminal: full toolbar */}
