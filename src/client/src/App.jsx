@@ -8,6 +8,7 @@ import EditProject from "./pages/EditProject";
 import GlobalRules from "./pages/GlobalRules";
 import QuickPrompt from "./pages/QuickPrompt";
 import IDE from "./pages/IDE";
+import BranchReview from "./pages/BranchReview";
 import Onboarding from "./pages/Onboarding";
 import { ProjectProvider } from "./contexts/ProjectContext";
 import NotificationToast from "./components/NotificationToast";
@@ -80,8 +81,9 @@ function App() {
           <Route path="/global-rules" element={<Layout><GlobalRules /></Layout>} />
           <Route path="/quick" element={<Layout><QuickPrompt /></Layout>} />
 
-          {/* Onboarding accessible even after setup */}
+          {/* Standalone pages */}
           <Route path="/setup" element={<Onboarding />} />
+          <Route path="/branch-review" element={<BranchReview />} />
         </Routes>
       </SetupGate>
       <NotificationToast />

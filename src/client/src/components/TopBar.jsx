@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Sparkles,
   Send,
@@ -7,6 +8,7 @@ import {
   X,
   ChevronDown,
   GitBranch,
+  GitCompareArrows,
   Upload,
   Monitor,
   Play,
@@ -35,6 +37,7 @@ export default function TopBar({
   notify,
   notificationSlot,
 }) {
+  const navigate = useNavigate();
   const [promptText, setPromptText] = useState('');
   const [planMode, setPlanMode] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -362,6 +365,15 @@ export default function TopBar({
               </div>
             )}
           </div>
+
+          {/* Branch Review link */}
+          <button
+            onClick={() => window.open('/branch-review', '_blank')}
+            className="p-1.5 rounded hover:bg-surface-750 text-surface-400 hover:text-surface-200 transition-colors"
+            title="Branch Review"
+          >
+            <GitCompareArrows className="w-3.5 h-3.5" />
+          </button>
 
           {notificationSlot}
 
