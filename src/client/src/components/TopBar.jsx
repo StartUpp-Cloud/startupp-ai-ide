@@ -16,6 +16,7 @@ import {
   Square,
   SkipForward,
   Loader2,
+  MousePointer,
 } from 'lucide-react';
 
 export default function TopBar({
@@ -373,6 +374,15 @@ export default function TopBar({
             title="Branch Review"
           >
             <GitCompareArrows className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Debug Element link */}
+          <button
+            onClick={() => window.open('/debug', '_blank')}
+            className="p-1.5 rounded hover:bg-surface-750 text-surface-400 hover:text-surface-200 transition-colors"
+            title="Debug Element"
+          >
+            <MousePointer className="w-3.5 h-3.5" />
           </button>
 
           {notificationSlot}

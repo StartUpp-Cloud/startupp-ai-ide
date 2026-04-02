@@ -9,6 +9,7 @@ import GlobalRules from "./pages/GlobalRules";
 import QuickPrompt from "./pages/QuickPrompt";
 import IDE from "./pages/IDE";
 import BranchReview from "./pages/BranchReview";
+import DebugElement from "./pages/DebugElement";
 import Onboarding from "./pages/Onboarding";
 import { ProjectProvider } from "./contexts/ProjectContext";
 import NotificationToast from "./components/NotificationToast";
@@ -84,6 +85,7 @@ function App() {
           {/* Standalone pages */}
           <Route path="/setup" element={<Onboarding />} />
           <Route path="/branch-review" element={<BranchReview />} />
+          <Route path="/debug" element={<DebugElement />} />
         </Routes>
       </SetupGate>
       <NotificationToast />
