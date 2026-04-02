@@ -103,6 +103,7 @@ export default function BranchReview() {
   const [mode, setMode] = useState("branch");
   const [baseBranch, setBaseBranch] = useState("main");
   const [commitCount, setCommitCount] = useState(5);
+  const [currentBranch, setCurrentBranch] = useState(null); // current branch name for display
 
   // Analysis state
   const [phase, setPhase] = useState("idle"); // idle | loading | analyzing | done | error
@@ -132,6 +133,21 @@ export default function BranchReview() {
       setSelectedProjectId(eligibleProjects[0].id);
     }
   }, [eligibleProjects, selectedProjectId]);
+
+  // Fetch current branch when project changes
+  useEffect(() => {
+    if (!selectedProject?.folderPath) { setCurrentBranch(null); return; }
+    fetch(`/api/orchestrator/git-info?projectPath=${encodeURIComponent(selectedProject.folderPath)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.isGitRepo) {
+          setCurrentBranch(data.branch);
+        } else {
+          setCurrentBranch(null);
+        }
+      })
+      .catch(() => setCurrentBranch(null));
+  }, [selectedProject?.folderPath]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -363,6 +379,17 @@ export default function BranchReview() {
               ))}
             </select>
           </div>
+
+          {/* Current branch indicator */}
+          {currentBranch && (
+            <>
+              <div className="h-5 w-px bg-surface-700" />
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-green-500/10 border border-green-500/20 rounded-md">
+                <GitBranch className="w-3.5 h-3.5 text-green-400" />
+                <span className="text-sm font-mono font-medium text-green-300">{currentBranch}</span>
+              </div>
+            </>
+          )}
 
           <div className="h-5 w-px bg-surface-700" />
 
