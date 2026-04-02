@@ -192,12 +192,25 @@ export default function TopBar({
 
   const handleKeyDown = (e) => {
     const isMod = e.metaKey || e.ctrlKey;
-    if (e.key === 'Enter' && !isMod) {
+    if (e.key === 'Enter' && isMod) {
+      // Ctrl/Cmd + Enter = insert newline
+      e.preventDefault();
+      const el = textareaRef.current;
+      if (!el) return;
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      const val = promptText;
+      setPromptText(val.substring(0, start) + '\n' + val.substring(end));
+      // Move cursor after the newline on next tick
+      requestAnimationFrame(() => {
+        el.selectionStart = el.selectionEnd = start + 1;
+      });
+    } else if (e.key === 'Enter' && !isMod) {
+      // Enter = send
       e.preventDefault();
       if (planMode) handleGeneratePlan();
       else handleSendRaw();
     }
-    // Ctrl/Cmd + Enter = newline (default behavior for textarea, just don't prevent)
   };
 
   // ── Render ──
