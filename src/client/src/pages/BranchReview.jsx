@@ -113,6 +113,7 @@ export default function BranchReview() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [globalError, setGlobalError] = useState(null);
   const [analyzedCount, setAnalyzedCount] = useState(0);
+  const [analysisNote, setAnalysisNote] = useState(null);
 
   // Abort controller ref for cancelling in-flight requests
   const abortRef = useRef(null);
@@ -194,6 +195,13 @@ export default function BranchReview() {
 
       const changesData = await changesRes.json();
       const changedFiles = changesData.files || [];
+
+      // Show note if the server auto-switched to recent mode
+      if (changesData.note) {
+        setAnalysisNote(changesData.note);
+      } else {
+        setAnalysisNote(null);
+      }
 
       if (changedFiles.length === 0) {
         setPhase("done");
@@ -436,6 +444,14 @@ export default function BranchReview() {
           )}
         </div>
       </div>
+
+      {/* Analysis note (auto-fallback warning) */}
+      {analysisNote && (
+        <div className="mx-6 mb-2 flex items-center gap-2 px-3 py-2 bg-yellow-500/10 border border-yellow-500/20 rounded-md text-[12px] text-yellow-300">
+          <Info className="w-3.5 h-3.5 flex-shrink-0" />
+          {analysisNote}
+        </div>
+      )}
 
       {/* ── Main Content ── */}
       <div className="flex-1 flex overflow-hidden">

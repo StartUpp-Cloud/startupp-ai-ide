@@ -62,9 +62,30 @@ router.get('/changes', (req, res) => {
     }
 
     // Build the diff range based on mode
-    const diffRange = mode === 'recent'
-      ? `HEAD~${count}..HEAD`
-      : `${baseBranch}...HEAD`;
+    let diffRange;
+    let effectiveMode = mode;
+
+    if (mode === 'recent') {
+      diffRange = `HEAD~${count}..HEAD`;
+    } else {
+      // Branch mode: compare vs base branch
+      // First check if the diff is reasonable (< 200 files)
+      // If too large, auto-fall back to recent commits
+      diffRange = `${baseBranch}...HEAD`;
+      try {
+        const quickCheck = execSync(`git diff --name-only ${diffRange}`, opts).trim();
+        const fileCount = quickCheck ? quickCheck.split('\n').length : 0;
+        if (fileCount > 200) {
+          // Branch diverged too far — fall back to recent commits for a useful review
+          diffRange = `HEAD~${count}..HEAD`;
+          effectiveMode = 'recent-auto';
+        }
+      } catch {
+        // Base branch might not exist — fall back to recent commits
+        diffRange = `HEAD~${count}..HEAD`;
+        effectiveMode = 'recent-auto';
+      }
+    }
 
     // Get list of changed files with status
     let nameStatusOutput;
@@ -125,8 +146,11 @@ router.get('/changes', (req, res) => {
 
     res.json({
       branch: currentBranch,
-      baseBranch: mode === 'branch' ? baseBranch : null,
-      mode,
+      baseBranch: effectiveMode === 'branch' ? baseBranch : null,
+      mode: effectiveMode,
+      note: effectiveMode === 'recent-auto'
+        ? `Branch has too many changes vs ${baseBranch}. Showing last ${count} commits instead.`
+        : null,
       files,
       summary,
     });
