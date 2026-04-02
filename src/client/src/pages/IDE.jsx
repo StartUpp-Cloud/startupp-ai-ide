@@ -284,9 +284,9 @@ export default function IDE() {
               className="flex flex-col bg-surface-850 border-r border-surface-700"
               style={{ width: leftPanelWidth }}
             >
-              {/* Projects (top) */}
-              <div className="flex-1 overflow-hidden flex flex-col">
-                <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-700">
+              {/* Projects (top) — uses min-h-0 to allow shrinking within flex */}
+              <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-700 flex-shrink-0">
                   <span className="text-[11px] font-medium text-surface-300 uppercase tracking-wide">Projects</span>
                   <button
                     onClick={() => setLeftPanelCollapsed(true)}
@@ -295,7 +295,7 @@ export default function IDE() {
                     <PanelLeftClose className="w-3.5 h-3.5" />
                   </button>
                 </div>
-                <div className="flex-1 overflow-hidden">
+                <div className="flex-1 min-h-0 overflow-auto">
                   <ProjectManagerPanel
                     selectedProjectId={selectedProjectId}
                     onSelectProject={(id) => setSelectedProjectId(id)}
