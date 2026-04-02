@@ -328,9 +328,23 @@ class TerminalServer {
     try {
       // If projectId provided, use project's folder path as cwd
       let workingDir = cwd;
+      let containerName = null;
+
       if (projectId && !cwd) {
         const project = Project.findById(projectId);
-        if (project?.folderPath) {
+        if (project?.containerName) {
+          // Container-based project
+          containerName = project.containerName;
+
+          // Auto-start container if stopped
+          const { containerManager } = await import('./containerManager.js');
+          const status = containerManager.getContainerStatus(containerName);
+          if (status && status !== 'running') {
+            containerManager.startContainer(containerName);
+          }
+
+          workingDir = containerManager.getWorkDir(containerName) || '/workspace';
+        } else if (project?.folderPath) {
           workingDir = project.folderPath;
         }
       }
@@ -338,6 +352,7 @@ class TerminalServer {
       const session = ptyManager.createSession({
         projectId,
         cliTool,
+        containerName,  // Passed through to ptyManager for container-based sessions
         cols: cols || 120,
         rows: rows || 30,
         cwd: workingDir,

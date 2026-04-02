@@ -5,7 +5,10 @@ const defaultFormData = {
   description: "",
   rules: [""],
   selectedPresets: [],
-  folderPath: "",
+  gitUrl: "",
+  anthropicApiKey: "",
+  ghToken: "",
+  ports: "",
 };
 
 export default function useProjectForm(initialData) {
@@ -71,7 +74,10 @@ export default function useProjectForm(initialData) {
       description: project.description,
       rules: project.rules?.length > 0 ? [...project.rules] : [""],
       selectedPresets: project.selectedPresets || [],
-      folderPath: project.folderPath || "",
+      gitUrl: project.gitUrl || "",
+      anthropicApiKey: project.containerEnv?.ANTHROPIC_API_KEY || "",
+      ghToken: project.containerEnv?.GH_TOKEN || "",
+      ports: (project.containerPorts || []).join(", "),
     });
     setErrors({});
   };

@@ -40,20 +40,35 @@ class PTYManager extends EventEmitter {
     const {
       projectId = null,
       cliTool = null,
+      containerName = null,
       cols = 120,
       rows = 30,
       cwd = process.env.HOME || os.homedir(),
     } = options;
 
     const sessionId = `session-${Date.now()}-${++this.sessionCounter}`;
-    const { shell, args } = this.getShellConfig();
+
+    let shell, args, spawnCwd;
+
+    if (containerName) {
+      // Docker container session
+      shell = 'docker';
+      args = ['exec', '-it', '-w', cwd || '/workspace', containerName, 'bash'];
+      spawnCwd = undefined; // cwd is inside the container, not on the host
+    } else {
+      // Local session
+      const config = this.getShellConfig();
+      shell = config.shell;
+      args = config.args;
+      spawnCwd = cwd;
+    }
 
     try {
       const ptyProcess = pty.spawn(shell, args, {
         name: 'xterm-256color',
         cols,
         rows,
-        cwd,
+        cwd: spawnCwd,
         env: {
           ...process.env,
           TERM: 'xterm-256color',
@@ -65,6 +80,7 @@ class PTYManager extends EventEmitter {
         id: sessionId,
         projectId,
         cliTool,
+        containerName,
         ptyProcess,
         status: 'active',
         name: null, // LLM-generated descriptive name, set after first activity
@@ -111,6 +127,7 @@ class PTYManager extends EventEmitter {
         sessionId,
         projectId,
         cliTool,
+        containerName,
         status: 'active',
         createdAt: session.createdAt,
       };
@@ -162,6 +179,7 @@ class PTYManager extends EventEmitter {
       id: session.id,
       projectId: session.projectId,
       cliTool: session.cliTool,
+      containerName: session.containerName,
       status: session.status,
       name: session.name,
       createdAt: session.createdAt,
@@ -199,6 +217,7 @@ class PTYManager extends EventEmitter {
       id: session.id,
       projectId: session.projectId,
       cliTool: session.cliTool,
+      containerName: session.containerName,
       status: session.status,
       name: session.name,
       createdAt: session.createdAt,

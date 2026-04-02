@@ -121,13 +121,45 @@ export default function Onboarding({ onSetupComplete }) {
     if (!form.validateForm()) return;
     try {
       setSaving(true);
-      await createProject({
+      const projectData = {
         name: form.formData.name.trim(),
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
-        folderPath: form.formData.folderPath?.trim() || null,
-      });
+        gitUrl: form.formData.gitUrl?.trim() || null,
+        containerEnv: {
+          ...(form.formData.anthropicApiKey ? { ANTHROPIC_API_KEY: form.formData.anthropicApiKey } : {}),
+          ...(form.formData.ghToken ? { GH_TOKEN: form.formData.ghToken } : {}),
+        },
+        containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
+      };
+
+      const newProject = await createProject(projectData);
+
+      // Create container for the project
+      try {
+        await fetch('/api/containers/build-image', { method: 'POST' });
+        const containerRes = await fetch('/api/containers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectId: newProject.id,
+            name: projectData.name,
+            gitUrl: projectData.gitUrl,
+            env: projectData.containerEnv,
+            ports: projectData.containerPorts,
+          }),
+        });
+        const containerData = await containerRes.json();
+        if (containerData.containerName) {
+          await fetch(`/api/projects/${newProject.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ containerName: containerData.containerName }),
+          });
+        }
+      } catch { /* container creation is best-effort */ }
+
       // Unlock the setup gate, then navigate to IDE
       onSetupComplete?.();
       navigate("/");

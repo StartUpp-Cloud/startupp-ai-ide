@@ -37,6 +37,7 @@ import promptFromFileRoutes from "./routes/promptFromFile.js";
 import branchReviewRoutes from "./routes/branchReview.js";
 import skillRoutes from "./routes/skills.js";
 import debugElementRoutes from "./routes/debugElement.js";
+import containerRoutes from "./routes/containers.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
 import { scheduler } from "./scheduler.js";
@@ -124,6 +125,7 @@ async function startServer() {
     app.use("/api/projects/:projectId/quick-commands", (await import("./routes/quickCommands.js")).default);
     app.use("/api/skills", skillRoutes);
     app.use("/api/debug", debugElementRoutes);
+    app.use("/api/containers", containerRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

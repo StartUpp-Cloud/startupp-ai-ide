@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Plus, X, GripVertical, ChevronDown, FolderOpen, Check, Loader2 } from "lucide-react";
+import { Plus, X, GripVertical, ChevronDown, GitBranch, Key, Globe } from "lucide-react";
 import PresetSelector from "./PresetSelector";
 
 const ProjectFormFields = ({
@@ -16,35 +15,6 @@ const ProjectFormFields = ({
   showPresets,
   setShowPresets,
 }) => {
-  const [folderValidation, setFolderValidation] = useState(null); // null | 'validating' | 'valid' | 'invalid'
-
-  const validateFolderPath = async (path) => {
-    if (!path.trim()) {
-      setFolderValidation(null);
-      return;
-    }
-    try {
-      setFolderValidation("validating");
-      const res = await fetch("/api/files/validate-path", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folderPath: path.trim() }),
-      });
-      const data = await res.json();
-      if (data.valid) {
-        setFolderValidation("valid");
-        // Use the server-resolved absolute path
-        if (data.resolvedPath !== path.trim()) {
-          handleInputChange("folderPath", data.resolvedPath);
-        }
-      } else {
-        setFolderValidation("invalid");
-      }
-    } catch {
-      setFolderValidation("invalid");
-    }
-  };
-
   return (
     <div className="space-y-4">
       {/* Name */}
@@ -79,51 +49,64 @@ const ProjectFormFields = ({
         )}
       </div>
 
-      {/* Folder Path */}
+      {/* Git Repository */}
       <div>
         <label className="label">
-          <FolderOpen className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
-          Project Folder
+          <GitBranch className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
+          Git Repository URL
         </label>
         <p className="text-hint mb-2">
-          Server-side path where the terminal will open
+          The repo will be cloned inside a dedicated container
         </p>
-        <div className="flex gap-2">
-          <div className="relative flex-1">
-            <input
-              type="text"
-              value={formData.folderPath}
-              onChange={(e) => {
-                handleInputChange("folderPath", e.target.value);
-                setFolderValidation(null);
-              }}
-              onBlur={(e) => validateFolderPath(e.target.value)}
-              className={`input !pr-8 ${
-                folderValidation === "invalid" ? "!border-danger-500/50" : ""
-              } ${folderValidation === "valid" ? "!border-success-500/50" : ""}`}
-              placeholder="/home/user/projects/my-app"
-            />
-            <div className="absolute right-2.5 top-1/2 -translate-y-1/2">
-              {folderValidation === "validating" && (
-                <Loader2 className="w-3.5 h-3.5 text-surface-400 animate-spin" />
-              )}
-              {folderValidation === "valid" && (
-                <Check className="w-3.5 h-3.5 text-success-400" />
-              )}
-              {folderValidation === "invalid" && (
-                <X className="w-3.5 h-3.5 text-danger-400" />
-              )}
-            </div>
-          </div>
+        <input
+          type="text"
+          value={formData.gitUrl}
+          onChange={(e) => handleInputChange("gitUrl", e.target.value)}
+          className="input"
+          placeholder="https://github.com/org/repo.git"
+        />
+      </div>
+
+      {/* Container Auth */}
+      <div className="space-y-3">
+        <label className="label">
+          <Key className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
+          Container Credentials
+        </label>
+        <p className="text-hint mb-2">
+          These are injected as environment variables inside the container
+        </p>
+        <div>
+          <label className="text-xs text-surface-400 mb-1 block">Anthropic API Key</label>
+          <input
+            type="password"
+            value={formData.anthropicApiKey}
+            onChange={(e) => handleInputChange("anthropicApiKey", e.target.value)}
+            className="input"
+            placeholder="sk-ant-..."
+          />
         </div>
-        {folderValidation === "invalid" && (
-          <p className="text-error">
-            Path does not exist or is not a directory on the server
-          </p>
-        )}
-        {errors.folderPath && (
-          <p className="text-error">{errors.folderPath}</p>
-        )}
+        <div>
+          <label className="text-xs text-surface-400 mb-1 block">GitHub Token</label>
+          <input
+            type="password"
+            value={formData.ghToken}
+            onChange={(e) => handleInputChange("ghToken", e.target.value)}
+            className="input"
+            placeholder="ghp_..."
+          />
+        </div>
+        <div>
+          <label className="text-xs text-surface-400 mb-1 block">Port Mappings</label>
+          <input
+            type="text"
+            value={formData.ports}
+            onChange={(e) => handleInputChange("ports", e.target.value)}
+            className="input"
+            placeholder="3000:3000, 8080:8080"
+          />
+          <p className="text-hint mt-1">Comma-separated, e.g. 3000:3000</p>
+        </div>
       </div>
 
       {/* Presets */}

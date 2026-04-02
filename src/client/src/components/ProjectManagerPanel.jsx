@@ -516,13 +516,49 @@ function CreateModal({ onClose, onCreated }) {
     if (!form.validateForm()) return;
     try {
       setSaving(true);
-      const newProject = await createProject({
+      const projectData = {
         name: form.formData.name.trim(),
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
-        folderPath: form.formData.folderPath.trim() || null,
-      });
+        gitUrl: form.formData.gitUrl?.trim() || null,
+        containerEnv: {
+          ...(form.formData.anthropicApiKey ? { ANTHROPIC_API_KEY: form.formData.anthropicApiKey } : {}),
+          ...(form.formData.ghToken ? { GH_TOKEN: form.formData.ghToken } : {}),
+        },
+        containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
+      };
+
+      // Create the project first
+      const newProject = await createProject(projectData);
+
+      // Then create a Docker container for it
+      try {
+        await fetch('/api/containers/build-image', { method: 'POST' });
+        const containerRes = await fetch('/api/containers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectId: newProject.id,
+            name: projectData.name,
+            gitUrl: projectData.gitUrl,
+            env: projectData.containerEnv,
+            ports: projectData.containerPorts,
+          }),
+        });
+        const containerData = await containerRes.json();
+        if (containerData.containerName) {
+          // Update project with container name
+          await fetch(`/api/projects/${newProject.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ containerName: containerData.containerName }),
+          });
+        }
+      } catch {
+        // Container creation is non-blocking — project still works without it
+      }
+
       onCreated(newProject.id);
     } catch {
       // context handles notification
@@ -603,7 +639,10 @@ function EditModal({ project, onClose, onSaved }) {
     description: project.description,
     rules: project.rules?.length > 0 ? [...project.rules] : [""],
     selectedPresets: project.selectedPresets || [],
-    folderPath: project.folderPath || "",
+    gitUrl: project.gitUrl || "",
+    anthropicApiKey: project.containerEnv?.ANTHROPIC_API_KEY || "",
+    ghToken: project.containerEnv?.GH_TOKEN || "",
+    ports: (project.containerPorts || []).join(", "),
   });
   const [saving, setSaving] = useState(false);
   const [showPresets, setShowPresets] = useState(
@@ -620,7 +659,12 @@ function EditModal({ project, onClose, onSaved }) {
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
-        folderPath: form.formData.folderPath.trim() || null,
+        gitUrl: form.formData.gitUrl?.trim() || null,
+        containerEnv: {
+          ...(form.formData.anthropicApiKey ? { ANTHROPIC_API_KEY: form.formData.anthropicApiKey } : {}),
+          ...(form.formData.ghToken ? { GH_TOKEN: form.formData.ghToken } : {}),
+        },
+        containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
       });
       onSaved();
     } catch {
