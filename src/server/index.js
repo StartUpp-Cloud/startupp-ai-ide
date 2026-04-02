@@ -54,10 +54,10 @@ const __dirname = path.dirname(__filename);
 // Security middleware
 app.use(helmet());
 
-// Rate limiting
+// Rate limiting — relaxed for local/LAN IDE usage
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: 1000, // 1000 requests per 15 min — IDE makes frequent LLM + polling calls
   message: "Too many requests from this IP, please try again later.",
 });
 app.use("/api/", limiter);
