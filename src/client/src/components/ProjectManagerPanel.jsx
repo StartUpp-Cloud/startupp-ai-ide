@@ -522,17 +522,12 @@ function CreateModal({ onClose, onCreated }) {
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
         gitUrl: form.formData.gitUrl?.trim() || null,
-        containerEnv: {
-          ...(form.formData.anthropicApiKey ? { ANTHROPIC_API_KEY: form.formData.anthropicApiKey } : {}),
-          ...(form.formData.ghToken ? { GH_TOKEN: form.formData.ghToken } : {}),
-        },
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
       };
 
-      // Create the project first
       const newProject = await createProject(projectData);
 
-      // Then create a Docker container for it
+      // Create a Docker container for the project
       try {
         await fetch('/api/containers/build-image', { method: 'POST' });
         const containerRes = await fetch('/api/containers', {
@@ -542,13 +537,11 @@ function CreateModal({ onClose, onCreated }) {
             projectId: newProject.id,
             name: projectData.name,
             gitUrl: projectData.gitUrl,
-            env: projectData.containerEnv,
             ports: projectData.containerPorts,
           }),
         });
         const containerData = await containerRes.json();
         if (containerData.containerName) {
-          // Update project with container name
           await fetch(`/api/projects/${newProject.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -556,7 +549,7 @@ function CreateModal({ onClose, onCreated }) {
           });
         }
       } catch {
-        // Container creation is non-blocking — project still works without it
+        // Container creation is best-effort
       }
 
       onCreated(newProject.id);
@@ -640,8 +633,6 @@ function EditModal({ project, onClose, onSaved }) {
     rules: project.rules?.length > 0 ? [...project.rules] : [""],
     selectedPresets: project.selectedPresets || [],
     gitUrl: project.gitUrl || "",
-    anthropicApiKey: project.containerEnv?.ANTHROPIC_API_KEY || "",
-    ghToken: project.containerEnv?.GH_TOKEN || "",
     ports: (project.containerPorts || []).join(", "),
   });
   const [saving, setSaving] = useState(false);
@@ -660,10 +651,6 @@ function EditModal({ project, onClose, onSaved }) {
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
         gitUrl: form.formData.gitUrl?.trim() || null,
-        containerEnv: {
-          ...(form.formData.anthropicApiKey ? { ANTHROPIC_API_KEY: form.formData.anthropicApiKey } : {}),
-          ...(form.formData.ghToken ? { GH_TOKEN: form.formData.ghToken } : {}),
-        },
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
       });
       onSaved();

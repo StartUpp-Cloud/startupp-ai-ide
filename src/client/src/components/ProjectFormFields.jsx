@@ -1,4 +1,4 @@
-import { Plus, X, GripVertical, ChevronDown, GitBranch, Key, Globe } from "lucide-react";
+import { Plus, X, GripVertical, ChevronDown, GitBranch, Terminal as TerminalIcon } from "lucide-react";
 import PresetSelector from "./PresetSelector";
 
 const ProjectFormFields = ({
@@ -71,80 +71,51 @@ const ProjectFormFields = ({
         </p>
       </div>
 
-      {/* Container Credentials */}
-      <div className="space-y-3">
+      {/* Port Mappings */}
+      <div>
         <label className="label">
-          <Key className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
-          Container Credentials
+          Port Mappings <span className="text-surface-600 text-xs font-normal">— optional</span>
         </label>
-        <p className="text-hint mb-2">
-          Each project runs in its own isolated container. Credentials are injected
-          as environment variables so the CLI tools inside can authenticate.
-          All fields are <span className="text-surface-300">optional</span>.
+        <input
+          type="text"
+          value={formData.ports}
+          onChange={(e) => handleInputChange("ports", e.target.value)}
+          className="input"
+          placeholder="3000:3000, 8080:8080"
+        />
+        <p className="text-hint mt-1">
+          Expose container ports to your machine for dev servers.
+          Format: <code className="text-[11px] bg-surface-800 px-1 rounded">host:container</code>, comma-separated.
         </p>
+      </div>
 
-        {/* Anthropic API Key */}
-        <div>
-          <label className="text-xs text-surface-400 mb-1 block">
-            Anthropic API Key <span className="text-surface-600">— optional</span>
-          </label>
-          <input
-            type="password"
-            value={formData.anthropicApiKey}
-            onChange={(e) => handleInputChange("anthropicApiKey", e.target.value)}
-            className="input"
-            placeholder="sk-ant-api03-..."
-          />
-          <p className="text-hint mt-1">
-            Used by Claude Code CLI inside the container.
-            Get one at{' '}
-            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:text-primary-300 underline">
-              console.anthropic.com/settings/keys
-            </a>
-            . If left empty, you can log in with <code className="text-[11px] bg-surface-800 px-1 rounded">claude</code> inside the terminal.
-          </p>
+      {/* First-run setup hint */}
+      <div className="p-3 bg-surface-800/50 border border-surface-700 rounded-lg">
+        <div className="flex items-center gap-2 mb-2">
+          <TerminalIcon className="w-4 h-4 text-primary-400" />
+          <span className="text-sm font-medium text-surface-200">After creating the project</span>
         </div>
-
-        {/* GitHub Token */}
-        <div>
-          <label className="text-xs text-surface-400 mb-1 block">
-            GitHub Token <span className="text-surface-600">— optional</span>
-          </label>
-          <input
-            type="password"
-            value={formData.ghToken}
-            onChange={(e) => handleInputChange("ghToken", e.target.value)}
-            className="input"
-            placeholder="ghp_..."
-          />
-          <p className="text-hint mt-1">
-            Used for <code className="text-[11px] bg-surface-800 px-1 rounded">git</code> and{' '}
-            <code className="text-[11px] bg-surface-800 px-1 rounded">gh</code> CLI access to private repos.
-            Create one at{' '}
-            <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:text-primary-300 underline">
-              github.com/settings/tokens
-            </a>
-            {' '}with repo scope. If left empty, you can run <code className="text-[11px] bg-surface-800 px-1 rounded">gh auth login</code> inside the terminal.
-          </p>
-        </div>
-
-        {/* Port Mappings */}
-        <div>
-          <label className="text-xs text-surface-400 mb-1 block">
-            Port Mappings <span className="text-surface-600">— optional</span>
-          </label>
-          <input
-            type="text"
-            value={formData.ports}
-            onChange={(e) => handleInputChange("ports", e.target.value)}
-            className="input"
-            placeholder="3000:3000, 8080:8080"
-          />
-          <p className="text-hint mt-1">
-            Expose container ports to your machine so you can access dev servers
-            in your browser. Format: <code className="text-[11px] bg-surface-800 px-1 rounded">host:container</code>,
-            comma-separated. Leave empty if you don't need to access a dev server.
-          </p>
+        <p className="text-xs text-surface-400 mb-2">
+          Each project runs in its own isolated container. Log in to your tools
+          directly in the terminal — credentials are stored securely inside the container
+          and persist across restarts.
+        </p>
+        <div className="space-y-1.5 text-[11px] font-mono">
+          <div className="flex items-center gap-2">
+            <span className="text-green-400">$</span>
+            <code className="text-surface-300">claude</code>
+            <span className="text-surface-600">— log in to Claude Code</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-green-400">$</span>
+            <code className="text-surface-300">gh auth login</code>
+            <span className="text-surface-600">— log in to GitHub</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-green-400">$</span>
+            <code className="text-surface-300">npm login</code>
+            <span className="text-surface-600">— log in to npm (if needed)</span>
+          </div>
         </div>
       </div>
 

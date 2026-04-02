@@ -127,10 +127,6 @@ export default function Onboarding({ onSetupComplete }) {
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
         gitUrl: form.formData.gitUrl?.trim() || null,
-        containerEnv: {
-          ...(form.formData.anthropicApiKey ? { ANTHROPIC_API_KEY: form.formData.anthropicApiKey } : {}),
-          ...(form.formData.ghToken ? { GH_TOKEN: form.formData.ghToken } : {}),
-        },
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
       };
 
@@ -146,7 +142,6 @@ export default function Onboarding({ onSetupComplete }) {
             projectId: newProject.id,
             name: projectData.name,
             gitUrl: projectData.gitUrl,
-            env: projectData.containerEnv,
             ports: projectData.containerPorts,
           }),
         });

@@ -4,19 +4,6 @@ import { normalizePromptSettings } from "../models/Project.js";
 
 const router = express.Router();
 
-// Mask secrets in project data before sending to frontend
-function maskProjectSecrets(project) {
-  if (!project) return project;
-  const masked = { ...project };
-  if (masked.containerEnv) {
-    masked.containerEnv = {};
-    for (const [key, value] of Object.entries(project.containerEnv)) {
-      masked.containerEnv[key] = value ? '***configured***' : '';
-    }
-  }
-  return masked;
-}
-
 // GET /api/projects - Get all projects
 router.get("/", async (req, res) => {
   try {
@@ -29,7 +16,7 @@ router.get("/", async (req, res) => {
       projects = Project.getAll();
     }
 
-    res.json(projects.map(maskProjectSecrets));
+    res.json(projects);
   } catch (error) {
     res
       .status(500)
@@ -51,7 +38,7 @@ router.get("/:id", async (req, res) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    res.json(maskProjectSecrets(project));
+    res.json(project);
   } catch (error) {
     res
       .status(500)

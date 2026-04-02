@@ -91,7 +91,6 @@ export async function createProject({
   folderPath,
   containerName,
   gitUrl,
-  containerEnv,
   containerPorts,
 }) {
   const now = new Date().toISOString();
@@ -104,7 +103,6 @@ export async function createProject({
     folderPath: folderPath || null, // Local filesystem path for workspace
     containerName: containerName || null, // Docker container name
     gitUrl: gitUrl || null, // Git repository URL
-    containerEnv: containerEnv || null, // Environment variables for the container
     containerPorts: containerPorts || [], // Port mappings e.g. ['3000:3000']
     containerStatus: null, // Last known status ('running', 'stopped', etc.)
     promptCount: 0,

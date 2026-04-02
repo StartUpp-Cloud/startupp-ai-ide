@@ -6,8 +6,6 @@ const defaultFormData = {
   rules: [""],
   selectedPresets: [],
   gitUrl: "",
-  anthropicApiKey: "",
-  ghToken: "",
   ports: "",
 };
 
@@ -75,8 +73,6 @@ export default function useProjectForm(initialData) {
       rules: project.rules?.length > 0 ? [...project.rules] : [""],
       selectedPresets: project.selectedPresets || [],
       gitUrl: project.gitUrl || "",
-      anthropicApiKey: project.containerEnv?.ANTHROPIC_API_KEY || "",
-      ghToken: project.containerEnv?.GH_TOKEN || "",
       ports: (project.containerPorts || []).join(", "),
     });
     setErrors({});
