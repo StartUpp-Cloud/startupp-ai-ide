@@ -32,4 +32,38 @@ router.get('/:projectId', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/context/:projectId/scripts - Lightweight endpoint for detected scripts
+ * Returns package manager, framework, and scripts from package.json
+ */
+router.get('/:projectId/scripts', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const project = findProjectById(projectId);
+
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    if (!project.folderPath) {
+      return res.status(400).json({ error: 'Project does not have a folder path configured' });
+    }
+
+    const buildSystem = contextBuilder.detectBuildSystem(project.folderPath);
+
+    res.json({
+      packageManager: buildSystem.packageManager || 'npm',
+      framework: buildSystem.framework || null,
+      language: buildSystem.language || null,
+      testRunner: buildSystem.testRunner || null,
+      scripts: buildSystem.scripts || {},
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to detect project scripts',
+      message: error.message,
+    });
+  }
+});
+
 export default router;

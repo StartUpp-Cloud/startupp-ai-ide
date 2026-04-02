@@ -233,6 +233,13 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
       case 'output':
         xtermRef.current?.write(msg.data);
 
+        // Dispatch event for LiveAnalysisPanel to consume (main terminal only)
+        if (!isUtility) {
+          window.dispatchEvent(new CustomEvent('terminal-output', {
+            detail: { sessionId: msg.sessionId, data: msg.data },
+          }));
+        }
+
         // Buffer recent output for context capture (keep last 5000 chars)
         setTerminalOutputBuffer(prev => {
           const updated = prev + (msg.data || '');
@@ -508,9 +515,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
     setPromptSuggestion(null);
   }, []);
 
-  // Expose sendToTerminal method (only for main terminal, not utility)
+  // Expose sendToTerminal method
   useEffect(() => {
-    if (window && !isUtility) {
+    if (!window) return;
+    if (isUtility) {
+      window.sendUtilTerminal = sendToTerminal;
+    } else {
       window.sendToTerminal = sendToTerminal;
     }
   }, [sendToTerminal, isUtility]);

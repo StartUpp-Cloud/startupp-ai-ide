@@ -415,4 +415,96 @@ ${projectContext}${skillContext ? `\n${skillContext}` : ''}`;
   }
 });
 
+/**
+ * POST /api/llm/analyze-terminal-output
+ * LLM analyzes terminal output and returns a structured checklist of actions/outcomes.
+ */
+router.post('/analyze-terminal-output', async (req, res) => {
+  try {
+    const { projectId, output, previousItems } = req.body;
+
+    if (!output || typeof output !== 'string' || output.trim().length < 10) {
+      return res.status(400).json({ error: 'Insufficient terminal output to analyze' });
+    }
+
+    if (!llmProvider.getSettings().enabled) {
+      return res.status(400).json({ error: 'LLM is not enabled. Enable it in LLM Settings.' });
+    }
+
+    // Build context about previous items so the LLM can update statuses
+    let previousContext = '';
+    if (previousItems && Array.isArray(previousItems) && previousItems.length > 0) {
+      previousContext = `\n\nPrevious checklist items (update statuses if relevant):\n${JSON.stringify(previousItems)}`;
+    }
+
+    const systemPrompt = `You analyze terminal output from a development session and produce a JSON checklist.
+Given the terminal output, identify what actions were performed and their outcomes.
+
+Return ONLY a valid JSON array. Each item:
+{"text": "brief description", "status": "completed|in-progress|error|warning|info"}
+
+Rules:
+- "completed": action finished successfully (file created, test passed, build succeeded, install completed)
+- "error": something failed (test failed, build error, crash, command not found)
+- "warning": something concerning (deprecation, security warning, high memory usage)
+- "in-progress": action appears to still be running (watching, waiting, server listening)
+- "info": informational note (dependency installed, config changed, version number)
+- Keep items concise (10-20 words max)
+- Maximum 15 items (summarize if more)
+- If previous items are provided, update their statuses and add new ones
+- Focus on the most important/recent events
+- Do NOT include the raw terminal output in your response${previousContext}`;
+
+    const result = await llmProvider.generateResponse(output.trim(), {
+      systemPrompt,
+      maxTokens: 2048,
+      temperature: 0.2,
+    });
+
+    // Strip <think>...</think> blocks from models that use internal reasoning
+    const cleanedResponse = result.response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+    // Parse the JSON array from the response
+    let items;
+    try {
+      let jsonStr = cleanedResponse;
+      // Try to extract JSON array if wrapped in markdown or extra text
+      const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
+      if (arrayMatch) jsonStr = arrayMatch[0];
+      items = JSON.parse(jsonStr);
+
+      // Validate the items
+      if (!Array.isArray(items)) {
+        throw new Error('Response is not an array');
+      }
+
+      // Sanitize and validate each item
+      const validStatuses = ['completed', 'in-progress', 'error', 'warning', 'info'];
+      items = items
+        .filter((item) => item && typeof item.text === 'string' && item.text.trim())
+        .map((item) => ({
+          text: item.text.trim().slice(0, 200),
+          status: validStatuses.includes(item.status) ? item.status : 'info',
+        }))
+        .slice(0, 15);
+    } catch {
+      return res.status(500).json({
+        error: 'Failed to parse analysis from LLM response',
+        raw: cleanedResponse.slice(0, 500),
+      });
+    }
+
+    res.json({
+      items,
+      provider: result.provider,
+      model: result.model,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Terminal analysis failed',
+      message: error.message,
+    });
+  }
+});
+
 export default router;
