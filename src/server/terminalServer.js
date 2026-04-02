@@ -706,19 +706,33 @@ class TerminalServer {
     }
 
     const timer = setTimeout(() => {
-      // Final guard: only check if the output tail looks like it's waiting for input
-      // (ends with a prompt-like pattern, not in the middle of streaming text)
-      const tail = (this.recentOutput.get(sessionId) || '').slice(-150);
+      // Final guard: only check if the output tail looks like an interactive question
+      // NOT a CLI input prompt (> , $ , # ) or regular output
+      const tail = (this.recentOutput.get(sessionId) || '').slice(-200);
       const lastLine = tail.split('\n').filter(l => l.trim()).pop() || '';
 
-      // A real prompt typically ends with: ? , (y/n), [Y/n], > , : , ›, or similar
-      const looksLikePrompt = /[?:>›»\]]\s*$/.test(lastLine) ||
-        /\(y\/n\)/i.test(lastLine) ||
-        /\[Y\/n\]/i.test(lastLine) ||
-        /\(yes\/no\)/i.test(lastLine) ||
-        /approve|reject|allow|deny|continue|proceed/i.test(lastLine);
+      // Ignore CLI input prompts — these are the tool waiting for USER commands, not asking a question
+      const isInputPrompt = /^[>$#›»]\s/.test(lastLine.trim()) || // Shell/CLI prompts
+        /^>\s*$/.test(lastLine.trim()) || // Empty > prompt
+        /Try "/.test(lastLine) || // Claude Code's hint prompt
+        /shift\+tab|tab to cycle/i.test(lastLine) || // Claude Code UI hints
+        /MCP server/i.test(lastLine) || // MCP status messages
+        /bypass permissions/i.test(lastLine); // Claude Code permission mode
 
-      if (looksLikePrompt) {
+      if (isInputPrompt) return;
+
+      // A real interactive question looks like:
+      // "Do you want to proceed? (y/n)"
+      // "Allow access to file.ts? [Y/n]"
+      // "Choose an option:"
+      const looksLikeQuestion = /\?\s*$/.test(lastLine) || // Ends with ?
+        /\?\s*\(y\/n\)/i.test(lastLine) || // ? (y/n)
+        /\[Y\/n\]/i.test(lastLine) || // [Y/n]
+        /\[yes\/no\]/i.test(lastLine) || // [yes/no]
+        /\(yes\/no\)/i.test(lastLine) || // (yes/no)
+        /:\s*$/.test(lastLine) && /select|choose|enter|type|pick/i.test(lastLine); // "Select option:"
+
+      if (looksLikeQuestion) {
         this.checkForPrompts(sessionId);
       }
     }, 2000); // 2 seconds of true idle
