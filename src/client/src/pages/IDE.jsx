@@ -13,6 +13,7 @@ import {
   ChevronDown,
   ChevronUp,
   GitBranch,
+  Sparkles,
 } from 'lucide-react';
 
 // Storage keys
@@ -423,7 +424,7 @@ export default function IDE() {
 
               {/* ── Git Branch (middle drawer) ── */}
               {currentBranch && selectedProject && (
-                <div className="flex-shrink-0 px-3 py-2 bg-surface-800/50 border-y border-surface-700">
+                <div className="flex-shrink-0 px-3 py-2 bg-surface-800/50 border-y border-surface-700 space-y-1.5">
                   <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md ${
                     currentBranch.isMainBranch
                       ? 'bg-yellow-500/10 border border-yellow-500/20'
@@ -446,6 +447,14 @@ export default function IDE() {
                       )}
                     </div>
                   </div>
+                  {/* Review Changes button */}
+                  <button
+                    onClick={() => window.open('/branch-review', '_blank')}
+                    className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/25 rounded-md hover:bg-purple-500/25 transition-colors"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    Review Branch Changes
+                  </button>
                 </div>
               )}
 

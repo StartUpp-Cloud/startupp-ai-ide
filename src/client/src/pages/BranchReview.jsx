@@ -380,72 +380,19 @@ export default function BranchReview() {
             </select>
           </div>
 
-          {/* Current branch indicator */}
+          {/* Current branch + Analyze button */}
           {currentBranch && (
             <>
               <div className="h-5 w-px bg-surface-700" />
-              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-green-500/10 border border-green-500/20 rounded-md">
+              <div className="flex items-center gap-2 px-2.5 py-1 bg-green-500/10 border border-green-500/20 rounded-md">
                 <GitBranch className="w-3.5 h-3.5 text-green-400" />
                 <span className="text-sm font-mono font-medium text-green-300">{currentBranch}</span>
+                <span className="text-[10px] text-surface-500">vs {baseBranch}</span>
               </div>
             </>
           )}
 
-          <div className="h-5 w-px bg-surface-700" />
-
-          {/* Mode selector */}
-          <div className="flex items-center gap-2">
-            <label className="text-xs font-medium text-surface-400 uppercase tracking-wider">
-              Mode
-            </label>
-            <select
-              value={mode}
-              onChange={(e) => setMode(e.target.value)}
-              className="select !py-1.5 !px-3 !text-sm !w-40"
-              disabled={phase === "loading" || phase === "analyzing"}
-            >
-              <option value="branch">Branch Changes</option>
-              <option value="commits">Recent Commits</option>
-            </select>
-          </div>
-
-          {/* Branch / commit count */}
-          {mode === "branch" ? (
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-medium text-surface-400 uppercase tracking-wider">
-                Base
-              </label>
-              <input
-                type="text"
-                value={baseBranch}
-                onChange={(e) => setBaseBranch(e.target.value)}
-                className="input !py-1.5 !px-3 !text-sm !w-28"
-                placeholder="main"
-                disabled={phase === "loading" || phase === "analyzing"}
-              />
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-medium text-surface-400 uppercase tracking-wider">
-                Commits
-              </label>
-              <input
-                type="number"
-                value={commitCount}
-                onChange={(e) =>
-                  setCommitCount(Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))
-                }
-                min={1}
-                max={50}
-                className="input !py-1.5 !px-3 !text-sm !w-20"
-                disabled={phase === "loading" || phase === "analyzing"}
-              />
-            </div>
-          )}
-
-          <div className="h-5 w-px bg-surface-700" />
-
-          {/* Analyze button */}
+          {/* Analyze button — right next to branch */}
           <button
             onClick={runAnalysis}
             disabled={
