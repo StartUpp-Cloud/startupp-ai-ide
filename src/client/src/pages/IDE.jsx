@@ -51,6 +51,7 @@ import {
 const STORAGE_KEYS = {
   SELECTED_PROJECT: 'ide-selected-project',
   SESSION_ID: 'ide-session-id',
+  UTIL_SESSION_ID: 'ide-util-session-id',
   LEFT_PANEL_WIDTH: 'ide-left-panel-width',
   MIDDLE_PANEL_WIDTH: 'ide-middle-panel-width',
   LEFT_PANEL_COLLAPSED: 'ide-left-collapsed',
@@ -112,7 +113,9 @@ export default function IDE() {
 
   // Utility terminal state
   const [utilTerminalCollapsed, setUtilTerminalCollapsed] = useState(false);
-  const [utilSessionId, setUtilSessionId] = useState(null);
+  const [utilSessionId, setUtilSessionId] = useState(() => {
+    return localStorage.getItem(STORAGE_KEYS.UTIL_SESSION_ID) || null;
+  });
 
   // Resizer state
   const [isResizing, setIsResizing] = useState(null);
@@ -151,6 +154,15 @@ export default function IDE() {
       localStorage.removeItem(STORAGE_KEYS.SESSION_ID);
     }
   }, [currentSessionId]);
+
+  // Persist utility session ID
+  useEffect(() => {
+    if (utilSessionId) {
+      localStorage.setItem(STORAGE_KEYS.UTIL_SESSION_ID, utilSessionId);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.UTIL_SESSION_ID);
+    }
+  }, [utilSessionId]);
 
   // Load global rules
   useEffect(() => {
@@ -1132,6 +1144,7 @@ export default function IDE() {
             projectId={selectedProjectId}
             projects={projects}
             onSessionChange={setCurrentSessionId}
+            initialSessionId={currentSessionId}
           />
         </div>
 
@@ -1157,6 +1170,7 @@ export default function IDE() {
               projectId={selectedProjectId}
               projects={projects}
               onSessionChange={setUtilSessionId}
+              initialSessionId={utilSessionId}
               isUtility={true}
             />
           </div>

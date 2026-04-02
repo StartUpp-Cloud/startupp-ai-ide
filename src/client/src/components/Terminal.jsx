@@ -13,7 +13,7 @@ const CLI_TOOLS = [
   { id: 'aider', name: 'Aider', icon: '\u{1F465}' },
 ];
 
-export default function Terminal({ projectId, projects = [], onSessionChange, isUtility = false }) {
+export default function Terminal({ projectId, projects = [], onSessionChange, initialSessionId = null, isUtility = false }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -380,21 +380,40 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
     }
   }, [onSessionChange, autoResponderEnabled]);
 
-  // Auto-create or attach session when projectId changes
+  // Auto-create or attach session when projectId changes or on initial load
   // Waits for sessionsLoaded so we know about existing server-side sessions before deciding
   useEffect(() => {
-    if (isUtility) return;
-    if (!projectId || !connected || !sessionsLoaded || !wsRef.current) return;
+    if (!connected || !sessionsLoaded || !wsRef.current) return;
 
-    const existingSessionId = projectSessionsRef.current.get(projectId);
+    // For utility terminal: reconnect to stored session if it's still alive, otherwise do nothing
+    if (isUtility) {
+      if (initialSessionId && sessions.some(s => s.id === initialSessionId)) {
+        if (initialSessionId !== sessionIdRef.current) {
+          xtermRef.current?.reset();
+          wsRef.current.send(JSON.stringify({
+            type: 'attach',
+            sessionId: initialSessionId,
+          }));
+        }
+      }
+      return;
+    }
 
-    if (existingSessionId) {
-      // Attach to existing session for this project (server sends scrollback)
-      if (existingSessionId !== sessionIdRef.current) {
-        xtermRef.current?.reset(); // Full reset before scrollback replay
+    if (!projectId) return;
+
+    // Priority: initialSessionId (stored from before refresh) > project mapping > create new
+    // Check if the stored session is still alive on the server
+    const storedStillAlive = initialSessionId && sessions.some(s => s.id === initialSessionId);
+    const targetSessionId = storedStillAlive
+      ? initialSessionId
+      : projectSessionsRef.current.get(projectId);
+
+    if (targetSessionId) {
+      if (targetSessionId !== sessionIdRef.current) {
+        xtermRef.current?.reset();
         wsRef.current.send(JSON.stringify({
           type: 'attach',
-          sessionId: existingSessionId,
+          sessionId: targetSessionId,
         }));
       }
     } else {
