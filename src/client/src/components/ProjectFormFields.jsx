@@ -49,25 +49,73 @@ const ProjectFormFields = ({
         )}
       </div>
 
-      {/* Git Repository */}
+      {/* Repositories */}
       <div>
         <label className="label">
           <GitBranch className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
-          Git Repository URL
+          Repositories
         </label>
         <p className="text-hint mb-2">
-          The repo will be cloned inside a dedicated Docker container.
-          Use HTTPS or SSH format.
+          Add one or more repos to clone inside the container.
+          For monorepos or multi-service projects, add each repo separately —
+          they'll all live under <code className="text-[11px] bg-surface-800 px-1 rounded">/workspace</code>.
         </p>
-        <input
-          type="text"
-          value={formData.gitUrl}
-          onChange={(e) => handleInputChange("gitUrl", e.target.value)}
-          className="input"
-          placeholder="https://github.com/org/repo.git"
-        />
-        <p className="text-hint mt-1">
-          <span className="text-surface-500">Optional</span> — you can also clone manually inside the container later
+
+        <div className="space-y-2">
+          {(formData.repos || []).map((repo, index) => (
+            <div key={index} className="flex items-start gap-2">
+              <div className="flex-1 space-y-1">
+                <input
+                  type="text"
+                  value={repo.url}
+                  onChange={(e) => {
+                    const newRepos = [...formData.repos];
+                    newRepos[index] = { ...newRepos[index], url: e.target.value };
+                    handleInputChange("repos", newRepos);
+                  }}
+                  className="input !py-1.5"
+                  placeholder="https://github.com/org/repo.git"
+                />
+                <input
+                  type="text"
+                  value={repo.folder}
+                  onChange={(e) => {
+                    const newRepos = [...formData.repos];
+                    newRepos[index] = { ...newRepos[index], folder: e.target.value };
+                    handleInputChange("repos", newRepos);
+                  }}
+                  className="input !py-1.5 !text-xs"
+                  placeholder={`Folder name (default: auto-detected from URL)`}
+                />
+              </div>
+              {formData.repos.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const newRepos = formData.repos.filter((_, i) => i !== index);
+                    handleInputChange("repos", newRepos);
+                  }}
+                  className="mt-1 btn-icon !p-1.5 hover:!text-danger-400 hover:!bg-danger-500/10"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            handleInputChange("repos", [...(formData.repos || []), { url: "", folder: "" }]);
+          }}
+          className="flex items-center gap-1.5 text-sm text-primary-400 hover:text-primary-300 mt-2 transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          Add another repo
+        </button>
+        <p className="text-hint mt-1.5">
+          <span className="text-surface-500">Optional</span> — you can also clone repos manually inside the container
         </p>
       </div>
 

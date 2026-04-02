@@ -62,7 +62,7 @@ class ContainerManager extends EventEmitter {
    * @param {string[]} [params.ports] - Port mappings (e.g., ['3000:3000', '8080:8080'])
    * @returns {Object} { containerId, containerName, status }
    */
-  async createContainer({ projectId, name, gitUrl, env = {}, ports = [] }) {
+  async createContainer({ projectId, name, gitUrl, repos = [], env = {}, ports = [] }) {
     const containerName = `${CONTAINER_PREFIX}${name
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-")
@@ -122,32 +122,29 @@ class ContainerManager extends EventEmitter {
         stdio: "pipe",
       });
 
-      // Clone the repo if gitUrl provided
-      if (gitUrl) {
+      // Clone repos — supports multiple repos for monorepo/multi-service workspaces
+      const repoList = repos.length > 0
+        ? repos
+        : gitUrl ? [{ url: gitUrl, folder: '' }] : []; // Backward compat
+
+      for (const repo of repoList) {
+        if (!repo.url) continue;
+        // Derive folder name from URL if not specified
+        const folder = repo.folder?.trim() || repo.url.split('/').pop().replace(/\.git$/, '');
+        const targetPath = `/workspace/${folder}`;
         try {
           execSync(
-            `docker exec ${containerName} git clone "${gitUrl}" /workspace/repo`,
-            {
-              encoding: "utf-8",
-              stdio: "pipe",
-              timeout: 120000,
-            },
+            `docker exec ${containerName} git clone "${repo.url}" "${targetPath}"`,
+            { encoding: "utf-8", stdio: "pipe", timeout: 120000 },
           );
         } catch {
-          // Repo might already be cloned in the volume, or clone failed
-          // Try pulling instead
+          // Already cloned or failed — try pulling
           try {
             execSync(
-              `docker exec ${containerName} bash -c "cd /workspace/repo && git pull"`,
-              {
-                encoding: "utf-8",
-                stdio: "pipe",
-                timeout: 30000,
-              },
+              `docker exec ${containerName} bash -c "cd ${targetPath} && git pull"`,
+              { encoding: "utf-8", stdio: "pipe", timeout: 30000 },
             );
-          } catch {
-            /* ignore - user can handle this in the terminal */
-          }
+          } catch { /* user can handle in terminal */ }
         }
       }
 
@@ -279,11 +276,19 @@ class ContainerManager extends EventEmitter {
    * (either /workspace/repo if cloned, or /workspace)
    */
   getWorkDir(containerName) {
-    const hasRepo = this.execInContainer(
+    // Count subdirectories in /workspace
+    const dirs = this.execInContainer(
       containerName,
-      "test -d /workspace/repo && echo yes",
+      "ls -d /workspace/*/ 2>/dev/null | wc -l",
     );
-    return hasRepo === "yes" ? "/workspace/repo" : "/workspace";
+    const count = parseInt(dirs) || 0;
+    if (count === 1) {
+      // Single repo — use it directly as cwd
+      const dir = this.execInContainer(containerName, "ls -d /workspace/*/");
+      return dir?.trim() || "/workspace";
+    }
+    // Multiple repos or none — use /workspace root
+    return "/workspace";
   }
 }
 

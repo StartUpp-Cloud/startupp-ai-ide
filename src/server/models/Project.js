@@ -91,6 +91,7 @@ export async function createProject({
   folderPath,
   containerName,
   gitUrl,
+  repos,
   containerPorts,
 }) {
   const now = new Date().toISOString();
@@ -102,7 +103,8 @@ export async function createProject({
     promptSettings: normalizePromptSettings(promptSettings),
     folderPath: folderPath || null, // Local filesystem path for workspace
     containerName: containerName || null, // Docker container name
-    gitUrl: gitUrl || null, // Git repository URL
+    gitUrl: gitUrl || null, // Backward compat: single git URL
+    repos: repos || [], // Array of { url, folder } for multi-repo workspaces
     containerPorts: containerPorts || [], // Port mappings e.g. ['3000:3000']
     containerStatus: null, // Last known status ('running', 'stopped', etc.)
     promptCount: 0,

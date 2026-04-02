@@ -126,7 +126,7 @@ export default function Onboarding({ onSetupComplete }) {
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
-        gitUrl: form.formData.gitUrl?.trim() || null,
+        repos: (form.formData.repos || []).filter(r => r.url?.trim()),
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
       };
 
@@ -141,7 +141,7 @@ export default function Onboarding({ onSetupComplete }) {
           body: JSON.stringify({
             projectId: newProject.id,
             name: projectData.name,
-            gitUrl: projectData.gitUrl,
+            repos: projectData.repos,
             ports: projectData.containerPorts,
           }),
         });

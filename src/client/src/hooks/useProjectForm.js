@@ -5,7 +5,7 @@ const defaultFormData = {
   description: "",
   rules: [""],
   selectedPresets: [],
-  gitUrl: "",
+  repos: [{ url: "", folder: "" }], // Multiple repos for monorepo/multi-repo workspaces
   ports: "",
 };
 
@@ -72,7 +72,11 @@ export default function useProjectForm(initialData) {
       description: project.description,
       rules: project.rules?.length > 0 ? [...project.rules] : [""],
       selectedPresets: project.selectedPresets || [],
-      gitUrl: project.gitUrl || "",
+      repos: project.repos?.length > 0
+        ? project.repos.map(r => ({ url: r.url || "", folder: r.folder || "" }))
+        : project.gitUrl
+          ? [{ url: project.gitUrl, folder: "" }] // Backward compat: old single gitUrl
+          : [{ url: "", folder: "" }],
       ports: (project.containerPorts || []).join(", "),
     });
     setErrors({});
