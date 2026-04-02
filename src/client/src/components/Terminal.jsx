@@ -571,8 +571,13 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
   };
 
   const handleAiCommandSend = () => {
-    if (!aiCommandResult || !sessionId) return;
-    sendToTerminal(aiCommandResult + '\n');
+    if (!aiCommandResult || !sessionIdRef.current || !wsRef.current) return;
+    // Write directly to the WS to avoid any stale closure issues with sendToTerminal
+    wsRef.current.send(JSON.stringify({
+      type: 'input',
+      sessionId: sessionIdRef.current,
+      data: aiCommandResult + '\n',
+    }));
     setAiCommandQuery('');
     setAiCommandResult(null);
     xtermRef.current?.focus();
