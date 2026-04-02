@@ -56,7 +56,8 @@ const ProjectFormFields = ({
           Git Repository URL
         </label>
         <p className="text-hint mb-2">
-          The repo will be cloned inside a dedicated container
+          The repo will be cloned inside a dedicated Docker container.
+          Use HTTPS or SSH format.
         </p>
         <input
           type="text"
@@ -65,29 +66,50 @@ const ProjectFormFields = ({
           className="input"
           placeholder="https://github.com/org/repo.git"
         />
+        <p className="text-hint mt-1">
+          <span className="text-surface-500">Optional</span> — you can also clone manually inside the container later
+        </p>
       </div>
 
-      {/* Container Auth */}
+      {/* Container Credentials */}
       <div className="space-y-3">
         <label className="label">
           <Key className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
           Container Credentials
         </label>
         <p className="text-hint mb-2">
-          These are injected as environment variables inside the container
+          Each project runs in its own isolated container. Credentials are injected
+          as environment variables so the CLI tools inside can authenticate.
+          All fields are <span className="text-surface-300">optional</span>.
         </p>
+
+        {/* Anthropic API Key */}
         <div>
-          <label className="text-xs text-surface-400 mb-1 block">Anthropic API Key</label>
+          <label className="text-xs text-surface-400 mb-1 block">
+            Anthropic API Key <span className="text-surface-600">— optional</span>
+          </label>
           <input
             type="password"
             value={formData.anthropicApiKey}
             onChange={(e) => handleInputChange("anthropicApiKey", e.target.value)}
             className="input"
-            placeholder="sk-ant-..."
+            placeholder="sk-ant-api03-..."
           />
+          <p className="text-hint mt-1">
+            Used by Claude Code CLI inside the container.
+            Get one at{' '}
+            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:text-primary-300 underline">
+              console.anthropic.com/settings/keys
+            </a>
+            . If left empty, you can log in with <code className="text-[11px] bg-surface-800 px-1 rounded">claude</code> inside the terminal.
+          </p>
         </div>
+
+        {/* GitHub Token */}
         <div>
-          <label className="text-xs text-surface-400 mb-1 block">GitHub Token</label>
+          <label className="text-xs text-surface-400 mb-1 block">
+            GitHub Token <span className="text-surface-600">— optional</span>
+          </label>
           <input
             type="password"
             value={formData.ghToken}
@@ -95,9 +117,22 @@ const ProjectFormFields = ({
             className="input"
             placeholder="ghp_..."
           />
+          <p className="text-hint mt-1">
+            Used for <code className="text-[11px] bg-surface-800 px-1 rounded">git</code> and{' '}
+            <code className="text-[11px] bg-surface-800 px-1 rounded">gh</code> CLI access to private repos.
+            Create one at{' '}
+            <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:text-primary-300 underline">
+              github.com/settings/tokens
+            </a>
+            {' '}with repo scope. If left empty, you can run <code className="text-[11px] bg-surface-800 px-1 rounded">gh auth login</code> inside the terminal.
+          </p>
         </div>
+
+        {/* Port Mappings */}
         <div>
-          <label className="text-xs text-surface-400 mb-1 block">Port Mappings</label>
+          <label className="text-xs text-surface-400 mb-1 block">
+            Port Mappings <span className="text-surface-600">— optional</span>
+          </label>
           <input
             type="text"
             value={formData.ports}
@@ -105,7 +140,11 @@ const ProjectFormFields = ({
             className="input"
             placeholder="3000:3000, 8080:8080"
           />
-          <p className="text-hint mt-1">Comma-separated, e.g. 3000:3000</p>
+          <p className="text-hint mt-1">
+            Expose container ports to your machine so you can access dev servers
+            in your browser. Format: <code className="text-[11px] bg-surface-800 px-1 rounded">host:container</code>,
+            comma-separated. Leave empty if you don't need to access a dev server.
+          </p>
         </div>
       </div>
 
