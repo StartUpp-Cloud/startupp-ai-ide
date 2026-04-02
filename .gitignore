@@ -1,5 +1,11 @@
-# Local database (root level only)
+# Local database and secrets (NEVER commit)
 /data/
+data/
+*.db.json
+db.json
+
+# Screenshots captured by debug tool
+data/screenshots/
 
 # Logs
 logs
