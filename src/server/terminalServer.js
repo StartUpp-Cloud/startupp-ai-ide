@@ -696,19 +696,32 @@ class TerminalServer {
 
     // Skip prompt detection if the data looks like a large code/output dump
     // (prompts are short — if we just received a big chunk, it's probably output not a prompt)
-    if (cleanData.length > 500) return;
+    if (cleanData.length > 300) return;
 
-    // Check for prompts after a short delay (debounce)
-    // Clear any pending check
+    // Check for prompts after a long idle delay
+    // CLI tools stream output with small pauses — we need to wait for TRUE idle
     const existingTimer = this.autoResponseTimers.get(sessionId);
     if (existingTimer) {
       clearTimeout(existingTimer);
     }
 
-    // Use a longer delay to let output streams finish before checking
     const timer = setTimeout(() => {
-      this.checkForPrompts(sessionId);
-    }, 800); // Wait 800ms of idle before checking (was 300ms — too aggressive)
+      // Final guard: only check if the output tail looks like it's waiting for input
+      // (ends with a prompt-like pattern, not in the middle of streaming text)
+      const tail = (this.recentOutput.get(sessionId) || '').slice(-150);
+      const lastLine = tail.split('\n').filter(l => l.trim()).pop() || '';
+
+      // A real prompt typically ends with: ? , (y/n), [Y/n], > , : , ›, or similar
+      const looksLikePrompt = /[?:>›»\]]\s*$/.test(lastLine) ||
+        /\(y\/n\)/i.test(lastLine) ||
+        /\[Y\/n\]/i.test(lastLine) ||
+        /\(yes\/no\)/i.test(lastLine) ||
+        /approve|reject|allow|deny|continue|proceed/i.test(lastLine);
+
+      if (looksLikePrompt) {
+        this.checkForPrompts(sessionId);
+      }
+    }, 2000); // 2 seconds of true idle
 
     this.autoResponseTimers.set(sessionId, timer);
   }
