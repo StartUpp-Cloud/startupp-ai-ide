@@ -422,9 +422,10 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
   useEffect(() => {
     if (!connected || !sessionsLoaded || !wsRef.current) return;
 
-    // For utility terminal: reconnect to stored session if it's still alive, otherwise do nothing
+    // For utility terminal: reconnect to stored session or create a new one for the project
     if (isUtility) {
       if (initialSessionId && sessions.some(s => s.id === initialSessionId)) {
+        // Stored session still alive — reattach
         if (initialSessionId !== sessionIdRef.current) {
           xtermRef.current?.reset();
           wsRef.current.send(JSON.stringify({
@@ -432,6 +433,16 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
             sessionId: initialSessionId,
           }));
         }
+      } else if (projectId && !sessionIdRef.current) {
+        // No stored session — create a new shell for this project's container
+        xtermRef.current?.reset();
+        wsRef.current.send(JSON.stringify({
+          type: 'create-session',
+          projectId,
+          cliTool: null,
+          cols: xtermRef.current?.cols || 120,
+          rows: xtermRef.current?.rows || 30,
+        }));
       }
       return;
     }
