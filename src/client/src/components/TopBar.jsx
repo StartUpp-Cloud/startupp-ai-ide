@@ -33,6 +33,7 @@ export default function TopBar({
   onPlanControl,
   onKill,
   notify,
+  notificationSlot,
 }) {
   const [promptText, setPromptText] = useState('');
   const [planMode, setPlanMode] = useState(false);
@@ -361,6 +362,8 @@ export default function TopBar({
               </div>
             )}
           </div>
+
+          {notificationSlot}
 
           {showKill && <div className="w-px h-5 bg-surface-700" />}
           {showKill && (

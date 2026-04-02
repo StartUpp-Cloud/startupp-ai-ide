@@ -13,7 +13,7 @@ const CLI_TOOLS = [
   { id: 'aider', name: 'Aider', icon: '\u{1F465}' },
 ];
 
-export default function Terminal({ projectId, projects = [], onSessionChange, initialSessionId = null, isUtility = false }) {
+export default function Terminal({ projectId, projects = [], onSessionChange, onSessionsChange, initialSessionId = null, isUtility = false }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -45,6 +45,24 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
 
   // Track project-to-session mapping (projectId -> sessionId)
   const projectSessionsRef = useRef(new Map());
+
+  // Report full sessions list to parent whenever it changes
+  useEffect(() => {
+    if (onSessionsChange && !isUtility) {
+      onSessionsChange(sessions);
+    }
+  }, [sessions, onSessionsChange, isUtility]);
+
+  // Expose switchMainSession for external session switching (e.g. from SessionManager)
+  useEffect(() => {
+    if (!isUtility) {
+      window.switchMainSession = (targetId) => {
+        if (!wsRef.current || !targetId) return;
+        xtermRef.current?.reset();
+        wsRef.current.send(JSON.stringify({ type: 'attach', sessionId: targetId }));
+      };
+    }
+  }, [isUtility]);
 
   // Initialize xterm
   useEffect(() => {
@@ -266,6 +284,11 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
               if (prev && Date.now() - prev.timestamp >= 14000) return null;
               return prev;
             }), 15000);
+
+            // Notify IDE of error event
+            window.dispatchEvent(new CustomEvent('session-error', {
+              detail: { sessionId: msg.sessionId, text: cleanData.trim().slice(0, 200) },
+            }));
           }
         }
         break;
@@ -367,6 +390,13 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
               prev?.matchedText === msg.matchedText ? null : prev
             );
           }, 30000);
+
+          // Notify IDE of input-needed event
+          if (!isUtility) {
+            window.dispatchEvent(new CustomEvent('session-needs-input', {
+              detail: { sessionId: msg.sessionId || sessionIdRef.current, text: msg.matchedText },
+            }));
+          }
         }
         break;
 
@@ -385,7 +415,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, in
         setPromptSuggestion(null);
         break;
     }
-  }, [onSessionChange, autoResponderEnabled]);
+  }, [onSessionChange, autoResponderEnabled, isUtility]);
 
   // Auto-create or attach session when projectId changes or on initial load
   // Waits for sessionsLoaded so we know about existing server-side sessions before deciding

@@ -5,6 +5,8 @@ import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import QuickActionsPanel from '../components/QuickActionsPanel';
 import TopBar from '../components/TopBar';
 import RightPanel from '../components/RightPanel';
+import SessionManager from '../components/SessionManager';
+import NotificationCenter, { sendDesktopNotification } from '../components/NotificationCenter';
 import {
   PanelLeftClose,
   PanelLeftOpen,
@@ -56,6 +58,11 @@ export default function IDE() {
 
   // Utility terminal
   const [utilTerminalCollapsed, setUtilTerminalCollapsed] = useState(false);
+
+  // Sessions & notifications state
+  const [allSessions, setAllSessions] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [leftView, setLeftView] = useState('sessions');
 
   // Git branch state
   const [currentBranch, setCurrentBranch] = useState(null);
@@ -159,6 +166,64 @@ export default function IDE() {
     window.addEventListener('run-in-util', handler);
     return () => window.removeEventListener('run-in-util', handler);
   }, []);
+
+  // ── Notification helpers ──
+
+  const addNotification = useCallback((type, title, detail, sessionId, projectName) => {
+    const notification = {
+      id: Date.now() + Math.random(),
+      type, title, detail, sessionId, projectName,
+      timestamp: new Date().toISOString(),
+      read: false,
+    };
+    setNotifications(prev => [notification, ...prev].slice(0, 50));
+
+    // Desktop notification for important types
+    if (['needs-input', 'error-detected'].includes(type)) {
+      sendDesktopNotification(title, detail || '', { tag: sessionId });
+    }
+  }, []);
+
+  const dismissNotification = useCallback((id) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  }, []);
+
+  const dismissAllNotifications = useCallback(() => {
+    setNotifications([]);
+  }, []);
+
+  const handleNotificationClick = useCallback((notification) => {
+    if (notification.sessionId && window.switchMainSession) {
+      window.switchMainSession(notification.sessionId);
+    }
+    // Mark as read
+    setNotifications(prev => prev.map(n => n.id === notification.id ? { ...n, read: true } : n));
+  }, []);
+
+  // ── Listen for session events (needs-input, errors) via window events ──
+
+  useEffect(() => {
+    const handleNeedsInput = (e) => {
+      const { sessionId, text } = e.detail;
+      const session = allSessions.find(s => s.id === sessionId);
+      const proj = projects.find(p => p.id === session?.projectId);
+      addNotification('needs-input', 'Input needed', text, sessionId, proj?.name);
+    };
+
+    const handleError = (e) => {
+      const { sessionId, text } = e.detail;
+      const session = allSessions.find(s => s.id === sessionId);
+      const proj = projects.find(p => p.id === session?.projectId);
+      addNotification('error-detected', 'Error detected', text, sessionId, proj?.name);
+    };
+
+    window.addEventListener('session-needs-input', handleNeedsInput);
+    window.addEventListener('session-error', handleError);
+    return () => {
+      window.removeEventListener('session-needs-input', handleNeedsInput);
+      window.removeEventListener('session-error', handleError);
+    };
+  }, [allSessions, projects, addNotification]);
 
   // ── TopBar callbacks ──
 
@@ -272,6 +337,14 @@ export default function IDE() {
         onPlanControl={handlePlanControl}
         onKill={handleKill}
         notify={notify}
+        notificationSlot={
+          <NotificationCenter
+            notifications={notifications}
+            onDismiss={dismissNotification}
+            onDismissAll={dismissAllNotifications}
+            onClickNotification={handleNotificationClick}
+          />
+        }
       />
 
       {/* ── Main IDE Layout ── */}
@@ -284,25 +357,67 @@ export default function IDE() {
               className="flex flex-col bg-surface-850 border-r border-surface-700"
               style={{ width: leftPanelWidth }}
             >
-              {/* Projects (top) — uses min-h-0 to allow shrinking within flex */}
+              {/* Sessions / Projects toggle (top) */}
               <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-                <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-700 flex-shrink-0">
-                  <span className="text-[11px] font-medium text-surface-300 uppercase tracking-wide">Projects</span>
+                <div className="flex items-center border-b border-surface-700 flex-shrink-0">
+                  <button
+                    onClick={() => setLeftView('sessions')}
+                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide transition-colors ${
+                      leftView === 'sessions'
+                        ? 'text-primary-400 border-b-2 border-primary-500'
+                        : 'text-surface-400 hover:text-surface-200'
+                    }`}
+                  >
+                    Sessions
+                  </button>
+                  <button
+                    onClick={() => setLeftView('projects')}
+                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide transition-colors ${
+                      leftView === 'projects'
+                        ? 'text-primary-400 border-b-2 border-primary-500'
+                        : 'text-surface-400 hover:text-surface-200'
+                    }`}
+                  >
+                    Projects
+                  </button>
                   <button
                     onClick={() => setLeftPanelCollapsed(true)}
-                    className="p-1 hover:bg-surface-700 rounded text-surface-400 hover:text-surface-200"
+                    className="p-1 mx-1 hover:bg-surface-700 rounded text-surface-400 hover:text-surface-200 flex-shrink-0"
                   >
                     <PanelLeftClose className="w-3.5 h-3.5" />
                   </button>
                 </div>
                 <div className="flex-1 min-h-0 overflow-auto">
-                  <ProjectManagerPanel
-                    selectedProjectId={selectedProjectId}
-                    onSelectProject={(id) => setSelectedProjectId(id)}
-                    onProjectChanged={() => {
-                      if (selectedProjectId) loadProject(selectedProjectId);
-                    }}
-                  />
+                  {leftView === 'sessions' ? (
+                    <SessionManager
+                      projects={projects}
+                      sessions={allSessions.map(s => ({
+                        ...s,
+                        needsInput: false,
+                        hasError: false,
+                      }))}
+                      activeSessionId={currentSessionId}
+                      onSwitchSession={(id) => {
+                        if (window.switchMainSession) window.switchMainSession(id);
+                        const session = allSessions.find(s => s.id === id);
+                        if (session?.projectId) setSelectedProjectId(session.projectId);
+                      }}
+                      onCreateSession={(projectId) => {
+                        setSelectedProjectId(projectId);
+                      }}
+                      onKillSession={(id) => {
+                        // TODO: send kill via WebSocket
+                      }}
+                    />
+                  ) : (
+                    <ProjectManagerPanel
+                      selectedProjectId={selectedProjectId}
+                      onSelectProject={(id) => setSelectedProjectId(id)}
+                      onProjectChanged={() => {
+                        if (selectedProjectId) loadProject(selectedProjectId);
+                      }}
+                    />
+                  )}
                 </div>
               </div>
 
@@ -371,6 +486,7 @@ export default function IDE() {
               projectId={selectedProjectId}
               projects={projects}
               onSessionChange={setCurrentSessionId}
+              onSessionsChange={setAllSessions}
               initialSessionId={currentSessionId}
             />
           </div>
