@@ -67,10 +67,13 @@ class PTYManager extends EventEmitter {
         cliTool,
         ptyProcess,
         status: 'active',
+        name: null, // LLM-generated descriptive name, set after first activity
         createdAt: new Date().toISOString(),
         lastActivity: new Date().toISOString(),
         history: [], // Store conversation history
         scrollback: '', // Rolling buffer of recent output for reconnection replay
+        outputLength: 0, // Track total output for auto-naming trigger
+        named: false, // Whether LLM has named this session
         cols,
         rows,
       };
@@ -83,7 +86,14 @@ class PTYManager extends EventEmitter {
         if (session.scrollback.length > 100000) {
           session.scrollback = session.scrollback.slice(-100000);
         }
+        session.outputLength += data.length;
         this.emit('data', { sessionId, data });
+
+        // Trigger auto-naming after ~2KB of output (enough context to understand what's happening)
+        if (!session.named && session.outputLength > 2000) {
+          session.named = true; // Prevent re-triggering
+          this.emit('needs-naming', { sessionId, projectId: session.projectId });
+        }
       });
 
       // Handle PTY exit
@@ -153,6 +163,7 @@ class PTYManager extends EventEmitter {
       projectId: session.projectId,
       cliTool: session.cliTool,
       status: session.status,
+      name: session.name,
       createdAt: session.createdAt,
       lastActivity: session.lastActivity,
       cols: session.cols,
@@ -170,6 +181,17 @@ class PTYManager extends EventEmitter {
   }
 
   /**
+   * Set a descriptive name for a session
+   */
+  setSessionName(sessionId, name) {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.name = name;
+      this.emit('session-renamed', { sessionId, name });
+    }
+  }
+
+  /**
    * Get all sessions
    */
   getAllSessions() {
@@ -178,6 +200,7 @@ class PTYManager extends EventEmitter {
       projectId: session.projectId,
       cliTool: session.cliTool,
       status: session.status,
+      name: session.name,
       createdAt: session.createdAt,
       lastActivity: session.lastActivity,
     }));

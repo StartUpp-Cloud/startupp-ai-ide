@@ -212,7 +212,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
         setSessions(prev => {
           const exists = prev.some(s => s.id === msg.sessionId);
           if (exists) return prev;
-          return [...prev, { id: msg.sessionId, projectId: msg.projectId, cliTool: msg.cliTool, status: 'running' }];
+          return [...prev, { id: msg.sessionId, projectId: msg.projectId, cliTool: msg.cliTool, name: msg.name || null, status: 'running' }];
         });
         // Track project-session mapping
         if (msg.projectId) {
@@ -291,6 +291,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
           }
         }
         setSessionsLoaded(true);
+        break;
+
+      case 'session-renamed':
+        setSessions(prev => prev.map(s =>
+          s.id === msg.sessionId ? { ...s, name: msg.name } : s
+        ));
         break;
 
       case 'error':
@@ -555,7 +561,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, is
                   {sessions.map((s) => {
                     const isActive = s.id === sessionId;
                     const proj = projects.find(p => p.id === s.projectId);
-                    const label = proj ? proj.name : 'Session';
+                    const label = s.name || (proj ? proj.name : 'Session');
                     return (
                       <button
                         key={s.id}

@@ -105,6 +105,37 @@ class TerminalServer {
       });
     });
 
+    // Auto-name sessions using LLM when enough output has accumulated
+    ptyManager.on('needs-naming', async ({ sessionId, projectId }) => {
+      try {
+        const settings = (await import('./llmProvider.js')).llmProvider.getSettings();
+        if (!settings.enabled) return;
+
+        const scrollback = ptyManager.getScrollback(sessionId);
+        // Strip ANSI and take last 1000 chars for context
+        const cleanOutput = scrollback.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').slice(-1000);
+
+        const { llmProvider } = await import('./llmProvider.js');
+        const result = await llmProvider.generateResponse(
+          `Based on this terminal session output, generate a very short descriptive name (2-5 words max). Examples: "Auth API Setup", "Bug Fix Login", "DB Migration", "Test Suite Run", "Deploy Staging". Reply with ONLY the name, nothing else.\n\nOutput:\n${cleanOutput}`,
+          { systemPrompt: 'You name terminal sessions concisely. Reply with ONLY a 2-5 word name. No quotes, no explanation.', maxTokens: 20, temperature: 0.3 }
+        );
+
+        const name = result.response?.replace(/<think>[\s\S]*?<\/think>/g, '').trim().slice(0, 40);
+        if (name && name.length > 1) {
+          ptyManager.setSessionName(sessionId, name);
+          this.broadcast({ type: 'session-renamed', sessionId, name });
+        }
+      } catch (e) {
+        // Non-critical — session stays unnamed
+        console.warn('Auto-naming failed:', e.message);
+      }
+    });
+
+    ptyManager.on('session-renamed', ({ sessionId, name }) => {
+      this.broadcast({ type: 'session-renamed', sessionId, name });
+    });
+
     // Listen for LLM request events from auto-responder
     autoResponder.on('llm-request', async ({ text, sessionId, cliTool, smartEngineResult }) => {
       await this.handleLLMRequest(sessionId, text, cliTool, smartEngineResult);
@@ -277,6 +308,10 @@ class TerminalServer {
       case 'orchestrator-skip':
         this.handleOrchestratorSkip(ws, payload);
         break;
+      case 'rename-session':
+        this.handleRenameSession(ws, payload);
+        break;
+
       case 'kill-switch':
         this.handleKillSwitch(ws, payload);
         break;
@@ -659,6 +694,10 @@ class TerminalServer {
     // Also track in session context for history
     sessionContext.addCliOutput(sessionId, cleanData);
 
+    // Skip prompt detection if the data looks like a large code/output dump
+    // (prompts are short — if we just received a big chunk, it's probably output not a prompt)
+    if (cleanData.length > 500) return;
+
     // Check for prompts after a short delay (debounce)
     // Clear any pending check
     const existingTimer = this.autoResponseTimers.get(sessionId);
@@ -666,10 +705,10 @@ class TerminalServer {
       clearTimeout(existingTimer);
     }
 
-    // Schedule prompt check
+    // Use a longer delay to let output streams finish before checking
     const timer = setTimeout(() => {
       this.checkForPrompts(sessionId);
-    }, 300); // Check 300ms after last output
+    }, 800); // Wait 800ms of idle before checking (was 300ms — too aggressive)
 
     this.autoResponseTimers.set(sessionId, timer);
   }
@@ -681,8 +720,12 @@ class TerminalServer {
     const recent = this.recentOutput.get(sessionId);
     if (!recent) return;
 
+    // Only check the last ~200 chars — a real prompt is at the end of output,
+    // not buried in the middle of a code dump
+    const tail = recent.slice(-200);
+
     const cliTool = this.sessionCliTools.get(sessionId) || 'generic';
-    const result = autoResponder.checkForPrompt(recent, sessionId, cliTool);
+    const result = autoResponder.checkForPrompt(tail, sessionId, cliTool);
 
     if (result) {
       // Notify clients about detected prompt
@@ -856,6 +899,18 @@ class TerminalServer {
    */
   handleOrchestratorSkip(ws, { executionId }) {
     orchestrator.skipStep(executionId);
+  }
+
+  /**
+   * Manually rename a session
+   */
+  handleRenameSession(ws, { sessionId, name }) {
+    if (!sessionId || !name?.trim()) {
+      this.sendError(ws, 'sessionId and name are required');
+      return;
+    }
+    ptyManager.setSessionName(sessionId, name.trim().slice(0, 40));
+    this.send(ws, { type: 'session-renamed', sessionId, name: name.trim().slice(0, 40) });
   }
 
   /**
