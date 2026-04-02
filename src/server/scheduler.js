@@ -10,7 +10,7 @@
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
 import { getDB } from './db.js';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { activityFeed } from './activityFeed.js';
 import { testGate } from './testGate.js';
 
@@ -24,7 +24,7 @@ const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_LENGTH = 10_000;
 
 /** Valid schedule types */
-const VALID_TYPES = new Set(['command', 'test', 'plan']);
+const VALID_TYPES = new Set(['command', 'test', 'plan', 'webhook']);
 
 /**
  * @typedef {Object} ScheduleLastResult
@@ -383,6 +383,10 @@ class Scheduler extends EventEmitter {
           result = await this._executePlan(schedule);
           break;
 
+        case 'webhook':
+          result = await this._executeWebhook(schedule);
+          break;
+
         default:
           result = {
             success: false,
@@ -454,15 +458,27 @@ class Scheduler extends EventEmitter {
   _executeCommand(schedule) {
     return new Promise((resolve) => {
       const startTime = Date.now();
+
+      // Determine if this runs inside a container
+      const containerName = this._getContainerName(schedule.projectId);
+      let command = schedule.command;
+
+      if (containerName) {
+        // Wrap command to run inside the container
+        const workDir = schedule.projectPath || '/workspace';
+        const escaped = command.replace(/"/g, '\\"');
+        command = `docker exec -w "${workDir}" ${containerName} bash -c "${escaped}"`;
+      }
+
       const execOptions = {
-        cwd: schedule.projectPath || undefined,
+        cwd: containerName ? undefined : (schedule.projectPath || undefined),
         timeout: DEFAULT_EXEC_TIMEOUT_MS,
         encoding: 'utf-8',
-        maxBuffer: 5 * 1024 * 1024, // 5MB
+        maxBuffer: 5 * 1024 * 1024,
         env: { ...process.env },
       };
 
-      exec(schedule.command, execOptions, (error, stdout, stderr) => {
+      exec(command, execOptions, (error, stdout, stderr) => {
         const duration = Date.now() - startTime;
         const output = this._combineOutput(stdout, stderr);
         const truncated = output.length > MAX_OUTPUT_LENGTH
@@ -487,6 +503,19 @@ class Scheduler extends EventEmitter {
   }
 
   /**
+   * Look up the container name for a project (if it's container-based)
+   * @private
+   */
+  _getContainerName(projectId) {
+    if (!projectId) return null;
+    try {
+      const db = getDB();
+      const project = (db.data.projects || []).find(p => p.id === projectId);
+      return project?.containerName || null;
+    } catch { return null; }
+  }
+
+  /**
    * Execute a test task using the testGate.
    *
    * @param {Schedule} schedule - The schedule containing test configuration
@@ -504,7 +533,31 @@ class Scheduler extends EventEmitter {
     }
 
     const startTime = Date.now();
+    const containerName = this._getContainerName(schedule.projectId);
+
     try {
+      if (containerName) {
+        // Run tests inside the container
+        const testCmd = schedule.testCommand || 'npm test';
+        const workDir = projectPath || '/workspace';
+        const escaped = testCmd.replace(/"/g, '\\"');
+        const result = await new Promise((resolve) => {
+          exec(
+            `docker exec -w "${workDir}" ${containerName} bash -c "${escaped}"`,
+            { encoding: 'utf-8', timeout: 120000, maxBuffer: 5 * 1024 * 1024 },
+            (error, stdout, stderr) => {
+              const output = this._combineOutput(stdout, stderr);
+              resolve({
+                success: !error,
+                output: output.slice(0, MAX_OUTPUT_LENGTH),
+                duration: Date.now() - startTime,
+              });
+            },
+          );
+        });
+        return result;
+      }
+
       const testResult = await testGate.runTests(projectPath, {
         testCommand: schedule.testCommand || undefined,
       });
@@ -556,6 +609,50 @@ class Scheduler extends EventEmitter {
       output: `Plan trigger emitted with ${schedule.planSteps.length} step(s)`,
       duration: Date.now() - startTime,
     };
+  }
+
+  /**
+   * Execute a webhook / HTTP notification.
+   * @param {Schedule} schedule - Must have schedule.webhookUrl and optionally schedule.webhookMethod, schedule.webhookBody
+   * @returns {Promise<ScheduleLastResult>}
+   * @private
+   */
+  async _executeWebhook(schedule) {
+    const startTime = Date.now();
+    const url = schedule.webhookUrl;
+    if (!url) {
+      return { success: false, output: 'webhookUrl is required', duration: 0 };
+    }
+
+    try {
+      const method = (schedule.webhookMethod || 'POST').toUpperCase();
+      const headers = { 'Content-Type': 'application/json' };
+      const fetchOpts = { method, headers, signal: AbortSignal.timeout(15000) };
+
+      if (method !== 'GET' && schedule.webhookBody) {
+        fetchOpts.body = typeof schedule.webhookBody === 'string'
+          ? schedule.webhookBody
+          : JSON.stringify(schedule.webhookBody);
+      }
+
+      const res = await fetch(url, fetchOpts);
+      const body = await res.text().catch(() => '');
+      const truncated = body.length > MAX_OUTPUT_LENGTH
+        ? body.slice(0, MAX_OUTPUT_LENGTH) + '\n...'
+        : body;
+
+      return {
+        success: res.ok,
+        output: `${res.status} ${res.statusText}\n${truncated}`,
+        duration: Date.now() - startTime,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        output: `Webhook failed: ${err.message}`,
+        duration: Date.now() - startTime,
+      };
+    }
   }
 
   /**

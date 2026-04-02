@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import {
   Clock, Plus, Play, Pause, Trash2, X, Check, AlertCircle,
   Terminal, TestTube, ListTodo, ChevronDown, ChevronRight,
-  RefreshCw, Loader2,
+  RefreshCw, Loader2, Globe, Sparkles,
 } from 'lucide-react';
 
 // Interval presets for easy selection
@@ -20,12 +20,14 @@ const TYPE_ICONS = {
   command: Terminal,
   test: TestTube,
   plan: ListTodo,
+  webhook: Globe,
 };
 
 const TYPE_LABELS = {
   command: 'Command',
   test: 'Test',
   plan: 'Plan',
+  webhook: 'Webhook',
 };
 
 function formatInterval(ms) {
@@ -58,6 +60,8 @@ export default function SchedulerPanel({ projectId, projectPath }) {
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [aiQuery, setAiQuery] = useState('');
+  const [aiGenerating, setAiGenerating] = useState(false);
   const [expanded, setExpanded] = useState({});
   const [triggeringIds, setTriggeringIds] = useState({});
 
@@ -211,6 +215,46 @@ export default function SchedulerPanel({ projectId, projectPath }) {
       </div>
 
       {/* Create Form */}
+      {/* AI Schedule Assistant */}
+      {showCreateForm && (
+        <div className="px-2 pt-2 pb-1 border-b border-surface-700/50">
+          <div className="flex items-center gap-1.5">
+            <Sparkles className="w-3 h-3 text-purple-400 flex-shrink-0" />
+            <input
+              type="text"
+              value={aiQuery}
+              onChange={(e) => setAiQuery(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter' && aiQuery.trim() && !aiGenerating) {
+                  e.preventDefault();
+                  setAiGenerating(true);
+                  try {
+                    const res = await fetch('/api/schedules/generate', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ description: aiQuery.trim(), projectId }),
+                    });
+                    const data = await res.json();
+                    if (data.config) {
+                      setFormName(data.config.name || '');
+                      setFormType(data.config.type || 'command');
+                      setFormCommand(data.config.command || data.config.webhookUrl || '');
+                      setFormInterval(data.config.intervalMs || 300000);
+                      setAiQuery('');
+                    }
+                  } catch { /* ignore */ }
+                  finally { setAiGenerating(false); }
+                }
+              }}
+              placeholder="Describe what to schedule... (Enter to generate)"
+              className="flex-1 px-2 py-1 text-[11px] bg-surface-800 border border-surface-700 rounded text-surface-200 placeholder-surface-500 focus:ring-1 focus:ring-purple-500/50"
+            />
+            {aiGenerating && <Loader2 className="w-3 h-3 text-purple-400 animate-spin flex-shrink-0" />}
+          </div>
+          <p className="text-[10px] text-surface-600 mt-1 mb-1">e.g. "Send a Slack message every hour with test results" or "Check disk usage every 6 hours"</p>
+        </div>
+      )}
+
       {showCreateForm && (
         <div className="p-2 border-b border-surface-700 space-y-2">
           {/* Name input */}

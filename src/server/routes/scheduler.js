@@ -5,6 +5,7 @@
 
 import express from 'express';
 import { scheduler } from '../scheduler.js';
+import { llmProvider } from '../llmProvider.js';
 
 const router = express.Router();
 
@@ -223,6 +224,82 @@ router.post('/:id/trigger', async (req, res) => {
       return res.status(404).json({ error: 'Schedule not found' });
     }
     res.status(500).json({ error: 'Failed to trigger schedule', message: error.message });
+  }
+});
+
+/**
+ * POST /api/schedules/generate - LLM-assisted schedule creation
+ * Describe what you want in natural language, the LLM generates the config
+ */
+router.post('/generate', async (req, res) => {
+  try {
+    const { description, projectId } = req.body;
+
+    if (!description?.trim()) {
+      return res.status(400).json({ error: 'description is required' });
+    }
+
+    if (!llmProvider.getSettings().enabled) {
+      return res.status(400).json({ error: 'LLM is not enabled' });
+    }
+
+    const systemPrompt = `You are a task scheduler configuration assistant. Given a natural language description of a scheduled task, generate the configuration as a JSON object.
+
+Return ONLY valid JSON with these fields:
+{
+  "name": "short descriptive name",
+  "type": "command|test|webhook",
+  "command": "the shell command to run (for type=command)",
+  "testCommand": "test command override (for type=test, optional)",
+  "webhookUrl": "URL to call (for type=webhook)",
+  "webhookMethod": "GET|POST|PUT (for type=webhook)",
+  "webhookBody": "JSON body string (for type=webhook, optional)",
+  "intervalMs": number (minimum 60000),
+  "notifyOnFailure": true,
+  "notifyOnSuccess": false
+}
+
+Interval guidelines:
+- "every minute" = 60000
+- "every 5 minutes" = 300000
+- "every 15 minutes" = 900000
+- "every 30 minutes" = 1800000
+- "every hour" = 3600000
+- "every 6 hours" = 21600000
+- "every day" / "daily" = 86400000
+
+For webhook/notification tasks, common patterns:
+- Slack: POST to webhook URL with {"text": "message"} body
+- Discord: POST to webhook URL with {"content": "message"} body
+- Email via services: POST to Mailgun/SendGrid API
+- Generic: POST/GET to any URL
+
+For commands, use the appropriate shell syntax. The command runs inside the project's container if one exists.`;
+
+    const result = await llmProvider.generateResponse(description.trim(), {
+      systemPrompt,
+      maxTokens: 500,
+      temperature: 0.2,
+    });
+
+    const cleaned = result.response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    let config;
+    try {
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      config = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
+    } catch {
+      return res.status(500).json({ error: 'Failed to parse LLM response', raw: cleaned.slice(0, 500) });
+    }
+
+    // Validate and sanitize
+    config.intervalMs = Math.max(60000, config.intervalMs || 300000);
+    if (!['command', 'test', 'plan', 'webhook'].includes(config.type)) {
+      config.type = 'command';
+    }
+
+    res.json({ config, provider: result.provider, model: result.model });
+  } catch (error) {
+    res.status(500).json({ error: 'Schedule generation failed', message: error.message });
   }
 });
 
