@@ -24,15 +24,17 @@ RUN useradd -m -s /bin/bash dev
 
 # tmux config for proper xterm.js compatibility
 RUN echo '\
-set -g default-terminal "xterm-256color"\n\
-set -ga terminal-overrides ",xterm-256color:Tc"\n\
+set -g default-terminal "tmux-256color"\n\
+set -as terminal-overrides ",xterm*:Tc"\n\
 set -g mouse on\n\
 set -g history-limit 50000\n\
-set -g escape-time 10\n\
+set -g escape-time 0\n\
 set -g focus-events on\n\
 set -g status off\n\
 set -g allow-passthrough on\n\
-set -ga terminal-features ",xterm-256color:hyperlinks"\n\
+set -gq allow-passthrough all\n\
+setw -g xterm-keys on\n\
+set -g set-clipboard on\n\
 ' > /home/dev/.tmux.conf && chown dev:dev /home/dev/.tmux.conf
 
 USER dev
