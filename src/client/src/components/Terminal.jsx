@@ -119,16 +119,23 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     // This is synchronous — xterm.open() triggers the DA, reset() flushes it
     xterm.write('\x1b[2J\x1b[H'); // Clear screen + cursor home
 
-    // Handle terminal input — forward everything to the PTY.
-    // DA responses from xterm.js (e.g. \x1b[?62;c) MUST reach the application
-    // so it can detect terminal capabilities and render correctly.
+    // Handle terminal input — filter auto-responses that cause echo garbage,
+    // but ALLOW DA responses through (apps need them for capability detection).
     xterm.onData((data) => {
       if (!sessionIdRef.current) return;
+      // Strip responses that the PTY will echo back as visible garbage:
+      // - OSC responses (background/foreground color queries): \x1b]11;rgb:...\x07
+      // - CPR (Cursor Position Report): \x1b[row;colR
+      // DA responses (\x1b[?...c, \x1b[>...c) are NOT stripped — apps need them.
+      let cleaned = data
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC with BEL or ST terminator
+        .replace(/\x1b\[\??\d+(?:;\d+)*R/g, '');            // CPR: \x1b[1;165R, \x1b[56R
+      if (!cleaned) return;
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'input',
           sessionId: sessionIdRef.current,
-          data,
+          data: cleaned,
         }));
       }
     });
@@ -291,13 +298,21 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         let outputData = msg.data;
         if (outputData) {
           outputData = outputData
+            // ── DA response artifacts ──
             .replace(/\x1b\[[\?>]?[\d;]*c/g, '')   // Full DA responses: \x1b[?1;2c, \x1b[>0;276;0c
-            .replace(/\x1b\[>[\d;]*/g, '')           // Partial secondary DA (has escape, no trailing c yet)
+            .replace(/\x1b\[>[\d;]*/g, '')           // Partial secondary DA (escape present, no trailing c)
             .replace(/\[\?[\d;]*c/g, '')             // Split DA1 (escape in prev chunk): [?1;2c
             .replace(/\[>[\d;]*c/g, '')              // Split DA2 (escape in prev chunk): [>0;276;0c
-            .replace(/\[>/g, '')                     // Bare [> fragment from split chunks
+            .replace(/\[>/g, '')                     // Bare [> fragment
             .replace(/(\d+;)+\d+c/g, '')             // Bare numeric DA: 0;276;0c
-            .replace(/\d+;\d+c/g, '');               // Short bare: 276;0c
+            .replace(/\d+;\d+c/g, '')                // Short bare: 276;0c
+            // ── OSC response echoes (background/foreground color queries) ──
+            .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // Full OSC with terminator
+            .replace(/\d+;rgb:[0-9a-f/]+/gi, '')    // Bare OSC body: 11;rgb:1a1a/1b1b/2626
+            // ── CPR (Cursor Position Report) echoes ──
+            .replace(/\x1b\[\??\d+(?:;\d+)*R/g, '') // Full CPR: \x1b[1;165R
+            .replace(/;\d+R/g, '')                   // Bare CPR fragment: ;165R, ;56R
+            .replace(/(?:^|\D)\d{1,3}R(?=\D|$)/g, (m) => m.replace(/\d+R/, '')); // Bare: 1R, 56R (not in words)
         }
         if (outputData) xtermRef.current?.write(outputData);
 
