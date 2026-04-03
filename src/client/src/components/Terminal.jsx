@@ -45,6 +45,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
   // Track project-to-session mapping (projectId -> sessionId)
   const projectSessionsRef = useRef(new Map());
+  // Track whether this terminal is expecting a session-created response
+  const pendingCreateRef = useRef(false);
 
   // Report full sessions list to parent whenever it changes
   useEffect(() => {
@@ -226,19 +228,23 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         break;
 
       case 'session-created':
-        setSessionId(msg.sessionId);
+        // Only adopt this session if WE requested it (via pendingCreateRef)
+        // Otherwise another terminal's session-created broadcast would hijack us
+        if (pendingCreateRef.current) {
+          pendingCreateRef.current = false;
+          setSessionId(msg.sessionId);
+          onSessionChange?.(msg.sessionId);
+          xtermRef.current?.focus();
+        }
+        // Always track in sessions list and project mapping (for session manager)
         setSessions(prev => {
           const exists = prev.some(s => s.id === msg.sessionId);
           if (exists) return prev;
           return [...prev, { id: msg.sessionId, projectId: msg.projectId, cliTool: msg.cliTool, name: msg.name || null, status: 'running' }];
         });
-        // Track project-session mapping
         if (msg.projectId) {
           projectSessionsRef.current.set(msg.projectId, msg.sessionId);
         }
-        onSessionChange?.(msg.sessionId);
-        xtermRef.current?.writeln(`\x1b[32m\u25CF Session started\x1b[0m\n`);
-        xtermRef.current?.focus();
         break;
 
       case 'attached':
@@ -436,6 +442,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       } else if (projectId && !sessionIdRef.current) {
         // No stored session — create a new shell for this project's container
         xtermRef.current?.reset();
+        pendingCreateRef.current = true;
         wsRef.current.send(JSON.stringify({
           type: 'create-session',
           projectId,
@@ -467,6 +474,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     } else {
       // Create a new session for this project
       xtermRef.current?.reset();
+      pendingCreateRef.current = true;
       wsRef.current.send(JSON.stringify({
         type: 'create-session',
         projectId,
@@ -485,8 +493,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
     // Clear terminal
     xtermRef.current?.clear();
-    xtermRef.current?.writeln('\x1b[36m\u25CF Creating new session...\x1b[0m\n');
 
+    pendingCreateRef.current = true;
     wsRef.current.send(JSON.stringify({
       type: 'create-session',
       projectId,
