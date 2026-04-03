@@ -119,8 +119,10 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
     // Handle terminal input - only send when session is attached
     xterm.onData((data) => {
-      // Block ALL input until a session is attached — prevents DA response from appearing
       if (!sessionIdRef.current) return;
+      // Filter out terminal capability responses (DA/tmux responses like 0;276;0c)
+      // These are xterm/tmux auto-responses, not real user input
+      if (/^\x1b\[[\?]?[\d;]*c$/.test(data) || /^[\d;]+c$/.test(data)) return;
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'input',
