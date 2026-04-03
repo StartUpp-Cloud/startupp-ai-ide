@@ -99,10 +99,6 @@ class PTYManager extends EventEmitter {
         rows,
       };
 
-      // Periodic save timer — saves scrollback snapshot every 30 seconds
-      let lastSaveAt = Date.now();
-      let saveTimer = null;
-
       // Handle PTY output
       ptyProcess.onData((data) => {
         session.lastActivity = new Date().toISOString();
@@ -120,25 +116,11 @@ class PTYManager extends EventEmitter {
           this.emit('needs-naming', { sessionId, projectId: session.projectId });
         }
 
-        // Periodic save — debounced, every 30 seconds of activity
-        if (Date.now() - lastSaveAt > 30000 && !saveTimer) {
-          saveTimer = setTimeout(() => {
-            lastSaveAt = Date.now();
-            saveTimer = null;
-            sessionHistory.saveSession({
-              sessionId,
-              projectId: session.projectId,
-              role: session.role,
-              name: session.name,
-              cliTool: session.cliTool,
-              containerName: session.containerName,
-              scrollback: session.scrollback,
-              createdAt: session.createdAt,
-              endedAt: new Date().toISOString(),
-              exitCode: null,
-            }).catch(() => {}); // Non-critical
-          }, 5000); // 5s debounce
-        }
+        // Live write — debounced 3s, always within 3s of latest output on disk
+        sessionHistory.writeLive(sessionId, session.scrollback, {
+          projectId: session.projectId,
+          role: session.role,
+        });
       });
 
       // Handle PTY exit
@@ -387,7 +369,16 @@ class PTYManager extends EventEmitter {
    * Cleanup all sessions on shutdown
    */
   cleanup() {
-    // Save all active sessions to history before killing them
+    // Flush all live writes immediately (synchronous file writes)
+    const activeSessions = [];
+    for (const [, session] of this.sessions) {
+      if (session.status === 'active') {
+        activeSessions.push(session);
+      }
+    }
+    sessionHistory.flushLive(activeSessions);
+
+    // Save all active sessions to history and kill PTYs
     const savePromises = [];
     for (const [sessionId, session] of this.sessions) {
       if (session.status === 'active') {
@@ -409,7 +400,6 @@ class PTYManager extends EventEmitter {
       }
     }
     this.sessions.clear();
-    // Return promise so shutdown can wait for saves
     return Promise.all(savePromises);
   }
 }

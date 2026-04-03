@@ -15,9 +15,69 @@ const __dirname = path.dirname(__filename);
 
 // Store scrollback text files in data/session-history/
 const HISTORY_DIR = path.join(__dirname, '../../data/session-history');
+
+// Live scrollback files — written continuously per active session
+const LIVE_DIR = path.join(__dirname, '../../data/session-live');
 if (!fs.existsSync(HISTORY_DIR)) fs.mkdirSync(HISTORY_DIR, { recursive: true });
+if (!fs.existsSync(LIVE_DIR)) fs.mkdirSync(LIVE_DIR, { recursive: true });
 
 class SessionHistory {
+  constructor() {
+    // Track debounce timers per session for live writes
+    this._liveTimers = new Map();
+  }
+
+  /**
+   * Write live scrollback to disk (debounced 3s).
+   * Called on every PTY output chunk. The file is always up-to-date
+   * within 3 seconds — survives hard kills, PM2 restarts, crashes.
+   */
+  writeLive(sessionId, scrollback, meta = {}) {
+    // Debounce: schedule a write 3 seconds after the last call
+    if (this._liveTimers.has(sessionId)) {
+      clearTimeout(this._liveTimers.get(sessionId));
+    }
+    this._liveTimers.set(sessionId, setTimeout(() => {
+      this._liveTimers.delete(sessionId);
+      try {
+        const cleanText = (scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+        const header = `Session: ${sessionId}\nProject: ${meta.projectId || 'unknown'}\nRole: ${meta.role || 'main'}\nSaved: ${new Date().toISOString()}\n${'─'.repeat(60)}\n`;
+        fs.writeFileSync(path.join(LIVE_DIR, `${sessionId}.txt`), header + cleanText, 'utf-8');
+      } catch { /* non-critical */ }
+    }, 3000));
+  }
+
+  /**
+   * Flush all pending live writes immediately (called on shutdown).
+   */
+  flushLive(sessions) {
+    for (const [sessionId, timer] of this._liveTimers) {
+      clearTimeout(timer);
+    }
+    this._liveTimers.clear();
+    // Write all provided sessions immediately
+    if (sessions) {
+      for (const s of sessions) {
+        try {
+          const cleanText = (s.scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+          const header = `Session: ${s.id}\nProject: ${s.projectId || 'unknown'}\nRole: ${s.role || 'main'}\nSaved: ${new Date().toISOString()}\n${'─'.repeat(60)}\n`;
+          fs.writeFileSync(path.join(LIVE_DIR, `${s.id}.txt`), header + cleanText, 'utf-8');
+        } catch { /* non-critical */ }
+      }
+    }
+  }
+
+  /**
+   * Clean up a live file when a session ends (it's been saved to history).
+   */
+  removeLive(sessionId) {
+    if (this._liveTimers.has(sessionId)) {
+      clearTimeout(this._liveTimers.get(sessionId));
+      this._liveTimers.delete(sessionId);
+    }
+    try { fs.unlinkSync(path.join(LIVE_DIR, `${sessionId}.txt`)); } catch {}
+  }
+
   /**
    * Save a session's scrollback when it ends.
    * Strips ANSI codes from the scrollback for readable storage.
