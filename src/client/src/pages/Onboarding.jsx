@@ -21,7 +21,11 @@ export default function Onboarding({ onSetupComplete }) {
   const navigate = useNavigate();
   const { createProject } = useProjects();
 
-  const [step, setStep] = useState("connect"); // 'connect' | 'project'
+  const [step, setStep] = useState("connect"); // 'connect' | 'docker' | 'project'
+
+  // Docker state
+  const [dockerAvailable, setDockerAvailable] = useState(null); // null=checking, true, false
+  const [dockerChecking, setDockerChecking] = useState(false);
 
   // LLM state
   const [llmProvider, setLlmProvider] = useState("ollama");
@@ -40,6 +44,27 @@ export default function Onboarding({ onSetupComplete }) {
   const form = useProjectForm();
   const [showPresets, setShowPresets] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Check Docker availability when entering docker step
+  useEffect(() => {
+    if (step !== 'docker') return;
+    const checkDocker = async () => {
+      setDockerChecking(true);
+      try {
+        const res = await fetch('/api/containers/status');
+        const data = await res.json();
+        setDockerAvailable(data.dockerAvailable === true);
+      } catch {
+        setDockerAvailable(false);
+      } finally {
+        setDockerChecking(false);
+      }
+    };
+    checkDocker();
+    // Poll every 5 seconds while on this step
+    const interval = setInterval(checkDocker, 5000);
+    return () => clearInterval(interval);
+  }, [step]);
 
   // Load Ollama models on mount
   useEffect(() => {
@@ -183,22 +208,33 @@ export default function Onboarding({ onSetupComplete }) {
         </div>
 
         {/* Progress */}
-        <div className="flex items-center justify-center gap-3 mb-8">
+        <div className="flex items-center justify-center gap-2 mb-8">
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
             step === "connect"
               ? "bg-primary-500/20 text-primary-300 border border-primary-500/30"
               : "bg-green-500/20 text-green-300 border border-green-500/30"
           }`}>
-            {step === "project" ? <Check className="w-3 h-3" /> : <span>1</span>}
-            <span>Connect Model</span>
+            {step !== "connect" ? <Check className="w-3 h-3" /> : <span>1</span>}
+            <span>AI Model</span>
           </div>
-          <ArrowRight className="w-4 h-4 text-surface-600" />
+          <ArrowRight className="w-3 h-3 text-surface-600" />
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
+            step === "docker"
+              ? "bg-primary-500/20 text-primary-300 border border-primary-500/30"
+              : step === "project"
+                ? "bg-green-500/20 text-green-300 border border-green-500/30"
+                : "bg-surface-800 text-surface-500 border border-surface-700"
+          }`}>
+            {step === "project" ? <Check className="w-3 h-3" /> : <span>2</span>}
+            <span>Docker</span>
+          </div>
+          <ArrowRight className="w-3 h-3 text-surface-600" />
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
             step === "project"
               ? "bg-primary-500/20 text-primary-300 border border-primary-500/30"
               : "bg-surface-800 text-surface-500 border border-surface-700"
           }`}>
-            <span>2</span>
+            <span>3</span>
             <span>First Project</span>
           </div>
         </div>
@@ -333,7 +369,7 @@ export default function Onboarding({ onSetupComplete }) {
                 )}
               </button>
               <button
-                onClick={() => setStep("project")}
+                onClick={() => setStep("docker")}
                 disabled={!llmReady}
                 className="flex-1 btn-primary flex items-center justify-center gap-2"
               >
@@ -343,7 +379,87 @@ export default function Onboarding({ onSetupComplete }) {
           </div>
         )}
 
-        {/* Step 2: Create First Project */}
+        {/* Step 2: Docker Setup */}
+        {step === "docker" && (
+          <div className="card space-y-5 animate-fade-in">
+            <div className="flex items-center gap-3">
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                dockerAvailable ? 'bg-green-500/15' : 'bg-surface-800'
+              }`}>
+                <Server className="w-5 h-5 text-primary-400" />
+              </div>
+              <div>
+                <h2 className="font-display font-semibold text-white">Docker Setup</h2>
+                <p className="text-xs text-surface-400">
+                  Each project runs in an isolated container
+                </p>
+              </div>
+            </div>
+
+            {dockerChecking && dockerAvailable === null ? (
+              <div className="flex items-center gap-2 p-3 bg-surface-800 rounded-lg text-xs text-surface-400">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Checking Docker availability...
+              </div>
+            ) : dockerAvailable ? (
+              <div className="flex items-center gap-2 p-3 bg-green-500/10 border border-green-500/20 rounded-lg text-xs text-green-400">
+                <Check className="w-4 h-4" />
+                Docker is installed and running!
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-xs text-yellow-300">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  Docker is not installed or not running
+                </div>
+
+                <p className="text-xs text-surface-400">
+                  Install Docker to run projects in isolated containers with their own auth and tools.
+                  Run these commands in a separate terminal:
+                </p>
+
+                <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
+                  <p className="text-surface-500"># Install Docker</p>
+                  <p className="text-green-300">sudo apt install docker.io -y</p>
+                  <p className="text-surface-500 mt-2"># Add your user to the docker group</p>
+                  <p className="text-green-300">sudo usermod -aG docker $USER</p>
+                  <p className="text-surface-500 mt-2"># Apply group changes (or log out and back in)</p>
+                  <p className="text-green-300">newgrp docker</p>
+                  <p className="text-surface-500 mt-2"># Verify it works</p>
+                  <p className="text-green-300">docker info</p>
+                </div>
+
+                <p className="text-[10px] text-surface-500">
+                  This page auto-checks every 5 seconds. Once Docker is running, the green check will appear.
+                </p>
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setStep("connect")}
+                className="btn-secondary"
+              >
+                Back
+              </button>
+              <button
+                onClick={() => setStep("project")}
+                className="flex-1 btn-primary flex items-center justify-center gap-2"
+              >
+                {dockerAvailable ? 'Continue' : 'Skip for now'}
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+
+            {!dockerAvailable && (
+              <p className="text-[10px] text-surface-500 text-center">
+                You can still use the IDE without Docker — projects will use local folders instead of containers.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Step 3: Create First Project */}
         {step === "project" && (
           <div className="card space-y-5 animate-fade-in">
             <div className="flex items-center gap-3">
@@ -368,7 +484,7 @@ export default function Onboarding({ onSetupComplete }) {
               <div className="flex gap-3 pt-5 mt-5 border-t border-surface-700/60">
                 <button
                   type="button"
-                  onClick={() => setStep("connect")}
+                  onClick={() => setStep("docker")}
                   className="btn-secondary"
                 >
                   Back
