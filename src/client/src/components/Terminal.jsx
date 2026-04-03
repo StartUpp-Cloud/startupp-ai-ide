@@ -109,10 +109,14 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     xterm.open(terminalRef.current);
     fitAddon.fit();
 
+    // Immediately reset after open to flush xterm's Device Attributes query (1;2c)
+    // before any user interaction. The session attach/create will repopulate.
+    setTimeout(() => xterm.reset(), 10);
+
     xtermRef.current = xterm;
     fitAddonRef.current = fitAddon;
 
-    // Handle terminal input - always include sessionId so server doesn't rely on attachment state
+    // Handle terminal input - only send when session is attached
     xterm.onData((data) => {
       if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
         wsRef.current.send(JSON.stringify({
