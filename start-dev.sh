@@ -9,6 +9,10 @@ echo "🚀 Starting StartUpp AI IDE in Development Mode..."
 echo "📦 Installing dependencies..."
 npm run install:all
 
+# Fix node-pty permissions (macOS can strip execute bit from prebuilt binaries)
+echo "🔧 Fixing node-pty permissions..."
+bash scripts/fix-pty-permissions.sh
+
 # Start the backend server with PM2
 echo "🔧 Starting backend server on port 55590..."
 pm2 start ecosystem.config.cjs

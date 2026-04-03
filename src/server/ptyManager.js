@@ -6,9 +6,14 @@
 import * as pty from 'node-pty';
 import os from 'os';
 import fs from 'fs';
+import path from 'path';
 import { execSync } from 'child_process';
+import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { sessionHistory } from './sessionHistory.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Resolve the full path to the docker binary (needed for pty.spawn on macOS).
 // PM2/Node inherits a minimal PATH that often excludes Docker's install location.
@@ -75,6 +80,67 @@ function findDockerBinary() {
   console.error('Session creation will fail. Install Docker and ensure it is in PATH.');
   _cachedDockerBinary = 'docker'; // will fail but at least won't search every time
   return 'docker';
+}
+
+/**
+ * Fix node-pty spawn-helper permissions.
+ * On macOS (especially Apple Silicon), npm can strip the execute bit from
+ * prebuilt binaries, causing "posix_spawnp failed" errors.
+ * Returns true if any files were fixed.
+ */
+let _ptyPermissionsFixed = false;
+
+function fixPtyPermissions() {
+  if (_ptyPermissionsFixed) return false;
+  _ptyPermissionsFixed = true;
+
+  const platform = os.platform();
+  if (platform === 'win32') return false;
+
+  // Locate node-pty prebuilds relative to the project root
+  const prebuildsDir = path.resolve(__dirname, '../../node_modules/node-pty/prebuilds');
+  if (!fs.existsSync(prebuildsDir)) {
+    console.warn('[ptyManager] node-pty prebuilds directory not found at:', prebuildsDir);
+    return false;
+  }
+
+  let fixed = 0;
+
+  try {
+    const platforms = fs.readdirSync(prebuildsDir);
+    for (const platformDir of platforms) {
+      // Fix spawn-helper
+      const spawnHelper = path.join(prebuildsDir, platformDir, 'spawn-helper');
+      if (fs.existsSync(spawnHelper)) {
+        try {
+          fs.accessSync(spawnHelper, fs.constants.X_OK);
+        } catch {
+          fs.chmodSync(spawnHelper, 0o755);
+          fixed++;
+          console.log(`[ptyManager] Fixed permissions: ${spawnHelper}`);
+        }
+      }
+
+      // Fix pty.node
+      const ptyNode = path.join(prebuildsDir, platformDir, 'pty.node');
+      if (fs.existsSync(ptyNode)) {
+        try {
+          fs.accessSync(ptyNode, fs.constants.X_OK);
+        } catch {
+          fs.chmodSync(ptyNode, 0o755);
+          fixed++;
+          console.log(`[ptyManager] Fixed permissions: ${ptyNode}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[ptyManager] Error scanning prebuilds:', err.message);
+  }
+
+  if (fixed > 0) {
+    console.log(`[ptyManager] Fixed ${fixed} node-pty binary permission(s).`);
+  }
+  return fixed > 0;
 }
 
 class PTYManager extends EventEmitter {
@@ -243,10 +309,118 @@ class PTYManager extends EventEmitter {
         createdAt: session.createdAt,
       };
     } catch (error) {
+      // Auto-recovery: if posix_spawnp failed, fix spawn-helper permissions and retry once
+      if (error.message?.includes('posix_spawnp failed') && fixPtyPermissions()) {
+        console.warn(`[ptyManager] posix_spawnp failed — fixed node-pty binary permissions. Retrying...`);
+        try {
+          const ptyProcess = pty.spawn(shell, args, {
+            name: 'xterm-256color',
+            cols,
+            rows,
+            cwd: spawnCwd,
+            env: {
+              ...process.env,
+              PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin`,
+              TERM: 'xterm-256color',
+              COLORTERM: 'truecolor',
+            },
+          });
+
+          console.log(`[ptyManager] Retry succeeded! Session created after permission fix.`);
+
+          const session = {
+            id: sessionId,
+            projectId,
+            cliTool,
+            containerName,
+            role,
+            ptyProcess,
+            status: 'active',
+            name: null,
+            createdAt: new Date().toISOString(),
+            lastActivity: new Date().toISOString(),
+            history: [],
+            scrollback: '',
+            outputLength: 0,
+            named: false,
+            cols,
+            rows,
+          };
+
+          ptyProcess.onData((data) => {
+            session.lastActivity = new Date().toISOString();
+            session.scrollback += data;
+            if (session.scrollback.length > 100000) {
+              session.scrollback = session.scrollback.slice(-100000);
+            }
+            session.outputLength += data.length;
+            this.emit('data', { sessionId, data });
+
+            if (!session.named && session.outputLength > 2000) {
+              session.named = true;
+              this.emit('needs-naming', { sessionId, projectId: session.projectId });
+            }
+
+            sessionHistory.writeLive(sessionId, session.scrollback, {
+              projectId: session.projectId,
+              role: session.role,
+            });
+          });
+
+          ptyProcess.onExit(({ exitCode, signal }) => {
+            session.status = 'terminated';
+            session.exitCode = exitCode;
+            session.signal = signal;
+
+            sessionHistory.saveSession({
+              sessionId,
+              projectId: session.projectId,
+              role: session.role,
+              name: session.name,
+              cliTool: session.cliTool,
+              containerName: session.containerName,
+              scrollback: session.scrollback,
+              createdAt: session.createdAt,
+              endedAt: new Date().toISOString(),
+              exitCode,
+            }).then(savedEntry => {
+              sessionHistory.nameWithLLM(savedEntry.id).catch(() => {});
+            }).catch(err => console.warn('Failed to save session history:', err.message));
+
+            this.emit('exit', { sessionId, exitCode, signal });
+          });
+
+          this.sessions.set(sessionId, session);
+          this.emit('session-created', { sessionId, projectId, cliTool });
+
+          return {
+            sessionId,
+            projectId,
+            cliTool,
+            containerName,
+            role,
+            status: 'active',
+            createdAt: session.createdAt,
+          };
+        } catch (retryError) {
+          console.error(`[ptyManager] Retry also failed:`, retryError.message);
+          // Fall through to the original error reporting below
+        }
+      }
+
       console.error(`[ptyManager] Failed to create PTY session:`, error.message);
       console.error(`[ptyManager] Shell: ${shell}, Args: ${JSON.stringify(args)}`);
+      console.error(`[ptyManager] Platform: ${os.platform()}, Arch: ${os.arch()}`);
       if (containerName) {
         console.error(`[ptyManager] Container: ${containerName}, Docker binary: ${findDockerBinary()}`);
+      }
+      if (error.message?.includes('posix_spawnp failed')) {
+        console.error(`[ptyManager] ──────────────────────────────────────────────────────`);
+        console.error(`[ptyManager] This is likely a node-pty permission issue.`);
+        console.error(`[ptyManager] Run this command to fix it manually:`);
+        console.error(`[ptyManager]   chmod +x node_modules/node-pty/prebuilds/*/spawn-helper`);
+        console.error(`[ptyManager] Or run:  bash scripts/fix-pty-permissions.sh`);
+        console.error(`[ptyManager] ──────────────────────────────────────────────────────`);
       }
       throw error;
     }

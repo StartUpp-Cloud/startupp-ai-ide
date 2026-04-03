@@ -15,6 +15,10 @@ fi
 echo "📦 Installing dependencies..."
 npm run install:all
 
+# Fix node-pty permissions (macOS can strip execute bit from prebuilt binaries)
+echo "🔧 Fixing node-pty permissions..."
+bash scripts/fix-pty-permissions.sh
+
 # Build the frontend
 echo "🔨 Building frontend..."
 npm run build
