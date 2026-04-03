@@ -95,15 +95,8 @@ class TerminalServer {
       orchestrator.notifyExit(sessionId, exitCode);
     });
 
-    ptyManager.on('session-created', ({ sessionId, projectId, cliTool }) => {
-      // Notify all clients about new session
-      this.broadcast({
-        type: 'session-created',
-        sessionId,
-        projectId,
-        cliTool,
-      });
-    });
+    // session-created is sent directly to the requesting client in handleCreateSession
+    // No broadcast needed — other clients get updated via list-sessions
 
     // Auto-name sessions using LLM when enough output has accumulated
     ptyManager.on('needs-naming', async ({ sessionId, projectId }) => {

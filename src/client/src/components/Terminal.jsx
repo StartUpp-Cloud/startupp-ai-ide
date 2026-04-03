@@ -45,8 +45,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
   // Track project-to-session mapping (projectId -> sessionId)
   const projectSessionsRef = useRef(new Map());
-  // Track whether this terminal is expecting a session-created response
-  const pendingCreateRef = useRef(false);
+  // No pendingCreateRef needed — server sends session-created only to the requesting client
 
   // Report full sessions list to parent whenever it changes
   useEffect(() => {
@@ -218,15 +217,11 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         break;
 
       case 'session-created':
-        // Only adopt this session if WE requested it (via pendingCreateRef)
-        // Otherwise another terminal's session-created broadcast would hijack us
-        if (pendingCreateRef.current) {
-          pendingCreateRef.current = false;
-          setSessionId(msg.sessionId);
-          onSessionChange?.(msg.sessionId);
-          xtermRef.current?.focus();
-        }
-        // Always track in sessions list and project mapping (for session manager)
+        // Server sends this only to the client that requested the session
+        setSessionId(msg.sessionId);
+        onSessionChange?.(msg.sessionId);
+        xtermRef.current?.reset(); // Clear any DA garbage before PTY output arrives
+        xtermRef.current?.focus();
         setSessions(prev => {
           const exists = prev.some(s => s.id === msg.sessionId);
           if (exists) return prev;
@@ -442,7 +437,6 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     } else if (!targetSessionId && !sessionIdRef.current) {
       // No existing session — create a new one
       xtermRef.current?.reset();
-      pendingCreateRef.current = true;
       wsRef.current.send(JSON.stringify({
         type: 'create-session',
         projectId,
@@ -460,9 +454,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     }
 
     // Clear terminal
-    xtermRef.current?.clear();
+    xtermRef.current?.reset();
 
-    pendingCreateRef.current = true;
     wsRef.current.send(JSON.stringify({
       type: 'create-session',
       projectId,
