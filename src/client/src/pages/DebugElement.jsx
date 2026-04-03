@@ -78,11 +78,15 @@ export default function DebugElement() {
   const [selectedElement, setSelectedElement] = useState(null);
   const [clickMarker, setClickMarker] = useState(null); // { x, y } relative to displayed image (%)
 
-  // Manual capture mode
-  const [manualMode, setManualMode] = useState(false);
-  const [manualScreenshot, setManualScreenshot] = useState(null); // data URL
-  const [manualUrl, setManualUrl] = useState('');
-  const [manualErrors, setManualErrors] = useState('');
+  // Quick Capture mode (Screen Capture API)
+  const [captureStream, setCaptureStream] = useState(null); // MediaStream
+  const [quickScreenshot, setQuickScreenshot] = useState(null); // data URL
+  const [quickSnapshots, setQuickSnapshots] = useState([]); // array of { dataUrl, timestamp }
+  const [quickUrl, setQuickUrl] = useState('');
+  const [quickErrors, setQuickErrors] = useState('');
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const [quickMode, setQuickMode] = useState(false);
   const [launchingChrome, setLaunchingChrome] = useState(false);
   const [launchMessage, setLaunchMessage] = useState(null);
 
@@ -292,9 +296,73 @@ export default function DebugElement() {
     }
   }, [checkConnection]);
 
-  // ── Manual capture helpers ────────────────────────────────────────────
+  // ── Screen Capture API helpers ──────────────────────────────────────
 
-  const handleManualPaste = useCallback((e) => {
+  // Cleanup stream on unmount
+  useEffect(() => {
+    return () => {
+      if (captureStream) {
+        captureStream.getTracks().forEach(t => t.stop());
+      }
+    };
+  }, [captureStream]);
+
+  // Wire video element to stream
+  useEffect(() => {
+    if (videoRef.current && captureStream) {
+      videoRef.current.srcObject = captureStream;
+    }
+  }, [captureStream]);
+
+  const startScreenCapture = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: 'browser' }, // prefer tab capture
+        audio: false,
+      });
+
+      // When user stops sharing via browser UI
+      stream.getVideoTracks()[0].onended = () => {
+        setCaptureStream(null);
+      };
+
+      setCaptureStream(stream);
+      setQuickMode(true);
+      setQuickScreenshot(null);
+    } catch (err) {
+      // User cancelled the picker — do nothing
+      if (err.name !== 'NotAllowedError') {
+        console.warn('Screen capture failed:', err);
+      }
+    }
+  }, []);
+
+  const stopScreenCapture = useCallback(() => {
+    if (captureStream) {
+      captureStream.getTracks().forEach(t => t.stop());
+      setCaptureStream(null);
+    }
+  }, [captureStream]);
+
+  const takeSnapshot = useCallback(() => {
+    if (!videoRef.current) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current || document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0);
+    const dataUrl = canvas.toDataURL('image/png');
+
+    setQuickScreenshot(dataUrl);
+    setQuickSnapshots(prev => [
+      { dataUrl, timestamp: new Date().toISOString() },
+      ...prev,
+    ].slice(0, 10)); // keep last 10
+  }, []);
+
+  const handleQuickPaste = useCallback((e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
@@ -302,57 +370,43 @@ export default function DebugElement() {
         e.preventDefault();
         const file = item.getAsFile();
         const reader = new FileReader();
-        reader.onload = (ev) => setManualScreenshot(ev.target.result);
+        reader.onload = (ev) => {
+          setQuickScreenshot(ev.target.result);
+          setQuickSnapshots(prev => [
+            { dataUrl: ev.target.result, timestamp: new Date().toISOString() },
+            ...prev,
+          ].slice(0, 10));
+        };
         reader.readAsDataURL(file);
         return;
       }
     }
   }, []);
 
-  const handleManualDrop = useCallback((e) => {
-    e.preventDefault();
-    const file = e.dataTransfer?.files?.[0];
-    if (file?.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = (ev) => setManualScreenshot(ev.target.result);
-      reader.readAsDataURL(file);
-    }
-  }, []);
-
-  const handleManualFileSelect = useCallback((e) => {
-    const file = e.target.files?.[0];
-    if (file?.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = (ev) => setManualScreenshot(ev.target.result);
-      reader.readAsDataURL(file);
-    }
-  }, []);
-
-  const handleManualAttach = useCallback(async () => {
-    // Save screenshot server-side if present
+  const handleQuickAttach = useCallback(async () => {
     let savedPath = null;
-    if (manualScreenshot) {
+    if (quickScreenshot) {
       try {
         const res = await fetch('/api/debug/save-screenshot', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ screenshot: manualScreenshot }),
+          body: JSON.stringify({ screenshot: quickScreenshot }),
         });
         const data = await res.json();
         savedPath = data.path;
       } catch {}
     }
 
-    const errors = manualErrors.trim()
-      ? manualErrors.trim().split('\n').map(line => ({ text: line }))
+    const errors = quickErrors.trim()
+      ? quickErrors.trim().split('\n').map(line => ({ text: line }))
       : [];
 
     const payload = {
       type: 'debug-capture',
       timestamp: new Date().toISOString(),
-      url: manualUrl,
+      url: quickUrl,
       screenshotPath: savedPath,
-      screenshot: manualScreenshot,
+      screenshot: quickScreenshot,
       element: null,
       consoleErrors: errors,
     };
@@ -362,14 +416,14 @@ export default function DebugElement() {
     }
     localStorage.setItem('debug-capture', JSON.stringify(payload));
     navigate('/');
-  }, [manualScreenshot, manualUrl, manualErrors, navigate]);
+  }, [quickScreenshot, quickUrl, quickErrors, navigate]);
 
-  const handleManualCopy = useCallback(async () => {
-    const errors = manualErrors.trim()
-      ? manualErrors.trim().split('\n').map(line => ({ text: line }))
+  const handleQuickCopy = useCallback(async () => {
+    const errors = quickErrors.trim()
+      ? quickErrors.trim().split('\n').map(line => ({ text: line }))
       : [];
     const text = formatCopyText({
-      url: manualUrl,
+      url: quickUrl,
       screenshotPath: null,
       element: null,
       consoleErrors: errors,
@@ -379,7 +433,7 @@ export default function DebugElement() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {}
-  }, [manualUrl, manualErrors]);
+  }, [quickUrl, quickErrors]);
 
   // ── Render ──────────────────────────────────────────────────────────────
 
@@ -442,8 +496,8 @@ export default function DebugElement() {
         </div>
       </header>
 
-      {/* ── Disconnected state ── */}
-      {connectionStatus === CONNECTION_STATUS.disconnected && !manualMode && (
+      {/* ── Disconnected state — landing ── */}
+      {connectionStatus === CONNECTION_STATUS.disconnected && !quickMode && (
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="max-w-lg text-center space-y-6">
             <div className="w-16 h-16 mx-auto rounded-2xl bg-surface-800 border border-surface-700 flex items-center justify-center">
@@ -458,20 +512,57 @@ export default function DebugElement() {
               </p>
             </div>
 
-            {/* Option 1: Auto-launch Chrome */}
+            {/* Option 1: Quick Capture (Screen Capture API) */}
+            <div className="bg-surface-900 border border-surface-700 rounded-lg p-5 text-left space-y-3">
+              <div className="flex items-center gap-2">
+                <Camera className="w-4 h-4 text-cyan-400" />
+                <span className="text-sm font-medium text-surface-200">Quick Capture</span>
+                <span className="text-[10px] bg-cyan-500/10 text-cyan-300 px-1.5 py-0.5 rounded font-medium">Recommended</span>
+              </div>
+              <p className="text-xs text-surface-400">
+                Select your app's browser tab to get a live preview. Navigate to the issue, then take a snapshot. Works with any URL — localhost, Cloudflare Workers, production.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={startScreenCapture}
+                  className="btn-primary !px-4 !py-2 !text-sm"
+                >
+                  <Camera className="w-4 h-4" />
+                  Capture Tab
+                </button>
+                <button
+                  onClick={() => { setQuickMode(true); }}
+                  className="btn-ghost !px-3 !py-2 !text-sm"
+                  title="Paste a screenshot instead"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Paste Instead
+                </button>
+              </div>
+            </div>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-surface-700" />
+              <span className="text-xs text-surface-500 font-medium">or</span>
+              <div className="flex-1 h-px bg-surface-700" />
+            </div>
+
+            {/* Option 2: Chrome CDP */}
             <div className="bg-surface-900 border border-surface-700 rounded-lg p-5 text-left space-y-3">
               <div className="flex items-center gap-2">
                 <Zap className="w-4 h-4 text-primary-400" />
-                <span className="text-sm font-medium text-surface-200">Auto-connect to Chrome</span>
+                <span className="text-sm font-medium text-surface-200">Chrome DevTools</span>
+                <span className="text-[10px] text-surface-500">Advanced</span>
               </div>
               <p className="text-xs text-surface-400">
-                Launches Chrome with remote debugging for live element inspection and screenshots.
+                Connect to Chrome with remote debugging for live DOM element inspection. Requires launching Chrome with a special flag.
               </p>
               <div className="flex items-center gap-2">
                 <button
                   onClick={launchChrome}
                   disabled={launchingChrome}
-                  className="btn-primary !px-4 !py-2 !text-sm"
+                  className="btn-secondary !px-4 !py-2 !text-sm"
                 >
                   {launchingChrome ? (
                     <><Loader2 className="w-4 h-4 animate-spin" /> Launching...</>
@@ -494,54 +585,62 @@ export default function DebugElement() {
                 </p>
               )}
             </div>
-
-            {/* Divider */}
-            <div className="flex items-center gap-3">
-              <div className="flex-1 h-px bg-surface-700" />
-              <span className="text-xs text-surface-500 font-medium">or</span>
-              <div className="flex-1 h-px bg-surface-700" />
-            </div>
-
-            {/* Option 2: Manual capture */}
-            <div className="bg-surface-900 border border-surface-700 rounded-lg p-5 text-left space-y-3">
-              <div className="flex items-center gap-2">
-                <Upload className="w-4 h-4 text-cyan-400" />
-                <span className="text-sm font-medium text-surface-200">Manual Capture</span>
-              </div>
-              <p className="text-xs text-surface-400">
-                Paste a screenshot and console errors manually — no Chrome setup required.
-              </p>
-              <button
-                onClick={() => setManualMode(true)}
-                className="btn-secondary !px-4 !py-2 !text-sm"
-              >
-                <Camera className="w-4 h-4" />
-                Open Manual Capture
-              </button>
-            </div>
           </div>
         </div>
       )}
 
-      {/* ── Manual capture mode ── */}
-      {manualMode && connectionStatus !== CONNECTION_STATUS.connected && (
-        <div className="flex-1 flex min-h-0">
-          {/* Left: screenshot drop zone */}
-          <div
-            className="flex-1 min-w-0 flex flex-col border-r border-surface-700/60"
-            onPaste={handleManualPaste}
-            onDrop={handleManualDrop}
-            onDragOver={(e) => e.preventDefault()}
-          >
+      {/* ── Quick Capture mode ── */}
+      {quickMode && connectionStatus !== CONNECTION_STATUS.connected && (
+        <div className="flex-1 flex min-h-0" onPaste={handleQuickPaste}>
+          {/* Hidden canvas for snapshot capture */}
+          <canvas ref={canvasRef} className="hidden" />
+
+          {/* Left: live preview or screenshot */}
+          <div className="flex-1 min-w-0 flex flex-col border-r border-surface-700/60">
+            {/* Toolbar */}
             <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 bg-surface-900/40 border-b border-surface-700/40">
               <div className="flex items-center gap-2">
-                <Camera className="w-3.5 h-3.5 text-surface-500" />
-                <span className="text-xs font-medium text-surface-400">Screenshot</span>
+                <Camera className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="text-xs font-medium text-surface-400">
+                  {captureStream ? 'Live Preview' : quickScreenshot ? 'Snapshot' : 'Quick Capture'}
+                </span>
+                {captureStream && (
+                  <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Streaming
+                  </span>
+                )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                {captureStream && (
+                  <button
+                    onClick={takeSnapshot}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg transition-colors"
+                  >
+                    <Camera className="w-3 h-3" />
+                    Take Snapshot
+                  </button>
+                )}
+                {captureStream && (
+                  <button
+                    onClick={stopScreenCapture}
+                    className="btn-ghost !px-2 !py-1.5 !text-xs text-rose-400 hover:!text-rose-300"
+                  >
+                    Stop
+                  </button>
+                )}
+                {!captureStream && (
+                  <button
+                    onClick={startScreenCapture}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg transition-colors"
+                  >
+                    <Camera className="w-3 h-3" />
+                    {quickScreenshot ? 'Capture Again' : 'Capture Tab'}
+                  </button>
+                )}
                 <button
-                  onClick={() => setManualMode(false)}
-                  className="btn-ghost !px-2 !py-1 !text-xs"
+                  onClick={() => { stopScreenCapture(); setQuickMode(false); setQuickScreenshot(null); setQuickSnapshots([]); }}
+                  className="btn-ghost !px-2 !py-1.5 !text-xs"
                 >
                   <ArrowLeft className="w-3 h-3" />
                   Back
@@ -549,46 +648,93 @@ export default function DebugElement() {
               </div>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-auto p-4 flex items-center justify-center">
-              {manualScreenshot ? (
+            {/* Preview area */}
+            <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col items-center">
+              {/* Live video feed */}
+              {captureStream && (
+                <div className="relative inline-block w-full max-w-4xl">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-auto rounded-lg border border-surface-700/60 shadow-card"
+                  />
+                  <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-surface-950/80 backdrop-blur-sm border border-surface-700 rounded-lg px-3 py-2">
+                    <span className="text-[11px] text-surface-300">Navigate to the issue in your app, then</span>
+                    <button
+                      onClick={takeSnapshot}
+                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium bg-cyan-600 hover:bg-cyan-700 text-white rounded transition-colors"
+                    >
+                      <Camera className="w-3 h-3" />
+                      Snapshot
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Static screenshot */}
+              {!captureStream && quickScreenshot && (
                 <div className="relative inline-block">
                   <img
-                    src={manualScreenshot}
-                    alt="Manual screenshot"
+                    src={quickScreenshot}
+                    alt="Captured screenshot"
                     className="max-w-full h-auto rounded-lg border border-surface-700/60 shadow-card"
                     draggable={false}
                   />
-                  <button
-                    onClick={() => setManualScreenshot(null)}
-                    className="absolute top-2 right-2 p-1 bg-surface-900/80 border border-surface-700 rounded-lg hover:bg-surface-800 transition-colors"
-                  >
-                    <X className="w-4 h-4 text-surface-400" />
-                  </button>
                 </div>
-              ) : (
-                <div className="text-center space-y-4 max-w-sm">
-                  <div className="w-20 h-20 mx-auto rounded-2xl bg-surface-800 border-2 border-dashed border-surface-600 flex items-center justify-center">
-                    <Upload className="w-8 h-8 text-surface-500" />
+              )}
+
+              {/* Empty state — no stream, no screenshot */}
+              {!captureStream && !quickScreenshot && (
+                <div className="flex-1 flex items-center justify-center">
+                  <div className="text-center space-y-4 max-w-sm">
+                    <div className="w-20 h-20 mx-auto rounded-2xl bg-surface-800 border-2 border-dashed border-surface-600 flex items-center justify-center">
+                      <Camera className="w-8 h-8 text-surface-500" />
+                    </div>
+                    <div>
+                      <p className="text-sm text-surface-300 font-medium mb-1">
+                        Capture your app's tab
+                      </p>
+                      <p className="text-xs text-surface-500">
+                        Click <strong>Capture Tab</strong> above, or press <kbd className="px-1.5 py-0.5 bg-surface-800 border border-surface-600 rounded text-[10px] font-mono">Ctrl+V</kbd> to paste a screenshot
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-sm text-surface-300 font-medium mb-1">
-                      Paste or drop a screenshot
-                    </p>
-                    <p className="text-xs text-surface-500">
-                      Press <kbd className="px-1.5 py-0.5 bg-surface-800 border border-surface-600 rounded text-[10px] font-mono">Ctrl+V</kbd> to paste from clipboard, or drag an image file here
-                    </p>
+                </div>
+              )}
+
+              {/* Snapshot history */}
+              {quickSnapshots.length > 1 && (
+                <div className="mt-4 w-full max-w-4xl">
+                  <div className="text-[10px] text-surface-500 uppercase tracking-wider mb-2">
+                    Previous Snapshots ({quickSnapshots.length})
                   </div>
-                  <label className="btn-secondary !px-4 !py-2 !text-sm cursor-pointer inline-flex items-center gap-2">
-                    <Image className="w-4 h-4" />
-                    Choose File
-                    <input type="file" accept="image/*" className="hidden" onChange={handleManualFileSelect} />
-                  </label>
+                  <div className="flex gap-2 overflow-x-auto pb-2">
+                    {quickSnapshots.map((snap, i) => (
+                      <button
+                        key={snap.timestamp}
+                        onClick={() => setQuickScreenshot(snap.dataUrl)}
+                        className={`flex-shrink-0 rounded-lg border overflow-hidden transition-all ${
+                          quickScreenshot === snap.dataUrl
+                            ? 'border-cyan-500/50 ring-1 ring-cyan-500/30'
+                            : 'border-surface-700 hover:border-surface-600'
+                        }`}
+                      >
+                        <img
+                          src={snap.dataUrl}
+                          alt={`Snapshot ${i + 1}`}
+                          className="w-32 h-20 object-cover object-top"
+                        />
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
           </div>
 
-          {/* Right: URL + errors + actions */}
+          {/* Right panel: URL + errors + actions */}
           <div className="w-[380px] flex-shrink-0 flex flex-col bg-surface-900/30 overflow-y-auto">
             <div className="p-4 space-y-5">
               {/* URL */}
@@ -598,8 +744,8 @@ export default function DebugElement() {
                 </label>
                 <input
                   type="text"
-                  value={manualUrl}
-                  onChange={(e) => setManualUrl(e.target.value)}
+                  value={quickUrl}
+                  onChange={(e) => setQuickUrl(e.target.value)}
                   placeholder="http://localhost:3000/page"
                   className="w-full px-3 py-2 text-xs font-mono bg-surface-850 border border-surface-700 rounded-lg text-surface-200 placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
                 />
@@ -616,8 +762,8 @@ export default function DebugElement() {
                   </span>
                 </div>
                 <textarea
-                  value={manualErrors}
-                  onChange={(e) => setManualErrors(e.target.value)}
+                  value={quickErrors}
+                  onChange={(e) => setQuickErrors(e.target.value)}
                   rows={8}
                   placeholder="Paste console errors here (one per line)..."
                   className="w-full px-3 py-2 text-[11px] font-mono bg-surface-850 border border-surface-700 rounded-lg text-rose-300 placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none resize-none leading-relaxed"
@@ -633,7 +779,7 @@ export default function DebugElement() {
                 </h3>
                 <div className="flex flex-wrap gap-2">
                   <button
-                    onClick={handleManualCopy}
+                    onClick={handleQuickCopy}
                     className="btn-secondary !text-xs !px-3 !py-2"
                   >
                     {copied ? (
@@ -643,8 +789,8 @@ export default function DebugElement() {
                     )}
                   </button>
                   <button
-                    onClick={handleManualAttach}
-                    disabled={!manualScreenshot && !manualErrors.trim()}
+                    onClick={handleQuickAttach}
+                    disabled={!quickScreenshot && !quickErrors.trim()}
                     className="btn-primary !text-xs !px-3 !py-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Paperclip className="w-3.5 h-3.5" />
