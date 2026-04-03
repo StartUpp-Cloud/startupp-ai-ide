@@ -650,12 +650,28 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
               </button>
 
               {sessionId && (
-                <button
-                  onClick={killSession}
-                  className="px-2 py-0.5 text-[11px] bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors"
-                >
-                  Kill
-                </button>
+                <>
+                  <button
+                    onClick={() => {
+                      xtermRef.current?.reset();
+                      xtermRef.current?.focus();
+                      // Also clear server-side scrollback so reconnect doesn't replay old content
+                      if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
+                        wsRef.current.send(JSON.stringify({ type: 'clear-scrollback', sessionId: sessionIdRef.current }));
+                      }
+                    }}
+                    className="px-2 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
+                    title="Clear"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={killSession}
+                    className="px-2 py-0.5 text-[11px] bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors"
+                  >
+                    Kill
+                  </button>
+                </>
               )}
 
               <div className="flex-1" />
@@ -765,12 +781,28 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
               </button>
 
               {sessionId && (
-                <button
-                  onClick={killSession}
-                  className="px-2 py-0.5 text-[11px] bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors"
-                >
-                  Kill
-                </button>
+                <>
+                  <button
+                    onClick={() => {
+                      xtermRef.current?.reset();
+                      xtermRef.current?.focus();
+                      // Also clear server-side scrollback so reconnect doesn't replay old content
+                      if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
+                        wsRef.current.send(JSON.stringify({ type: 'clear-scrollback', sessionId: sessionIdRef.current }));
+                      }
+                    }}
+                    className="px-2 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
+                    title="Clear terminal screen"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={killSession}
+                    className="px-2 py-0.5 text-[11px] bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors"
+                  >
+                    Kill
+                  </button>
+                </>
               )}
 
               {sessionId && selectedCLI === 'shell' && (

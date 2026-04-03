@@ -262,6 +262,15 @@ class TerminalServer {
         this.handleKillSession(ws, payload);
         break;
 
+      case 'clear-scrollback': {
+        const targetSession = payload.sessionId || this.clients.get(ws)?.sessionId;
+        if (targetSession) {
+          const session = ptyManager.sessions?.get(targetSession);
+          if (session) session.scrollback = '';
+        }
+        break;
+      }
+
       case 'list-sessions':
         this.handleListSessions(ws);
         break;
