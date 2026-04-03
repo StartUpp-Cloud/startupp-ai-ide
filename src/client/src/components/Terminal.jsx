@@ -352,6 +352,9 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         // Server returns sessions filtered by project + role
         const activeSessions = (msg.sessions || []).filter(s => s.status === 'active');
 
+        // Reset NOW — right before we attach/create, so no gap for DA garbage
+        xtermRef.current?.reset();
+
         if (activeSessions.length > 0) {
           // Reattach to the most recent active session for this role
           const target = activeSessions[activeSessions.length - 1];
@@ -476,8 +479,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     }
 
     // Ask the server: "what sessions exist for this project + role?"
+    // Don't reset() here — wait for the response to avoid DA garbage in the gap
     const role = isUtility ? 'utility' : 'main';
-    xtermRef.current?.reset();
     wsRef.current.send(JSON.stringify({ type: 'get-project-sessions', projectId, role }));
   }, [projectId, connected]);
 
