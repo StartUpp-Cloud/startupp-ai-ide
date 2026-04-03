@@ -5,7 +5,7 @@ import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import QuickActionsPanel from '../components/QuickActionsPanel';
 import TopBar from '../components/TopBar';
 import RightPanel from '../components/RightPanel';
-import SessionManager from '../components/SessionManager';
+// SessionManager retired — sessions now shown inline under each project
 import NotificationCenter, { sendDesktopNotification } from '../components/NotificationCenter';
 import {
   PanelLeftClose,
@@ -64,7 +64,6 @@ export default function IDE() {
   // Sessions & notifications state
   const [allSessions, setAllSessions] = useState([]);
   const [notifications, setNotifications] = useState([]);
-  const [leftView, setLeftView] = useState('projects');
 
   // Git branch state (legacy local projects)
   const [currentBranch, setCurrentBranch] = useState(null);
@@ -390,67 +389,27 @@ export default function IDE() {
               className="flex flex-col bg-surface-850 border-r border-surface-700"
               style={{ width: leftPanelWidth }}
             >
-              {/* Sessions / Projects toggle (top) */}
+              {/* Projects with inline sessions */}
               <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-                <div className="flex items-center border-b border-surface-700 flex-shrink-0">
-                  <button
-                    onClick={() => setLeftView('sessions')}
-                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide transition-colors ${
-                      leftView === 'sessions'
-                        ? 'text-primary-400 border-b-2 border-primary-500'
-                        : 'text-surface-400 hover:text-surface-200'
-                    }`}
-                  >
-                    Sessions
-                  </button>
-                  <button
-                    onClick={() => setLeftView('projects')}
-                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide transition-colors ${
-                      leftView === 'projects'
-                        ? 'text-primary-400 border-b-2 border-primary-500'
-                        : 'text-surface-400 hover:text-surface-200'
-                    }`}
-                  >
-                    Projects
-                  </button>
+                <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-700 flex-shrink-0">
+                  <span className="text-[11px] font-medium text-surface-300 uppercase tracking-wide">Projects</span>
                   <button
                     onClick={() => setLeftPanelCollapsed(true)}
-                    className="p-1 mx-1 hover:bg-surface-700 rounded text-surface-400 hover:text-surface-200 flex-shrink-0"
+                    className="p-1 hover:bg-surface-700 rounded text-surface-400 hover:text-surface-200"
                   >
                     <PanelLeftClose className="w-3.5 h-3.5" />
                   </button>
                 </div>
                 <div className="flex-1 min-h-0 overflow-auto">
-                  {leftView === 'sessions' ? (
-                    <SessionManager
-                      projects={projects}
-                      sessions={allSessions.map(s => ({
-                        ...s,
-                        needsInput: false,
-                        hasError: false,
-                      }))}
-                      activeSessionId={currentSessionId}
-                      onSwitchSession={(id) => {
-                        if (window.switchMainSession) window.switchMainSession(id);
-                        const session = allSessions.find(s => s.id === id);
-                        if (session?.projectId) setSelectedProjectId(session.projectId);
-                      }}
-                      onCreateSession={(projectId) => {
-                        setSelectedProjectId(projectId);
-                      }}
-                      onKillSession={(id) => {
-                        // TODO: send kill via WebSocket
-                      }}
-                    />
-                  ) : (
-                    <ProjectManagerPanel
-                      selectedProjectId={selectedProjectId}
-                      onSelectProject={(id) => setSelectedProjectId(id)}
-                      onProjectChanged={() => {
-                        if (selectedProjectId) loadProject(selectedProjectId);
-                      }}
-                    />
-                  )}
+                  <ProjectManagerPanel
+                    selectedProjectId={selectedProjectId}
+                    onSelectProject={(id) => setSelectedProjectId(id)}
+                    onProjectChanged={() => {
+                      if (selectedProjectId) loadProject(selectedProjectId);
+                    }}
+                    sessions={allSessions}
+                    activeSessionId={currentSessionId}
+                  />
                 </div>
               </div>
 

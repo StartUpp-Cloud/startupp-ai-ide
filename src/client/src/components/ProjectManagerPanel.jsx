@@ -18,6 +18,8 @@ import {
   Upload,
   Download,
   AlertTriangle,
+  Clock,
+  Terminal,
 } from "lucide-react";
 
 const Spinner = () => (
@@ -42,6 +44,8 @@ export default function ProjectManagerPanel({
   selectedProjectId,
   onSelectProject,
   onProjectChanged,
+  sessions = [],
+  activeSessionId = null,
 }) {
   const {
     projects,
@@ -442,23 +446,51 @@ export default function ProjectManagerPanel({
 
             {expandedProjects[project.id] && (
               <div className="pl-8 pr-2 py-1 space-y-1">
-                {project.rules?.length > 0 && (
-                  <div className="flex items-center gap-1.5 text-xs text-surface-500">
-                    <BookOpen className="w-3 h-3" />
-                    <span>{project.rules.length} rules</span>
-                  </div>
-                )}
-                {project.selectedPresets?.length > 0 && (
-                  <div className="flex items-center gap-1.5 text-xs text-surface-500">
-                    <Layers className="w-3 h-3" />
-                    <span>{project.selectedPresets.length} presets</span>
-                  </div>
-                )}
                 {project.description && (
                   <p className="text-xs text-surface-500 line-clamp-2">
                     {project.description}
                   </p>
                 )}
+
+                {/* Active sessions for this project (newest first) */}
+                {(() => {
+                  const projectSessions = sessions
+                    .filter(s => s.projectId === project.id && s.status === 'active')
+                    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+                  if (projectSessions.length === 0) return null;
+
+                  return (
+                    <div className="mt-1.5 space-y-0.5">
+                      <div className="text-[10px] text-surface-600 uppercase tracking-wider mb-0.5">Sessions</div>
+                      {projectSessions.map(s => {
+                        const isActive = s.id === activeSessionId;
+                        const date = s.createdAt ? new Date(s.createdAt) : null;
+                        const timeStr = date ? date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+                        return (
+                          <div
+                            key={s.id}
+                            className={`flex items-center gap-1.5 px-1.5 py-1 rounded text-[10px] ${
+                              isActive
+                                ? 'bg-primary-500/10 text-primary-300'
+                                : 'text-surface-400 hover:bg-surface-700/40 hover:text-surface-200'
+                            }`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isActive ? 'bg-green-400' : 'bg-surface-600'}`} />
+                            <Terminal className="w-3 h-3 flex-shrink-0" />
+                            <span className="truncate flex-1">
+                              {s.name || (s.role === 'utility' ? 'Utility' : 'Main')}
+                            </span>
+                            <span className="text-surface-600 flex-shrink-0 flex items-center gap-0.5">
+                              <Clock className="w-2.5 h-2.5" />
+                              {timeStr}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </div>
