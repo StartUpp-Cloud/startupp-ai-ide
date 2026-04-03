@@ -78,7 +78,8 @@ class PTYManager extends EventEmitter {
       shell = findDockerBinary();
       args = [
         'exec', '-it',
-        '-e', `TMUX_TMPDIR=/tmp`,
+        '-e', 'TMUX_TMPDIR=/tmp',
+        '-e', 'TERM=xterm-256color',
         containerName,
         'tmux', 'new-session', '-A', '-s', tmuxSession, '-c', workDir,
       ];

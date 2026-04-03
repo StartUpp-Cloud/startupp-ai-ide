@@ -74,6 +74,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       cursorBlink: true,
       cursorStyle: 'block',
       fontSize: 14,
+      scrollback: 10000,
       fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Monaco, "Courier New", monospace',
       theme: {
         background: '#1a1b26',
