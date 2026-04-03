@@ -124,7 +124,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       // Strip DA/tmux capability responses from input data
       // These arrive as auto-responses mixed with user input
       let cleaned = data
-        .replace(/\x1b\[\??[\d;]*c/g, '')    // ESC sequence DA responses
+        .replace(/\x1b\[[\?>]?[\d;]*c/g, '') // ESC sequence DA responses (primary + secondary)
         .replace(/(\d+;)+\d+c/g, '')          // bare tmux responses (0;276;0c)
         .replace(/\d+;\d+c/g, '');            // shorter variants
       if (!cleaned) return; // Nothing left after filtering
@@ -295,9 +295,9 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         let outputData = msg.data;
         if (outputData) {
           outputData = outputData
-            .replace(/\x1b\[\??[\d;]*c/g, '')   // ESC [ ? digits ; digits c
-            .replace(/(\d+;)+\d+c/g, '')         // bare digits;digits;digitsc (tmux)
-            .replace(/\d+;\d+c/g, '');            // bare digits;digitsc
+            .replace(/\x1b\[[\?>]?[\d;]*c/g, '') // ESC [ ? or > digits;digits c (primary + secondary DA)
+            .replace(/(\d+;)+\d+c/g, '')          // bare digits;digits;digitsc (tmux)
+            .replace(/\d+;\d+c/g, '');             // bare digits;digitsc
         }
         if (outputData?.trim()) xtermRef.current?.write(outputData);
 
