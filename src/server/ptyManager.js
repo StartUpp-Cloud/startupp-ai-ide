@@ -13,20 +13,34 @@ import { sessionHistory } from './sessionHistory.js';
 // Resolve the full path to the docker binary (needed for pty.spawn on macOS).
 // PM2/Node inherits a minimal PATH that often excludes Docker's install location.
 // We try `which docker` with an expanded PATH first, then fall back to known paths.
+let _cachedDockerBinary = null;
+
 function findDockerBinary() {
-  // Expanded PATH covering Docker Desktop, Homebrew, OrbStack, Rancher Desktop, etc.
-  const extraPaths = [
+  if (_cachedDockerBinary) return _cachedDockerBinary;
+
+  const home = os.homedir();
+  // Expanded PATH covering Docker Desktop, Homebrew, OrbStack, Rancher Desktop, Colima, etc.
+  const extraDirs = [
     '/usr/local/bin',
     '/opt/homebrew/bin',
     '/usr/bin',
-    `${os.homedir()}/.docker/bin`,
+    `${home}/.docker/bin`,
     '/Applications/Docker.app/Contents/Resources/bin',
-    `${os.homedir()}/.rd/bin`,
-    `${os.homedir()}/.orbstack/bin`,
+    `${home}/.rd/bin`,
+    `${home}/.orbstack/bin`,
     '/opt/local/bin',
     '/snap/bin',
+    `${home}/bin`,
+    `${home}/.local/bin`,
   ];
-  const expandedPath = `${process.env.PATH || ''}:${extraPaths.join(':')}`;
+  const expandedPath = [...new Set([
+    ...(process.env.PATH || '').split(':'),
+    ...extraDirs,
+  ])].join(':');
+
+  console.log(`[ptyManager] Searching for docker binary...`);
+  console.log(`[ptyManager] Platform: ${os.platform()}, HOME: ${home}`);
+  console.log(`[ptyManager] Current PATH: ${process.env.PATH || '(empty)'}`);
 
   // Try dynamic lookup first
   try {
@@ -35,19 +49,31 @@ function findDockerBinary() {
       encoding: 'utf8',
       timeout: 3000,
     }).trim();
-    if (resolved) {
-      console.log(`[ptyManager] Docker binary found at: ${resolved}`);
+    if (resolved && fs.existsSync(resolved)) {
+      console.log(`[ptyManager] ✓ Docker found via 'which': ${resolved}`);
+      _cachedDockerBinary = resolved;
       return resolved;
     }
-  } catch {}
-
-  // Static fallback — check each candidate
-  for (const dir of extraPaths) {
-    const p = `${dir}/docker`;
-    try { if (fs.existsSync(p)) return p; } catch {}
+  } catch (err) {
+    console.log(`[ptyManager] 'which docker' failed: ${err.message}`);
   }
 
-  console.warn('[ptyManager] Docker binary not found in any known location, falling back to "docker"');
+  // Static fallback — check each candidate
+  for (const dir of extraDirs) {
+    const p = `${dir}/docker`;
+    try {
+      if (fs.existsSync(p)) {
+        console.log(`[ptyManager] ✓ Docker found via static check: ${p}`);
+        _cachedDockerBinary = p;
+        return p;
+      }
+    } catch {}
+  }
+
+  console.error('[ptyManager] ✗ Docker binary NOT FOUND in any location. Checked:');
+  extraDirs.forEach(d => console.error(`  - ${d}/docker`));
+  console.error('Session creation will fail. Install Docker and ensure it is in PATH.');
+  _cachedDockerBinary = 'docker'; // will fail but at least won't search every time
   return 'docker';
 }
 
@@ -218,7 +244,11 @@ class PTYManager extends EventEmitter {
         createdAt: session.createdAt,
       };
     } catch (error) {
-      console.error('Failed to create PTY session:', error);
+      console.error(`[ptyManager] Failed to create PTY session:`, error.message);
+      console.error(`[ptyManager] Shell: ${shell}, Args: ${JSON.stringify(args)}`);
+      if (containerName) {
+        console.error(`[ptyManager] Container: ${containerName}, Docker binary: ${findDockerBinary()}`);
+      }
       throw error;
     }
   }
