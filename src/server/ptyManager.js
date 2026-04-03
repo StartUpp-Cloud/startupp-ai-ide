@@ -97,6 +97,10 @@ class PTYManager extends EventEmitter {
         rows,
       };
 
+      // Periodic save timer — saves scrollback snapshot every 30 seconds
+      let lastSaveAt = Date.now();
+      let saveTimer = null;
+
       // Handle PTY output
       ptyProcess.onData((data) => {
         session.lastActivity = new Date().toISOString();
@@ -108,10 +112,30 @@ class PTYManager extends EventEmitter {
         session.outputLength += data.length;
         this.emit('data', { sessionId, data });
 
-        // Trigger auto-naming after ~2KB of output (enough context to understand what's happening)
+        // Trigger auto-naming after ~2KB of output
         if (!session.named && session.outputLength > 2000) {
-          session.named = true; // Prevent re-triggering
+          session.named = true;
           this.emit('needs-naming', { sessionId, projectId: session.projectId });
+        }
+
+        // Periodic save — debounced, every 30 seconds of activity
+        if (Date.now() - lastSaveAt > 30000 && !saveTimer) {
+          saveTimer = setTimeout(() => {
+            lastSaveAt = Date.now();
+            saveTimer = null;
+            sessionHistory.saveSession({
+              sessionId,
+              projectId: session.projectId,
+              role: session.role,
+              name: session.name,
+              cliTool: session.cliTool,
+              containerName: session.containerName,
+              scrollback: session.scrollback,
+              createdAt: session.createdAt,
+              endedAt: new Date().toISOString(),
+              exitCode: null,
+            }).catch(() => {}); // Non-critical
+          }, 5000); // 5s debounce
         }
       });
 
@@ -361,12 +385,30 @@ class PTYManager extends EventEmitter {
    * Cleanup all sessions on shutdown
    */
   cleanup() {
+    // Save all active sessions to history before killing them
+    const savePromises = [];
     for (const [sessionId, session] of this.sessions) {
       if (session.status === 'active') {
+        savePromises.push(
+          sessionHistory.saveSession({
+            sessionId,
+            projectId: session.projectId,
+            role: session.role,
+            name: session.name,
+            cliTool: session.cliTool,
+            containerName: session.containerName,
+            scrollback: session.scrollback,
+            createdAt: session.createdAt,
+            endedAt: new Date().toISOString(),
+            exitCode: null,
+          }).catch(err => console.warn(`Failed to save session ${sessionId}:`, err.message))
+        );
         session.ptyProcess.kill();
       }
     }
     this.sessions.clear();
+    // Return promise so shutdown can wait for saves
+    return Promise.all(savePromises);
   }
 }
 

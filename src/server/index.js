@@ -209,14 +209,20 @@ async function startServer() {
 }
 
 // Graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down gracefully");
+process.on("SIGTERM", async () => {
+  console.log("SIGTERM received, saving sessions and shutting down...");
+  try {
+    await ptyManager.cleanup(); // Saves all sessions to history, then kills PTYs
+  } catch (e) { console.warn("Cleanup error:", e.message); }
   terminalServer.cleanup();
   process.exit(0);
 });
 
-process.on("SIGINT", () => {
-  console.log("SIGINT received, shutting down gracefully");
+process.on("SIGINT", async () => {
+  console.log("SIGINT received, saving sessions and shutting down...");
+  try {
+    await ptyManager.cleanup();
+  } catch (e) { console.warn("Cleanup error:", e.message); }
   terminalServer.cleanup();
   process.exit(0);
 });
