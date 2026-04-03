@@ -5,8 +5,25 @@
 
 import * as pty from 'node-pty';
 import os from 'os';
+import fs from 'fs';
 import { EventEmitter } from 'events';
 import { sessionHistory } from './sessionHistory.js';
+
+// Resolve the full path to the docker binary (needed for pty.spawn on macOS)
+function findDockerBinary() {
+  const candidates = [
+    '/usr/local/bin/docker',
+    '/opt/homebrew/bin/docker',
+    '/usr/bin/docker',
+    `${os.homedir()}/.docker/bin/docker`,
+    '/Applications/Docker.app/Contents/Resources/bin/docker',
+    '/snap/bin/docker',
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return 'docker'; // fallback to PATH lookup
+}
 
 class PTYManager extends EventEmitter {
   constructor() {
@@ -53,10 +70,11 @@ class PTYManager extends EventEmitter {
     let shell, args, spawnCwd;
 
     if (containerName) {
-      // Docker container session
-      shell = 'docker';
+      // Docker container session — use full path to docker binary
+      // pty.spawn uses posix_spawnp which needs the binary resolvable
+      shell = findDockerBinary();
       args = ['exec', '-it', '-w', cwd || '/workspace', containerName, 'bash'];
-      spawnCwd = undefined; // cwd is inside the container, not on the host
+      spawnCwd = undefined;
     } else {
       // Local session
       const config = this.getShellConfig();
