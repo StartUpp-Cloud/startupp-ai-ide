@@ -6,6 +6,7 @@
 import * as pty from 'node-pty';
 import os from 'os';
 import { EventEmitter } from 'events';
+import { sessionHistory } from './sessionHistory.js';
 
 class PTYManager extends EventEmitter {
   constructor() {
@@ -119,6 +120,24 @@ class PTYManager extends EventEmitter {
         session.status = 'terminated';
         session.exitCode = exitCode;
         session.signal = signal;
+
+        // Save session to history before cleanup
+        sessionHistory.saveSession({
+          sessionId,
+          projectId: session.projectId,
+          role: session.role,
+          name: session.name,
+          cliTool: session.cliTool,
+          containerName: session.containerName,
+          scrollback: session.scrollback,
+          createdAt: session.createdAt,
+          endedAt: new Date().toISOString(),
+          exitCode,
+        }).then(savedEntry => {
+          // Async name the session (non-blocking)
+          sessionHistory.nameWithLLM(savedEntry.id).catch(() => {});
+        }).catch(err => console.warn('Failed to save session history:', err.message));
+
         this.emit('exit', { sessionId, exitCode, signal });
       });
 
@@ -247,6 +266,22 @@ class PTYManager extends EventEmitter {
     }
 
     if (session.status === 'active') {
+      // Save session to history before killing
+      sessionHistory.saveSession({
+        sessionId,
+        projectId: session.projectId,
+        role: session.role,
+        name: session.name,
+        cliTool: session.cliTool,
+        containerName: session.containerName,
+        scrollback: session.scrollback,
+        createdAt: session.createdAt,
+        endedAt: new Date().toISOString(),
+        exitCode: null,
+      }).then(savedEntry => {
+        sessionHistory.nameWithLLM(savedEntry.id).catch(() => {});
+      }).catch(err => console.warn('Failed to save session history:', err.message));
+
       session.ptyProcess.kill();
       session.status = 'terminated';
     }

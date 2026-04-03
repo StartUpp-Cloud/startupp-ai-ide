@@ -41,6 +41,7 @@ const defaultData = {
   orchestratorExecutions: [],
   schedules: [],
   skills: [],
+  sessionHistory: [],
   safetySettings: { ...defaultSafetySettings },
 };
 
@@ -66,6 +67,7 @@ export async function initDB() {
   if (!db.data.orchestratorExecutions) db.data.orchestratorExecutions = [];
   if (!db.data.schedules) db.data.schedules = [];
   if (!db.data.skills) db.data.skills = [];
+  if (!db.data.sessionHistory) db.data.sessionHistory = [];
   if (!db.data.safetySettings) db.data.safetySettings = { ...defaultSafetySettings };
   await db.write();
   console.log("Database initialized at:", dbPath);
