@@ -579,6 +579,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       window.sendUtilTerminal = sendToTerminal;
     } else {
       window.sendToTerminal = sendToTerminal;
+      // Expose rename function for ProjectManagerPanel
+      window._renameSession = (sid, name) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'rename-session', sessionId: sid, name }));
+        }
+      };
     }
   }, [sendToTerminal, isUtility]);
 

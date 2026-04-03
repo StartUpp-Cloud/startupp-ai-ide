@@ -59,6 +59,8 @@ export default function ProjectManagerPanel({
 
   const [searchTerm, setSearchTerm] = useState("");
   const [showSearch, setShowSearch] = useState(false);
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editingSessionName, setEditingSessionName] = useState('');
   const [expandedProjects, setExpandedProjects] = useState({});
 
   // Modal state
@@ -486,9 +488,43 @@ export default function ProjectManagerPanel({
                           >
                             <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isActive ? 'bg-green-400' : 'bg-surface-600'}`} />
                             <Terminal className="w-3 h-3 flex-shrink-0" />
-                            <span className="truncate flex-1">
-                              {s.name || (s.role === 'utility' ? 'Utility' : 'Main')}
-                            </span>
+                            {editingSessionId === s.id ? (
+                              <input
+                                type="text"
+                                value={editingSessionName}
+                                onChange={(e) => setEditingSessionName(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    // Send rename via WebSocket
+                                    const ws = Array.from(document.querySelectorAll('*')).length; // dummy — use window
+                                    if (window._renameSession) window._renameSession(s.id, editingSessionName.trim());
+                                    setEditingSessionId(null);
+                                  }
+                                  if (e.key === 'Escape') setEditingSessionId(null);
+                                }}
+                                onBlur={() => {
+                                  if (editingSessionName.trim() && window._renameSession) {
+                                    window._renameSession(s.id, editingSessionName.trim());
+                                  }
+                                  setEditingSessionId(null);
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                autoFocus
+                                className="flex-1 min-w-0 px-1 py-0 text-[10px] bg-surface-800 border border-primary-500/50 rounded text-surface-200 outline-none"
+                              />
+                            ) : (
+                              <span
+                                className="truncate flex-1"
+                                onDoubleClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingSessionId(s.id);
+                                  setEditingSessionName(s.name || (s.role === 'utility' ? 'Utility' : 'Main'));
+                                }}
+                                title="Double-click to rename"
+                              >
+                                {s.name || (s.role === 'utility' ? 'Utility' : 'Main')}
+                              </span>
+                            )}
                             <span className="text-surface-600 flex-shrink-0 flex items-center gap-0.5">
                               <Clock className="w-2.5 h-2.5" />
                               {timeStr}
