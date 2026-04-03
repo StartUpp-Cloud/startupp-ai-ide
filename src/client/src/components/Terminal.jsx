@@ -144,16 +144,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(terminalRef.current);
 
-    if (isUtility) {
-      xterm.writeln('\x1b[90m── Utility Shell ──\x1b[0m');
-      xterm.writeln('');
-    } else {
-      xterm.writeln('\x1b[1;34m\u256D\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256E\x1b[0m');
-      xterm.writeln('\x1b[1;34m\u2502\x1b[0m   \x1b[1;36mStartUpp AI IDE Terminal\x1b[0m                    \x1b[1;34m\u2502\x1b[0m');
-      xterm.writeln('\x1b[1;34m\u2502\x1b[0m   Select a project to start a session          \x1b[1;34m\u2502\x1b[0m');
-      xterm.writeln('\x1b[1;34m\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256F\x1b[0m');
-      xterm.writeln('');
-    }
+    // No banner — session auto-connects and scrollback replays the terminal state
 
     return () => {
       resizeObserver.disconnect();
@@ -249,7 +240,9 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       case 'attached':
         setSessionId(msg.session.id);
         onSessionChange?.(msg.session.id);
-        // No status message — scrollback replay shows the terminal state
+        // Reset to clear any DA response garbage (1;2c) that appeared before session connected
+        // The server sends scrollback as 'output' messages right after this, which will repopulate
+        xtermRef.current?.reset();
         xtermRef.current?.focus();
         break;
 
