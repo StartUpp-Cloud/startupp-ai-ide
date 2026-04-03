@@ -108,12 +108,6 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     xterm.loadAddon(fitAddon);
     xterm.loadAddon(webLinksAddon);
 
-    // Load Unicode11 addon dynamically — improves character width calculation
-    // but terminal works fine without it
-    import('@xterm/addon-unicode11').then(({ Unicode11Addon }) => {
-      xterm.loadAddon(new Unicode11Addon());
-      xterm.unicode.activeVersion = '11';
-    }).catch(() => {});
 
     xterm.open(terminalRef.current);
     fitAddon.fit();
