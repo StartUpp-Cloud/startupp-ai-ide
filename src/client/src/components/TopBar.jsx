@@ -18,6 +18,7 @@ import {
   Loader2,
   MousePointer,
 } from 'lucide-react';
+import SystemHealth from './SystemHealth';
 
 export default function TopBar({
   selectedProject,
@@ -384,6 +385,8 @@ export default function TopBar({
           >
             <MousePointer className="w-3.5 h-3.5" />
           </button>
+
+          <SystemHealth />
 
           {notificationSlot}
 

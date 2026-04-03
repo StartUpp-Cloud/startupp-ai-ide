@@ -174,28 +174,41 @@ const ProjectFormFields = ({
 
       {/* Preset rules with individual toggles */}
       {presetRules.length > 0 && (
-        <div>
+        <div className="card">
           <button
             type="button"
             onClick={() => setShowPresetRules(!showPresetRules)}
-            className="flex items-center gap-2 text-xs text-surface-400 hover:text-surface-200 transition-colors"
+            className="flex items-center justify-between w-full text-left"
           >
-            <ChevronDown className={`w-3 h-3 transition-transform ${showPresetRules ? 'rotate-180' : ''}`} />
-            <span>{presetRules.length} preset rules</span>
-            {excludedPresetRules.length > 0 && (
-              <span className="text-yellow-400">({excludedPresetRules.length} excluded)</span>
-            )}
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-surface-200">
+                Active Preset Rules
+              </span>
+              <span className="badge-primary">
+                {presetRules.length - excludedPresetRules.length} / {presetRules.length} active
+              </span>
+              {excludedPresetRules.length > 0 && (
+                <span className="text-[11px] text-yellow-400 font-medium">
+                  {excludedPresetRules.length} excluded
+                </span>
+              )}
+            </div>
+            <ChevronDown
+              className={`w-4 h-4 text-surface-400 transition-transform duration-200 ${
+                showPresetRules ? "rotate-180" : ""
+              }`}
+            />
           </button>
 
           {showPresetRules && (
-            <div className="mt-2 space-y-1 max-h-48 overflow-y-auto">
+            <div className="mt-4 pt-4 border-t border-surface-700/60 space-y-1 max-h-64 overflow-y-auto">
               {presetRules.map((rule, i) => {
                 const excluded = excludedPresetRules.includes(rule.text);
                 return (
                   <label
                     key={i}
                     className={`flex items-start gap-2 px-2 py-1.5 rounded text-xs cursor-pointer transition-colors ${
-                      excluded ? 'opacity-50 line-through' : 'hover:bg-surface-800'
+                      excluded ? 'opacity-50' : 'hover:bg-surface-800'
                     }`}
                   >
                     <input
@@ -204,8 +217,8 @@ const ProjectFormFields = ({
                       onChange={() => togglePresetRule(rule.text)}
                       className="accent-primary-500 mt-0.5 flex-shrink-0"
                     />
-                    <span className="text-surface-300 flex-1">{rule.text}</span>
-                    <span className="text-[10px] text-surface-600 flex-shrink-0">{rule.presetName}</span>
+                    <span className={`text-surface-300 flex-1 ${excluded ? 'line-through' : ''}`}>{rule.text}</span>
+                    <span className="text-[10px] text-surface-600 flex-shrink-0 bg-surface-800 px-1.5 py-0.5 rounded">{rule.presetName}</span>
                   </label>
                 );
               })}

@@ -5,6 +5,7 @@ import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import "express-async-errors";
 import path from "path";
+import os from "os";
 import { fileURLToPath } from "url";
 import { createServer } from "http";
 
@@ -136,6 +137,37 @@ async function startServer() {
         timestamp: new Date().toISOString(),
         environment: NODE_ENV,
         uptime: process.uptime(),
+      });
+    });
+
+    // System health — lightweight, uses only Node built-in os module
+    app.get("/api/system-health", (req, res) => {
+      const totalMem = os.totalmem();
+      const freeMem = os.freemem();
+      const usedMem = totalMem - freeMem;
+      const loadAvg = os.loadavg(); // [1min, 5min, 15min]
+      const cpuCount = os.cpus().length;
+      const nodeMemory = process.memoryUsage();
+
+      res.json({
+        memory: {
+          totalGB: +(totalMem / 1073741824).toFixed(1),
+          usedGB: +(usedMem / 1073741824).toFixed(1),
+          freeGB: +(freeMem / 1073741824).toFixed(1),
+          percent: Math.round((usedMem / totalMem) * 100),
+        },
+        cpu: {
+          cores: cpuCount,
+          load1m: +loadAvg[0].toFixed(2),
+          load5m: +loadAvg[1].toFixed(2),
+          // Normalize load as percentage of total cores
+          percent: Math.min(100, Math.round((loadAvg[0] / cpuCount) * 100)),
+        },
+        node: {
+          heapMB: Math.round(nodeMemory.heapUsed / 1048576),
+          rssMB: Math.round(nodeMemory.rss / 1048576),
+        },
+        uptime: Math.round(process.uptime()),
       });
     });
 
