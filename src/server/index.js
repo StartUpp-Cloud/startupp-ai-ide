@@ -147,12 +147,14 @@ async function startServer() {
         const settings = llmProvider.getSettings();
         const projects = ProjectModel.getAll();
         const health = await llmProvider.checkHealth().catch(() => ({ available: false }));
+        const osModule = await import("os");
         res.json({
           llmEnabled: settings.enabled === true,
           llmAvailable: health.available === true,
           llmProvider: settings.provider,
           hasProjects: projects.length > 0,
           setupComplete: settings.enabled === true && health.available === true && projects.length > 0,
+          serverOS: osModule.platform(),
         });
       } catch (error) {
         res.status(500).json({ error: error.message });

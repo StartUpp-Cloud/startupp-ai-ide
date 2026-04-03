@@ -26,6 +26,7 @@ export default function Onboarding({ onSetupComplete }) {
   // Docker state
   const [dockerAvailable, setDockerAvailable] = useState(null); // null=checking, true, false
   const [dockerChecking, setDockerChecking] = useState(false);
+  const [serverOS, setServerOS] = useState(null); // 'linux', 'darwin', 'win32'
 
   // LLM state
   const [llmProvider, setLlmProvider] = useState("ollama");
@@ -54,6 +55,7 @@ export default function Onboarding({ onSetupComplete }) {
         const res = await fetch('/api/containers/status');
         const data = await res.json();
         setDockerAvailable(data.dockerAvailable === true);
+        if (data.serverOS) setServerOS(data.serverOS);
       } catch {
         setDockerAvailable(false);
       } finally {
@@ -413,10 +415,9 @@ export default function Onboarding({ onSetupComplete }) {
                 </div>
 
                 {(() => {
-                  // OS detection for install commands
-                  const ua = navigator.userAgent.toLowerCase();
-                  const isMac = /mac/.test(ua);
-                  const isWindows = /win/.test(ua) && !/darwin/.test(ua);
+                  // Use SERVER OS (not browser) — the browser might be on a different machine
+                  const isMac = serverOS === 'darwin';
+                  const isWindows = serverOS === 'win32';
                   // Default to Linux
 
                   if (isMac) return (

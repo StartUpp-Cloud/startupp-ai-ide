@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { execSync } from "child_process";
+import os from "os";
 import { containerManager } from "../containerManager.js";
 
 const router = Router();
@@ -24,7 +25,16 @@ router.get("/status", (req, res) => {
       }
     }
 
-    res.json({ dockerAvailable, imageReady });
+    // Detect server OS for install instructions
+    const platform = os.platform(); // 'linux', 'darwin', 'win32'
+    const arch = os.arch(); // 'x64', 'arm64'
+
+    res.json({
+      dockerAvailable,
+      imageReady,
+      serverOS: platform,
+      serverArch: arch,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

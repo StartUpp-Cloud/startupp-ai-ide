@@ -2,6 +2,7 @@ import express from "express";
 import { WebSocket } from "ws";
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { fileURLToPath } from "url";
 
 const router = express.Router();
@@ -163,11 +164,18 @@ router.get("/status", async (req, res) => {
       wsUrl: version.webSocketDebuggerUrl || null,
     });
   } catch (err) {
+    const platform = os.platform();
+    const hint = platform === 'darwin'
+      ? 'Launch Chrome: /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222'
+      : platform === 'win32'
+        ? 'Launch Chrome: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222'
+        : 'Launch Chrome: google-chrome --remote-debugging-port=9222  (or run ./scripts/launch-chrome-debug.sh)';
+
     res.json({
       connected: false,
       error: err.message,
-      hint:
-        'Launch Chrome with: google-chrome --remote-debugging-port=9222  (or run scripts/launch-chrome-debug.sh)',
+      hint,
+      serverOS: platform,
     });
   }
 });
