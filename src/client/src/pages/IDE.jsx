@@ -13,6 +13,7 @@ import {
   ChevronDown,
   ChevronUp,
   GitBranch,
+  FolderOpen,
   Sparkles,
 } from 'lucide-react';
 
@@ -65,8 +66,10 @@ export default function IDE() {
   const [notifications, setNotifications] = useState([]);
   const [leftView, setLeftView] = useState('projects');
 
-  // Git branch state
+  // Git branch state (legacy local projects)
   const [currentBranch, setCurrentBranch] = useState(null);
+  // Container repos state
+  const [containerRepos, setContainerRepos] = useState([]);
 
   // Plan execution state (shared with TopBar)
   const [executionId, setExecutionId] = useState(null);
@@ -143,26 +146,47 @@ export default function IDE() {
     }
   };
 
-  // ── Git branch polling ──
+  // ── Repos + branches polling (container or local) ──
 
   useEffect(() => {
-    if (!selectedProject?.folderPath) {
+    if (!selectedProject) {
       setCurrentBranch(null);
+      setContainerRepos([]);
       return;
     }
-    const fetchBranch = () => {
-      fetch(`/api/orchestrator/git-info?projectPath=${encodeURIComponent(selectedProject.folderPath)}`)
-        .then(r => r.json())
-        .then(data => {
-          if (data.isGitRepo) setCurrentBranch(data);
-          else setCurrentBranch(null);
-        })
-        .catch(() => setCurrentBranch(null));
+
+    const fetchInfo = () => {
+      if (selectedProject.containerName) {
+        // Container project: fetch repos from inside the container
+        fetch(`/api/containers/${selectedProject.containerName}/repos`)
+          .then(r => r.ok ? r.json() : { repos: [] })
+          .then(data => {
+            setContainerRepos(data.repos || []);
+            // Set currentBranch from first repo for backward compat
+            const firstGit = (data.repos || []).find(r => r.isGitRepo);
+            if (firstGit) setCurrentBranch({ branch: firstGit.branch, isMainBranch: ['main','master'].includes(firstGit.branch), hasChanges: firstGit.hasChanges });
+            else setCurrentBranch(null);
+          })
+          .catch(() => { setContainerRepos([]); setCurrentBranch(null); });
+      } else if (selectedProject.folderPath) {
+        // Local project: use git-info endpoint
+        fetch(`/api/orchestrator/git-info?projectPath=${encodeURIComponent(selectedProject.folderPath)}`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.isGitRepo) setCurrentBranch(data);
+            else setCurrentBranch(null);
+          })
+          .catch(() => setCurrentBranch(null));
+        setContainerRepos([]);
+      } else {
+        setCurrentBranch(null);
+        setContainerRepos([]);
+      }
     };
-    fetchBranch();
-    const interval = setInterval(fetchBranch, 15000);
+    fetchInfo();
+    const interval = setInterval(fetchInfo, 15000);
     return () => clearInterval(interval);
-  }, [selectedProject?.folderPath]);
+  }, [selectedProject?.containerName, selectedProject?.folderPath]);
 
   // ── Listen for run-in-util events from QuickActionsPanel ──
 
@@ -430,38 +454,66 @@ export default function IDE() {
                 </div>
               </div>
 
-              {/* ── Git Branch (middle drawer) ── */}
-              {currentBranch && selectedProject && (
-                <div className="flex-shrink-0 px-3 py-2 bg-surface-800/50 border-y border-surface-700 space-y-1.5">
-                  <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md ${
-                    currentBranch.isMainBranch
-                      ? 'bg-yellow-500/10 border border-yellow-500/20'
-                      : 'bg-green-500/10 border border-green-500/20'
-                  }`}>
-                    <GitBranch className={`w-4 h-4 flex-shrink-0 ${
-                      currentBranch.isMainBranch ? 'text-yellow-400' : 'text-green-400'
-                    }`} />
-                    <div className="flex-1 min-w-0">
-                      <div className={`text-[12px] font-mono font-semibold truncate ${
-                        currentBranch.isMainBranch ? 'text-yellow-300' : 'text-green-300'
-                      }`}>
-                        {currentBranch.branch}
-                      </div>
-                      {currentBranch.hasChanges && (
-                        <div className="flex items-center gap-1 mt-0.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
-                          <span className="text-[10px] text-yellow-400/80">Uncommitted changes</span>
+              {/* ── Repos + Branches (middle drawer) ── */}
+              {selectedProject && (containerRepos.length > 0 || currentBranch) && (
+                <div className="flex-shrink-0 px-2 py-2 bg-surface-800/50 border-y border-surface-700 space-y-1 max-h-48 overflow-y-auto">
+                  {containerRepos.length > 0 ? (
+                    // Container project: show each repo
+                    containerRepos.map(repo => (
+                      <div key={repo.path} className="px-2 py-1.5 rounded-md bg-surface-850 border border-surface-700/50">
+                        <div className="flex items-center gap-1.5">
+                          <FolderOpen className="w-3 h-3 text-surface-500 flex-shrink-0" />
+                          <span className="text-[11px] font-medium text-surface-200 truncate">{repo.name}</span>
+                          {repo.isGitRepo && repo.branch && (
+                            <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono ml-auto flex-shrink-0 ${
+                              ['main','master'].includes(repo.branch)
+                                ? 'bg-yellow-500/10 text-yellow-300'
+                                : 'bg-green-500/10 text-green-300'
+                            }`}>
+                              <GitBranch className="w-2.5 h-2.5" />
+                              <span className="truncate max-w-20">{repo.branch}</span>
+                              {repo.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
+                            </div>
+                          )}
                         </div>
-                      )}
+                        {/* Scripts preview */}
+                        {Object.keys(repo.scripts).length > 0 && (
+                          <div className="flex gap-1 mt-1 flex-wrap">
+                            {Object.keys(repo.scripts).slice(0, 4).map(s => (
+                              <button
+                                key={s}
+                                onClick={() => {
+                                  const cmd = `cd ${repo.path} && ${repo.packageManager} run ${s}\n`;
+                                  window.dispatchEvent(new CustomEvent('run-in-util', { detail: { command: cmd } }));
+                                }}
+                                className="px-1.5 py-0.5 text-[9px] bg-surface-700 text-surface-400 hover:text-surface-200 hover:bg-surface-600 rounded transition-colors"
+                              >
+                                {s}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  ) : currentBranch ? (
+                    // Local project: show single branch
+                    <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md ${
+                      currentBranch.isMainBranch ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-green-500/10 border border-green-500/20'
+                    }`}>
+                      <GitBranch className={`w-3.5 h-3.5 ${currentBranch.isMainBranch ? 'text-yellow-400' : 'text-green-400'}`} />
+                      <span className={`text-[11px] font-mono font-semibold truncate ${currentBranch.isMainBranch ? 'text-yellow-300' : 'text-green-300'}`}>
+                        {currentBranch.branch}
+                      </span>
+                      {currentBranch.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
                     </div>
-                  </div>
+                  ) : null}
                   {/* Review Changes button */}
                   <button
                     onClick={() => window.open('/branch-review', '_blank')}
-                    className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/25 rounded-md hover:bg-purple-500/25 transition-colors"
+                    className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[10px] font-medium text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors"
                   >
                     <Sparkles className="w-3 h-3" />
-                    Review Branch Changes
+                    Review Changes
                   </button>
                 </div>
               )}

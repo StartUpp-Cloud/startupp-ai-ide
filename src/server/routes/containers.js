@@ -198,4 +198,58 @@ router.post("/:name/exec", (req, res) => {
   }
 });
 
+/**
+ * GET /api/containers/:name/repos
+ * List repos inside the container with their git branch and detected scripts
+ */
+router.get("/:name/repos", (req, res) => {
+  try {
+    const { name } = req.params;
+    const status = containerManager.getContainerStatus(name);
+    if (!status) return res.status(404).json({ error: "Container not found" });
+    if (status !== "running") return res.status(400).json({ error: "Container is not running" });
+
+    // List directories in /workspace
+    const dirsOutput = containerManager.execInContainer(name, "ls -d /workspace/*/ 2>/dev/null");
+    if (!dirsOutput) return res.json({ repos: [] });
+
+    const dirs = dirsOutput.split("\n").filter(Boolean).map(d => d.replace(/\/$/, ""));
+    const repos = [];
+
+    for (const dir of dirs) {
+      const folderName = dir.split("/").pop();
+
+      // Check if it's a git repo
+      const isGit = containerManager.execInContainer(name, `test -d ${dir}/.git && echo yes`) === "yes";
+      let branch = null;
+      let hasChanges = false;
+
+      if (isGit) {
+        branch = containerManager.execInContainer(name, `cd ${dir} && git branch --show-current 2>/dev/null`) || null;
+        const gitStatus = containerManager.execInContainer(name, `cd ${dir} && git status --porcelain 2>/dev/null`);
+        hasChanges = !!(gitStatus && gitStatus.trim());
+      }
+
+      // Detect scripts from package.json
+      let scripts = {};
+      let packageManager = "npm";
+      try {
+        const pkgContent = containerManager.execInContainer(name, `cat ${dir}/package.json 2>/dev/null`);
+        if (pkgContent) {
+          const pkg = JSON.parse(pkgContent);
+          scripts = pkg.scripts || {};
+        }
+        if (containerManager.execInContainer(name, `test -f ${dir}/pnpm-lock.yaml && echo yes`) === "yes") packageManager = "pnpm";
+        else if (containerManager.execInContainer(name, `test -f ${dir}/yarn.lock && echo yes`) === "yes") packageManager = "yarn";
+      } catch { /* no package.json */ }
+
+      repos.push({ path: dir, name: folderName, isGitRepo: isGit, branch, hasChanges, scripts, packageManager });
+    }
+
+    res.json({ repos });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
