@@ -241,8 +241,11 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         // Server sends this only to the client that requested the session
         setSessionId(msg.sessionId);
         onSessionChange?.(msg.sessionId);
-        xtermRef.current?.reset(); // Clear any DA garbage before PTY output arrives
-        xtermRef.current?.focus();
+        xtermRef.current?.reset();
+        setTimeout(() => {
+          fitAddonRef.current?.fit();
+          xtermRef.current?.focus();
+        }, 50);
         setSessions(prev => {
           const exists = prev.some(s => s.id === msg.sessionId);
           if (exists) return prev;
@@ -256,10 +259,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       case 'attached':
         setSessionId(msg.session.id);
         onSessionChange?.(msg.session.id);
-        // Reset to clear any DA response garbage (1;2c) that appeared before session connected
-        // The server sends scrollback as 'output' messages right after this, which will repopulate
         xtermRef.current?.reset();
-        xtermRef.current?.focus();
+        // Re-fit after a tick to ensure correct dimensions after reset
+        setTimeout(() => {
+          fitAddonRef.current?.fit();
+          xtermRef.current?.focus();
+        }, 50);
         break;
 
       case 'output':
@@ -431,22 +436,28 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     }
   }, [onSessionChange, autoResponderEnabled, isUtility]);
 
+  // Track previous projectId to detect project switches
+  const prevProjectIdRef = useRef(projectId);
+
   // Auto-create or attach session when projectId changes or on initial load
-  // Waits for sessionsLoaded so we know about existing server-side sessions
   useEffect(() => {
     if (!connected || !sessionsLoaded || !wsRef.current || !projectId) return;
 
-    // Find an existing session for this project:
-    // 1. Check stored session ID (from localStorage)
-    // 2. Check project-to-session mapping (from sessions-list)
-    const storedAlive = initialSessionId && sessions.some(s => s.id === initialSessionId);
-    const mappedSession = projectSessionsRef.current.get(projectId);
+    const projectChanged = prevProjectIdRef.current !== projectId;
+    prevProjectIdRef.current = projectId;
 
-    // For utility terminal: skip sessions already claimed by the main terminal
-    // The main terminal's session is in projectSessionsRef; utility needs a different one
+    // If project changed, we MUST get a new session — clear old state
+    if (projectChanged) {
+      setSessionId(null);
+      sessionIdRef.current = null;
+    }
+
+    // Find an existing session for this project
+    const mappedSession = projectSessionsRef.current.get(projectId);
+    const storedAlive = !projectChanged && initialSessionId && sessions.some(s => s.id === initialSessionId);
+
     let targetSessionId = null;
     if (isUtility) {
-      // Only reattach to our own stored session, never share the main terminal's
       if (storedAlive) targetSessionId = initialSessionId;
     } else {
       targetSessionId = storedAlive ? initialSessionId : mappedSession || null;
@@ -455,8 +466,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     if (targetSessionId && targetSessionId !== sessionIdRef.current) {
       xtermRef.current?.reset();
       wsRef.current.send(JSON.stringify({ type: 'attach', sessionId: targetSessionId }));
-    } else if (!targetSessionId && !sessionIdRef.current) {
-      // No existing session — create a new one
+    } else if (!targetSessionId) {
+      // No session for this project — create one
       xtermRef.current?.reset();
       wsRef.current.send(JSON.stringify({
         type: 'create-session',
@@ -724,30 +735,13 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           </div>
         ) : (
           <>
-            {/* Main terminal: full toolbar */}
+            {/* Main terminal: toolbar */}
             <div className="flex items-center gap-2 min-w-0 flex-1">
-              {/* Session tabs (inline) */}
-              {sessions.length > 1 && (
-                <div className="flex items-center gap-0.5 overflow-x-auto mr-2">
-                  {sessions.map((s) => {
-                    const isActive = s.id === sessionId;
-                    const proj = projects.find(p => p.id === s.projectId);
-                    const label = s.name || (proj ? proj.name : 'Session');
-                    return (
-                      <button
-                        key={s.id}
-                        onClick={() => attachToSession(s.id)}
-                        className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded whitespace-nowrap transition-colors ${
-                          isActive
-                            ? 'bg-blue-500/20 text-blue-300'
-                            : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700/50'
-                        }`}
-                      >
-                        <FolderOpen className="w-2.5 h-2.5" />
-                        <span className="max-w-20 truncate">{label}</span>
-                      </button>
-                    );
-                  })}
+              {/* Active project name */}
+              {projectId && (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 bg-primary-500/10 border border-primary-500/20 rounded text-[11px] text-primary-300 font-medium truncate max-w-40 flex-shrink-0">
+                  <FolderOpen className="w-3 h-3 flex-shrink-0" />
+                  <span className="truncate">{projects.find(p => p.id === projectId)?.name || 'Project'}</span>
                 </div>
               )}
 
