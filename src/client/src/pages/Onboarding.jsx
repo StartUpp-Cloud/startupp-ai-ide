@@ -151,8 +151,7 @@ export default function Onboarding({ onSetupComplete }) {
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
-        folderPath: form.formData.folderPath?.trim() || null,
-        repos: (form.formData.repos || []).filter(r => r.url?.trim()),
+        excludedPresetRules: form.formData.excludedPresetRules || [],
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
       };
 
@@ -413,23 +412,70 @@ export default function Onboarding({ onSetupComplete }) {
                   Docker is not installed or not running
                 </div>
 
-                <p className="text-xs text-surface-400">
-                  Install Docker to run projects in isolated containers with their own auth and tools.
-                  Run these commands in a separate terminal:
-                </p>
+                {(() => {
+                  // OS detection for install commands
+                  const ua = navigator.userAgent.toLowerCase();
+                  const isMac = /mac/.test(ua);
+                  const isWindows = /win/.test(ua) && !/darwin/.test(ua);
+                  // Default to Linux
 
-                <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
-                  <p className="text-surface-500"># Install Docker</p>
-                  <p className="text-green-300">sudo apt install docker.io -y</p>
-                  <p className="text-surface-500 mt-2"># Add your user to the docker group</p>
-                  <p className="text-green-300">sudo usermod -aG docker $USER</p>
-                  <p className="text-surface-500 mt-2"># Apply group changes (or log out and back in)</p>
-                  <p className="text-green-300">newgrp docker</p>
-                  <p className="text-surface-500 mt-2"># Verify it works</p>
-                  <p className="text-green-300">docker info</p>
-                </div>
+                  if (isMac) return (
+                    <div>
+                      <p className="text-xs text-surface-400 mb-2">
+                        Install Docker Desktop for macOS:
+                      </p>
+                      <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
+                        <p className="text-surface-500"># Install via Homebrew</p>
+                        <p className="text-green-300">brew install --cask docker</p>
+                        <p className="text-surface-500 mt-2"># Then open Docker Desktop from Applications</p>
+                        <p className="text-green-300">open /Applications/Docker.app</p>
+                        <p className="text-surface-500 mt-2"># Verify it works</p>
+                        <p className="text-green-300">docker info</p>
+                      </div>
+                    </div>
+                  );
 
-                <p className="text-[10px] text-surface-500">
+                  if (isWindows) return (
+                    <div>
+                      <p className="text-xs text-surface-400 mb-2">
+                        Install Docker Desktop for Windows:
+                      </p>
+                      <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
+                        <p className="text-surface-500"># Download Docker Desktop from:</p>
+                        <p className="text-blue-300">
+                          <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener noreferrer" className="underline">
+                            docker.com/products/docker-desktop
+                          </a>
+                        </p>
+                        <p className="text-surface-500 mt-2"># Or install via winget</p>
+                        <p className="text-green-300">winget install Docker.DockerDesktop</p>
+                        <p className="text-surface-500 mt-2"># Restart your terminal, then verify</p>
+                        <p className="text-green-300">docker info</p>
+                      </div>
+                    </div>
+                  );
+
+                  // Linux
+                  return (
+                    <div>
+                      <p className="text-xs text-surface-400 mb-2">
+                        Run these commands in a separate terminal:
+                      </p>
+                      <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
+                        <p className="text-surface-500"># Install Docker</p>
+                        <p className="text-green-300">sudo apt install docker.io -y</p>
+                        <p className="text-surface-500 mt-2"># Add your user to the docker group</p>
+                        <p className="text-green-300">sudo usermod -aG docker $USER</p>
+                        <p className="text-surface-500 mt-2"># Apply group changes (or log out and back in)</p>
+                        <p className="text-green-300">newgrp docker</p>
+                        <p className="text-surface-500 mt-2"># Verify it works</p>
+                        <p className="text-green-300">docker info</p>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <p className="text-[10px] text-surface-500 mt-2">
                   This page auto-checks every 5 seconds. Once Docker is running, the green check will appear.
                 </p>
               </div>

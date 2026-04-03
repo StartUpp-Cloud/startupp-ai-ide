@@ -1,5 +1,7 @@
-import { Plus, X, GripVertical, ChevronDown, GitBranch, FolderOpen, Terminal as TerminalIcon } from "lucide-react";
+import { useState } from "react";
+import { Plus, X, GripVertical, ChevronDown, Terminal as TerminalIcon } from "lucide-react";
 import PresetSelector from "./PresetSelector";
+import { PRESETS } from "../data/presets";
 
 const ProjectFormFields = ({
   formData,
@@ -15,6 +17,33 @@ const ProjectFormFields = ({
   showPresets,
   setShowPresets,
 }) => {
+  const [excludedPresetRules, setExcludedPresetRules] = useState(
+    formData.excludedPresetRules || []
+  );
+  const [showPresetRules, setShowPresetRules] = useState(false);
+
+  // Sync excluded rules back to formData
+  const togglePresetRule = (ruleText) => {
+    const next = excludedPresetRules.includes(ruleText)
+      ? excludedPresetRules.filter(r => r !== ruleText)
+      : [...excludedPresetRules, ruleText];
+    setExcludedPresetRules(next);
+    handleInputChange("excludedPresetRules", next);
+  };
+
+  // Get all rules from selected presets
+  const presetRules = [];
+  (formData.selectedPresets || []).forEach(presetId => {
+    const preset = PRESETS.find(p => p.id === presetId);
+    if (preset) {
+      preset.rules.forEach(rule => {
+        if (!presetRules.some(r => r.text === rule)) {
+          presetRules.push({ text: rule, presetName: preset.name, presetId: preset.id });
+        }
+      });
+    }
+  });
+
   return (
     <div className="space-y-4">
       {/* Name */}
@@ -49,94 +78,6 @@ const ProjectFormFields = ({
         )}
       </div>
 
-      {/* Local Folder (fallback when Docker is not available) */}
-      <div>
-        <label className="label">
-          <FolderOpen className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
-          Local Folder <span className="text-surface-600 text-xs font-normal">— for local development without Docker</span>
-        </label>
-        <input
-          type="text"
-          value={formData.folderPath}
-          onChange={(e) => handleInputChange("folderPath", e.target.value)}
-          className="input"
-          placeholder="/home/user/projects/my-app"
-        />
-        <p className="text-hint mt-1">
-          Path on this machine where the terminal will open. Used when Docker is not available.
-        </p>
-      </div>
-
-      {/* Repositories (for Docker containers) */}
-      <div>
-        <label className="label">
-          <GitBranch className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
-          Repositories
-        </label>
-        <p className="text-hint mb-2">
-          Add one or more repos to clone inside the container.
-          For monorepos or multi-service projects, add each repo separately —
-          they'll all live under <code className="text-[11px] bg-surface-800 px-1 rounded">/workspace</code>.
-        </p>
-
-        <div className="space-y-2">
-          {(formData.repos || []).map((repo, index) => (
-            <div key={index} className="flex items-start gap-2">
-              <div className="flex-1 space-y-1">
-                <input
-                  type="text"
-                  value={repo.url}
-                  onChange={(e) => {
-                    const newRepos = [...formData.repos];
-                    newRepos[index] = { ...newRepos[index], url: e.target.value };
-                    handleInputChange("repos", newRepos);
-                  }}
-                  className="input !py-1.5"
-                  placeholder="https://github.com/org/repo.git"
-                />
-                <input
-                  type="text"
-                  value={repo.folder}
-                  onChange={(e) => {
-                    const newRepos = [...formData.repos];
-                    newRepos[index] = { ...newRepos[index], folder: e.target.value };
-                    handleInputChange("repos", newRepos);
-                  }}
-                  className="input !py-1.5 !text-xs"
-                  placeholder={`Folder name (default: auto-detected from URL)`}
-                />
-              </div>
-              {formData.repos.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const newRepos = formData.repos.filter((_, i) => i !== index);
-                    handleInputChange("repos", newRepos);
-                  }}
-                  className="mt-1 btn-icon !p-1.5 hover:!text-danger-400 hover:!bg-danger-500/10"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-
-        <button
-          type="button"
-          onClick={() => {
-            handleInputChange("repos", [...(formData.repos || []), { url: "", folder: "" }]);
-          }}
-          className="flex items-center gap-1.5 text-sm text-primary-400 hover:text-primary-300 mt-2 transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Add another repo
-        </button>
-        <p className="text-hint mt-1.5">
-          <span className="text-surface-500">Optional</span> — you can also clone repos manually inside the container
-        </p>
-      </div>
-
       {/* Port Mappings */}
       <div>
         <label className="label">
@@ -150,37 +91,48 @@ const ProjectFormFields = ({
           placeholder="3000:3000, 8080:8080"
         />
         <p className="text-hint mt-1">
-          Expose container ports to your machine for dev servers.
-          Format: <code className="text-[11px] bg-surface-800 px-1 rounded">host:container</code>, comma-separated.
+          Expose container ports for dev servers. Leave empty if not needed.
         </p>
       </div>
 
-      {/* First-run setup hint */}
+      {/* Getting started guide */}
       <div className="p-3 bg-surface-800/50 border border-surface-700 rounded-lg">
         <div className="flex items-center gap-2 mb-2">
           <TerminalIcon className="w-4 h-4 text-primary-400" />
-          <span className="text-sm font-medium text-surface-200">After creating the project</span>
+          <span className="text-sm font-medium text-surface-200">Getting started</span>
         </div>
         <p className="text-xs text-surface-400 mb-2">
-          Each project runs in its own isolated container. Log in to your tools
-          directly in the terminal — credentials are stored securely inside the container
-          and persist across restarts.
+          Your project runs in an isolated container. After creating it,
+          use the terminal to set up your tools and clone your repos:
         </p>
         <div className="space-y-1.5 text-[11px] font-mono">
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">$</span>
-            <code className="text-surface-300">claude</code>
-            <span className="text-surface-600">— log in to Claude Code</span>
+          <div className="flex items-start gap-2">
+            <span className="text-green-400 mt-px">$</span>
+            <div>
+              <code className="text-surface-300">gh auth login</code>
+              <span className="text-surface-600 ml-2">— connect GitHub</span>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">$</span>
-            <code className="text-surface-300">gh auth login</code>
-            <span className="text-surface-600">— log in to GitHub</span>
+          <div className="flex items-start gap-2">
+            <span className="text-green-400 mt-px">$</span>
+            <div>
+              <code className="text-surface-300">git clone https://github.com/org/repo.git</code>
+              <span className="text-surface-600 ml-2">— clone your code</span>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">$</span>
-            <code className="text-surface-300">npm login</code>
-            <span className="text-surface-600">— log in to npm (if needed)</span>
+          <div className="flex items-start gap-2">
+            <span className="text-green-400 mt-px">$</span>
+            <div>
+              <code className="text-surface-300">claude</code>
+              <span className="text-surface-600 ml-2">— connect Claude Code</span>
+            </div>
+          </div>
+          <div className="flex items-start gap-2">
+            <span className="text-green-400 mt-px">$</span>
+            <div>
+              <code className="text-surface-300">npm login</code>
+              <span className="text-surface-600 ml-2">— connect npm (if needed)</span>
+            </div>
           </div>
         </div>
       </div>
@@ -220,7 +172,49 @@ const ProjectFormFields = ({
         )}
       </div>
 
-      {/* Rules */}
+      {/* Preset rules with individual toggles */}
+      {presetRules.length > 0 && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowPresetRules(!showPresetRules)}
+            className="flex items-center gap-2 text-xs text-surface-400 hover:text-surface-200 transition-colors"
+          >
+            <ChevronDown className={`w-3 h-3 transition-transform ${showPresetRules ? 'rotate-180' : ''}`} />
+            <span>{presetRules.length} preset rules</span>
+            {excludedPresetRules.length > 0 && (
+              <span className="text-yellow-400">({excludedPresetRules.length} excluded)</span>
+            )}
+          </button>
+
+          {showPresetRules && (
+            <div className="mt-2 space-y-1 max-h-48 overflow-y-auto">
+              {presetRules.map((rule, i) => {
+                const excluded = excludedPresetRules.includes(rule.text);
+                return (
+                  <label
+                    key={i}
+                    className={`flex items-start gap-2 px-2 py-1.5 rounded text-xs cursor-pointer transition-colors ${
+                      excluded ? 'opacity-50 line-through' : 'hover:bg-surface-800'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!excluded}
+                      onChange={() => togglePresetRule(rule.text)}
+                      className="accent-primary-500 mt-0.5 flex-shrink-0"
+                    />
+                    <span className="text-surface-300 flex-1">{rule.text}</span>
+                    <span className="text-[10px] text-surface-600 flex-shrink-0">{rule.presetName}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Custom Rules */}
       <div>
         <label className="label">
           Project-Specific Rules{" "}

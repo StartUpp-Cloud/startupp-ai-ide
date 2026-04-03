@@ -5,8 +5,7 @@ const defaultFormData = {
   description: "",
   rules: [""],
   selectedPresets: [],
-  folderPath: "", // Local folder (used when Docker is not available)
-  repos: [{ url: "", folder: "" }], // Multiple repos for Docker container workspaces
+  excludedPresetRules: [],
   ports: "",
 };
 
@@ -73,12 +72,7 @@ export default function useProjectForm(initialData) {
       description: project.description,
       rules: project.rules?.length > 0 ? [...project.rules] : [""],
       selectedPresets: project.selectedPresets || [],
-      folderPath: project.folderPath || "",
-      repos: project.repos?.length > 0
-        ? project.repos.map(r => ({ url: r.url || "", folder: r.folder || "" }))
-        : project.gitUrl
-          ? [{ url: project.gitUrl, folder: "" }]
-          : [{ url: "", folder: "" }],
+      excludedPresetRules: project.excludedPresetRules || [],
       ports: (project.containerPorts || []).join(", "),
     });
     setErrors({});

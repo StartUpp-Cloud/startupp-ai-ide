@@ -597,8 +597,7 @@ function CreateModal({ onClose, onCreated }) {
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
-        folderPath: form.formData.folderPath?.trim() || null,
-        repos: (form.formData.repos || []).filter(r => r.url?.trim()),
+        excludedPresetRules: form.formData.excludedPresetRules || [],
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
       };
 
@@ -727,8 +726,7 @@ function EditModal({ project, onClose, onSaved }) {
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
-        folderPath: form.formData.folderPath?.trim() || null,
-        repos: (form.formData.repos || []).filter(r => r.url?.trim()),
+        excludedPresetRules: form.formData.excludedPresetRules || [],
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
       });
       onSaved();
