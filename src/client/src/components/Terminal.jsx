@@ -45,7 +45,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
   // Track project-to-session mapping (projectId -> sessionId)
   const projectSessionsRef = useRef(new Map());
-  // No pendingCreateRef needed — server sends session-created only to the requesting client
+  // Track previous projectId to detect actual changes (prevent double-send)
+  const prevProjectIdRef = useRef(null);
 
   // Report full sessions list to parent whenever it changes
   useEffect(() => {
@@ -180,12 +181,10 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         // Request session list (for SessionManager in the sidebar)
         ws.send(JSON.stringify({ type: 'list-sessions' }));
 
-        // Immediately request sessions for current project if we have one
-        // This handles both initial load and WS reconnection
-        if (projectId) {
-          const role = isUtility ? 'utility' : 'main';
-          ws.send(JSON.stringify({ type: 'get-project-sessions', projectId, role }));
-        }
+        // Reset prevProjectIdRef so the useEffect will fire and handle session setup.
+        // This covers both initial load AND reconnection after heartbeat timeout.
+        // Do NOT send get-project-sessions here — let the effect be the single sender.
+        prevProjectIdRef.current = null;
 
         // Start heartbeat — ping every 30s, check for dead connection
         if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -476,9 +475,6 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         break;
     }
   }, [onSessionChange, autoResponderEnabled, isUtility]);
-
-  // Track previous projectId to detect switches
-  const prevProjectIdRef = useRef(null);
 
   // When projectId changes: ask the server for sessions for this project + role.
   // The server response (project-sessions) triggers attach or create.
