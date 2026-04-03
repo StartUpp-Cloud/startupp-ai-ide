@@ -122,8 +122,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           data,
         }));
       } else if (!sessionIdRef.current) {
-        // No active session — give user feedback instead of silently dropping input
-        xterm.writeln('\x1b[33mNo active session. Click "Start" to create one.\x1b[0m');
+        // Silently drop input when no session — the toolbar shows connection state
       }
     });
 
@@ -424,55 +423,31 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
   }, [onSessionChange, autoResponderEnabled, isUtility]);
 
   // Auto-create or attach session when projectId changes or on initial load
-  // Waits for sessionsLoaded so we know about existing server-side sessions before deciding
+  // Waits for sessionsLoaded so we know about existing server-side sessions
   useEffect(() => {
-    if (!connected || !sessionsLoaded || !wsRef.current) return;
+    if (!connected || !sessionsLoaded || !wsRef.current || !projectId) return;
 
-    // For utility terminal: reconnect to stored session or create a new one for the project
+    // Find an existing session for this project:
+    // 1. Check stored session ID (from localStorage)
+    // 2. Check project-to-session mapping (from sessions-list)
+    const storedAlive = initialSessionId && sessions.some(s => s.id === initialSessionId);
+    const mappedSession = projectSessionsRef.current.get(projectId);
+
+    // For utility terminal: skip sessions already claimed by the main terminal
+    // The main terminal's session is in projectSessionsRef; utility needs a different one
+    let targetSessionId = null;
     if (isUtility) {
-      if (initialSessionId && sessions.some(s => s.id === initialSessionId)) {
-        // Stored session still alive — reattach
-        if (initialSessionId !== sessionIdRef.current) {
-          xtermRef.current?.reset();
-          wsRef.current.send(JSON.stringify({
-            type: 'attach',
-            sessionId: initialSessionId,
-          }));
-        }
-      } else if (projectId && !sessionIdRef.current) {
-        // No stored session — create a new shell for this project's container
-        xtermRef.current?.reset();
-        pendingCreateRef.current = true;
-        wsRef.current.send(JSON.stringify({
-          type: 'create-session',
-          projectId,
-          cliTool: null,
-          cols: xtermRef.current?.cols || 120,
-          rows: xtermRef.current?.rows || 30,
-        }));
-      }
-      return;
+      // Only reattach to our own stored session, never share the main terminal's
+      if (storedAlive) targetSessionId = initialSessionId;
+    } else {
+      targetSessionId = storedAlive ? initialSessionId : mappedSession || null;
     }
 
-    if (!projectId) return;
-
-    // Priority: initialSessionId (stored from before refresh) > project mapping > create new
-    // Check if the stored session is still alive on the server
-    const storedStillAlive = initialSessionId && sessions.some(s => s.id === initialSessionId);
-    const targetSessionId = storedStillAlive
-      ? initialSessionId
-      : projectSessionsRef.current.get(projectId);
-
-    if (targetSessionId) {
-      if (targetSessionId !== sessionIdRef.current) {
-        xtermRef.current?.reset();
-        wsRef.current.send(JSON.stringify({
-          type: 'attach',
-          sessionId: targetSessionId,
-        }));
-      }
-    } else {
-      // Create a new session for this project
+    if (targetSessionId && targetSessionId !== sessionIdRef.current) {
+      xtermRef.current?.reset();
+      wsRef.current.send(JSON.stringify({ type: 'attach', sessionId: targetSessionId }));
+    } else if (!targetSessionId && !sessionIdRef.current) {
+      // No existing session — create a new one
       xtermRef.current?.reset();
       pendingCreateRef.current = true;
       wsRef.current.send(JSON.stringify({
