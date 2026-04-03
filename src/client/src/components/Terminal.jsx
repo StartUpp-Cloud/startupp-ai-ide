@@ -121,14 +121,18 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     // Handle terminal input - only send when session is attached
     xterm.onData((data) => {
       if (!sessionIdRef.current) return;
-      // Filter out terminal capability responses (DA/tmux responses like 0;276;0c)
-      // These are xterm/tmux auto-responses, not real user input
-      if (/^\x1b\[[\?]?[\d;]*c$/.test(data) || /^[\d;]+c$/.test(data)) return;
+      // Strip DA/tmux capability responses from input data
+      // These arrive as auto-responses mixed with user input
+      let cleaned = data
+        .replace(/\x1b\[\??[\d;]*c/g, '')    // ESC sequence DA responses
+        .replace(/(\d+;)+\d+c/g, '')          // bare tmux responses (0;276;0c)
+        .replace(/\d+;\d+c/g, '');            // shorter variants
+      if (!cleaned) return; // Nothing left after filtering
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'input',
           sessionId: sessionIdRef.current,
-          data,
+          data: cleaned,
         }));
       }
     });
