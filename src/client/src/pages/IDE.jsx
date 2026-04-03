@@ -145,6 +145,17 @@ export default function IDE() {
     }
   };
 
+  // ── New session pair — creates main + utility together ──
+  useEffect(() => {
+    window.createNewSessionPair = () => {
+      // Trigger both terminals to create new sessions
+      // Each terminal's createSession is exposed via the "New" button internally
+      // But we need a way to trigger both. Use a custom event.
+      window.dispatchEvent(new CustomEvent('create-new-session-pair'));
+    };
+    return () => { window.createNewSessionPair = null; };
+  }, []);
+
   // ── Repos + branches polling (container or local) ──
 
   useEffect(() => {

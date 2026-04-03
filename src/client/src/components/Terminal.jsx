@@ -367,7 +367,6 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         // Server returns sessions filtered by project + role
         const activeSessions = (msg.sessions || []).filter(s => s.status === 'active');
 
-        // Reset NOW — right before we attach/create, so no gap for DA garbage
         xtermRef.current?.reset();
 
         if (activeSessions.length > 0) {
@@ -375,7 +374,10 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           const target = activeSessions[activeSessions.length - 1];
           wsRef.current?.send(JSON.stringify({ type: 'attach', sessionId: target.id }));
         } else {
-          // No session for this project + role — create one
+          // No active session — DON'T auto-create.
+          // The server will replay saved scrollback if available.
+          // User clicks "New" to start a fresh session.
+          // But on first-ever project open (no live files, no history), auto-create.
           wsRef.current?.send(JSON.stringify({
             type: 'create-session',
             projectId: msg.projectId,
@@ -492,6 +494,25 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     const role = isUtility ? 'utility' : 'main';
     wsRef.current.send(JSON.stringify({ type: 'get-project-sessions', projectId, role }));
   }, [projectId, connected, isUtility]);
+
+  // Listen for paired session creation event from IDE
+  useEffect(() => {
+    const handler = () => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !projectId) return;
+      xtermRef.current?.reset();
+      const role = isUtility ? 'utility' : 'main';
+      wsRef.current.send(JSON.stringify({
+        type: 'create-session',
+        projectId,
+        role,
+        cliTool: null,
+        cols: xtermRef.current?.cols || 120,
+        rows: xtermRef.current?.rows || 30,
+      }));
+    };
+    window.addEventListener('create-new-session-pair', handler);
+    return () => window.removeEventListener('create-new-session-pair', handler);
+  }, [projectId, isUtility]);
 
   // Create new session (manual)
   const createSession = useCallback(() => {
@@ -663,13 +684,15 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           <div className="flex flex-col gap-1 w-full">
             {/* Row 1: session controls */}
             <div className="flex items-center gap-2">
-              <button
-                onClick={createSession}
-                disabled={!connected}
-                className="px-2 py-0.5 text-[11px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
-              >
-                {sessionId ? 'New Shell' : 'Start Shell'}
-              </button>
+              {!sessionId && (
+                <button
+                  onClick={createSession}
+                  disabled={!connected}
+                  className="px-2 py-0.5 text-[11px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
+                >
+                  Start Shell
+                </button>
+              )}
 
               {sessionId && (
                 <>
@@ -778,7 +801,14 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
               </select>
 
               <button
-                onClick={createSession}
+                onClick={() => {
+                  // Create paired session (main + utility together)
+                  if (window.createNewSessionPair) {
+                    window.createNewSessionPair();
+                  } else {
+                    createSession();
+                  }
+                }}
                 disabled={!connected}
                 className="px-2 py-0.5 text-[11px] bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors"
               >
