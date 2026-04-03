@@ -129,9 +129,17 @@ export default function IDE() {
   const loadProject = async (id) => {
     try {
       const project = await getProject(id);
+      if (!project) {
+        // Project was deleted or DB was wiped — clear stale selection
+        setSelectedProjectId(null);
+        setSelectedProject(null);
+        return;
+      }
       setSelectedProject(project);
     } catch (error) {
-      console.error('Failed to load project:', error);
+      // Project not found (404) — clear stale selection
+      setSelectedProjectId(null);
+      setSelectedProject(null);
     }
   };
 

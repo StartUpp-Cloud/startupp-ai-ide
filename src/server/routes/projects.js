@@ -169,7 +169,7 @@ router.post("/:id/clone", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, rules, selectedPresets, promptSettings, folderPath } = req.body;
+    const { name, description, rules, selectedPresets, promptSettings, folderPath, containerName, gitUrl, repos, containerPorts, containerStatus } = req.body;
 
     const project = Project.findById(id);
     if (!project) {
@@ -215,13 +215,15 @@ router.put("/:id", async (req, res) => {
       updates.selectedPresets = Array.isArray(selectedPresets) ? selectedPresets : [];
     }
 
-    // Validate that at least rules or presets exist after update
-    const finalRules = updates.rules !== undefined ? updates.rules : project.rules || [];
-    const finalPresets = updates.selectedPresets !== undefined ? updates.selectedPresets : project.selectedPresets || [];
-    if (finalRules.length === 0 && finalPresets.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "At least one rule or preset is required" });
+    // Only validate rules/presets when they're being explicitly updated
+    if (rules !== undefined || selectedPresets !== undefined) {
+      const finalRules = updates.rules !== undefined ? updates.rules : project.rules || [];
+      const finalPresets = updates.selectedPresets !== undefined ? updates.selectedPresets : project.selectedPresets || [];
+      if (finalRules.length === 0 && finalPresets.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "At least one rule or preset is required" });
+      }
     }
 
     if (promptSettings !== undefined) {
@@ -229,9 +231,12 @@ router.put("/:id", async (req, res) => {
     }
 
     // Handle folder path updates (allow null to clear)
-    if (folderPath !== undefined) {
-      updates.folderPath = folderPath || null;
-    }
+    if (folderPath !== undefined) updates.folderPath = folderPath || null;
+    if (containerName !== undefined) updates.containerName = containerName || null;
+    if (gitUrl !== undefined) updates.gitUrl = gitUrl || null;
+    if (repos !== undefined) updates.repos = Array.isArray(repos) ? repos : [];
+    if (containerPorts !== undefined) updates.containerPorts = Array.isArray(containerPorts) ? containerPorts : [];
+    if (containerStatus !== undefined) updates.containerStatus = containerStatus || null;
 
     const updatedProject = await Project.update(id, updates);
     res.json(updatedProject);
