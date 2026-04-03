@@ -250,6 +250,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       case 'session-created':
         // Server sends this only to the client that requested the session
         setSessionId(msg.sessionId);
+        sessionIdRef.current = msg.sessionId; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.sessionId);
         // Don't reset — already cleared in project-sessions handler.
         setTimeout(() => {
@@ -268,6 +269,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
       case 'attached':
         setSessionId(msg.session.id);
+        sessionIdRef.current = msg.session.id; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.session.id);
         // Don't reset here — project-sessions handler already cleared the screen.
         // The server sends scrollback as 'output' messages right after this.
