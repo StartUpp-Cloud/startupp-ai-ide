@@ -123,7 +123,7 @@ export default function BranchReview() {
   const abortRef = useRef(null);
 
   const eligibleProjects = useMemo(
-    () => projects.filter((p) => p.folderPath),
+    () => projects.filter((p) => p.folderPath || p.containerName),
     [projects],
   );
 
@@ -139,30 +139,15 @@ export default function BranchReview() {
     }
   }, [eligibleProjects, selectedProjectId]);
 
-  // Fetch current branch when project changes
+  // Fetch recent commits + branch when project changes (works for both local and container)
   useEffect(() => {
-    if (!selectedProject?.folderPath) { setCurrentBranch(null); return; }
-    fetch(`/api/orchestrator/git-info?projectPath=${encodeURIComponent(selectedProject.folderPath)}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.isGitRepo) {
-          setCurrentBranch(data.branch);
-        } else {
-          setCurrentBranch(null);
-        }
-      })
-      .catch(() => setCurrentBranch(null));
-  }, [selectedProject?.folderPath]);
-
-  // Fetch recent commits when project changes
-  useEffect(() => {
-    if (!selectedProject?.folderPath) { setCommits([]); return; }
+    if (!selectedProjectId) { setCommits([]); setCurrentBranch(null); return; }
     setLoadingCommits(true);
-    fetch(`/api/branch-review/commits?projectPath=${encodeURIComponent(selectedProject.folderPath)}&count=20`)
+    fetch(`/api/branch-review/commits?projectId=${selectedProjectId}&count=20`)
       .then(r => r.json())
       .then(data => {
         setCommits(data.commits || []);
-        // Auto-select last 3 commits by default
+        setCurrentBranch(data.branch || null);
         if (data.commits?.length >= 3) {
           setSelectedToIdx(0);
           setSelectedFromIdx(2);
@@ -171,9 +156,9 @@ export default function BranchReview() {
           setSelectedFromIdx(data.commits.length - 1);
         }
       })
-      .catch(() => setCommits([]))
+      .catch(() => { setCommits([]); setCurrentBranch(null); })
       .finally(() => setLoadingCommits(false));
-  }, [selectedProject?.folderPath]);
+  }, [selectedProjectId]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -203,7 +188,7 @@ export default function BranchReview() {
     try {
       // Step 1: Fetch changed files
       const params = new URLSearchParams({
-        projectPath: selectedProject.folderPath,
+        projectId: selectedProjectId,
         mode: reviewMode,
       });
 
@@ -265,11 +250,9 @@ export default function BranchReview() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              projectPath: selectedProject.folderPath,
               filePath: file.path,
               diff: file.diff,
               status: file.status,
-              projectId: selectedProject.id,
             }),
             signal: controller.signal,
           });
@@ -308,10 +291,6 @@ export default function BranchReview() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            projectPath: selectedProject.folderPath,
-            mode,
-            baseBranch,
-            projectId: selectedProject.id,
             fileExplanations: explanations,
           }),
           signal: controller.signal,
