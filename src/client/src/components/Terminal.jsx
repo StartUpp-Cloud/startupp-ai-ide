@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { Zap, X, MessageSquare, Bot, Brain, Sparkles, Cpu, Settings, Shield, AlertTriangle, FolderOpen } from 'lucide-react';
 import LLMSettingsPanel from './LLMSettingsPanel';
 import '@xterm/xterm/css/xterm.css';
@@ -105,12 +104,16 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
-    const unicode11Addon = new Unicode11Addon();
 
     xterm.loadAddon(fitAddon);
     xterm.loadAddon(webLinksAddon);
-    xterm.loadAddon(unicode11Addon);
-    xterm.unicode.activeVersion = '11';
+
+    // Load Unicode11 addon dynamically — improves character width calculation
+    // but terminal works fine without it
+    import('@xterm/addon-unicode11').then(({ Unicode11Addon }) => {
+      xterm.loadAddon(new Unicode11Addon());
+      xterm.unicode.activeVersion = '11';
+    }).catch(() => {});
 
     xterm.open(terminalRef.current);
     fitAddon.fit();
