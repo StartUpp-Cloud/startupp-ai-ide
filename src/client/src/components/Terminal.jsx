@@ -439,43 +439,36 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
   // Track previous projectId to detect project switches
   const prevProjectIdRef = useRef(projectId);
 
-  // Auto-create or attach session when projectId changes or on initial load
+  // Create or switch session when projectId changes or on connect
   useEffect(() => {
     if (!connected || !sessionsLoaded || !wsRef.current || !projectId) return;
 
     const projectChanged = prevProjectIdRef.current !== projectId;
     prevProjectIdRef.current = projectId;
 
-    // If project changed, we MUST get a new session — clear old state
-    if (projectChanged) {
+    // On project switch: always start fresh
+    if (projectChanged || !sessionIdRef.current) {
       setSessionId(null);
       sessionIdRef.current = null;
-    }
 
-    // Find an existing session for this project
-    const mappedSession = projectSessionsRef.current.get(projectId);
-    const storedAlive = !projectChanged && initialSessionId && sessions.some(s => s.id === initialSessionId);
+      // Check if there's already a session for this project from sessions-list
+      const existing = projectSessionsRef.current.get(projectId);
 
-    let targetSessionId = null;
-    if (isUtility) {
-      if (storedAlive) targetSessionId = initialSessionId;
-    } else {
-      targetSessionId = storedAlive ? initialSessionId : mappedSession || null;
-    }
-
-    if (targetSessionId && targetSessionId !== sessionIdRef.current) {
-      xtermRef.current?.reset();
-      wsRef.current.send(JSON.stringify({ type: 'attach', sessionId: targetSessionId }));
-    } else if (!targetSessionId) {
-      // No session for this project — create one
-      xtermRef.current?.reset();
-      wsRef.current.send(JSON.stringify({
-        type: 'create-session',
-        projectId,
-        cliTool: null,
-        cols: xtermRef.current?.cols || 120,
-        rows: xtermRef.current?.rows || 30,
-      }));
+      if (existing && !projectChanged) {
+        // Page refresh with existing session — reattach
+        xtermRef.current?.reset();
+        wsRef.current.send(JSON.stringify({ type: 'attach', sessionId: existing }));
+      } else {
+        // New project or project switch — create fresh session
+        xtermRef.current?.reset();
+        wsRef.current.send(JSON.stringify({
+          type: 'create-session',
+          projectId,
+          cliTool: null,
+          cols: xtermRef.current?.cols || 120,
+          rows: xtermRef.current?.rows || 30,
+        }));
+      }
     }
   }, [projectId, connected, sessionsLoaded, isUtility]);
 
