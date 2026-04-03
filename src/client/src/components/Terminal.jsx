@@ -109,23 +109,23 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     xterm.open(terminalRef.current);
     fitAddon.fit();
 
-    // Immediately reset after open to flush xterm's Device Attributes query (1;2c)
-    // before any user interaction. The session attach/create will repopulate.
-    setTimeout(() => xterm.reset(), 10);
-
     xtermRef.current = xterm;
     fitAddonRef.current = fitAddon;
 
+    // Suppress DA query response: write a reset sequence after xterm processes it
+    // This is synchronous — xterm.open() triggers the DA, reset() flushes it
+    xterm.write('\x1b[2J\x1b[H'); // Clear screen + cursor home
+
     // Handle terminal input - only send when session is attached
     xterm.onData((data) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
+      // Block ALL input until a session is attached — prevents DA response from appearing
+      if (!sessionIdRef.current) return;
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'input',
           sessionId: sessionIdRef.current,
           data,
         }));
-      } else if (!sessionIdRef.current) {
-        // Silently drop input when no session — the toolbar shows connection state
       }
     });
 
@@ -177,9 +177,15 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         wsRef.current = ws;
         lastPong = Date.now();
 
-        // Reset sessionsLoaded so the auto-session effect re-triggers on reconnect
-        setSessionsLoaded(false);
+        // Request session list (for SessionManager in the sidebar)
         ws.send(JSON.stringify({ type: 'list-sessions' }));
+
+        // Immediately request sessions for current project if we have one
+        // This handles both initial load and WS reconnection
+        if (projectId) {
+          const role = isUtility ? 'utility' : 'main';
+          ws.send(JSON.stringify({ type: 'get-project-sessions', projectId, role }));
+        }
 
         // Start heartbeat — ping every 30s, check for dead connection
         if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -245,7 +251,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         // Server sends this only to the client that requested the session
         setSessionId(msg.sessionId);
         onSessionChange?.(msg.sessionId);
-        xtermRef.current?.reset();
+        // Don't reset — already cleared in project-sessions handler.
         setTimeout(() => {
           fitAddonRef.current?.fit();
           xtermRef.current?.focus();
@@ -263,8 +269,9 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       case 'attached':
         setSessionId(msg.session.id);
         onSessionChange?.(msg.session.id);
-        xtermRef.current?.reset();
-        // Re-fit after a tick to ensure correct dimensions after reset
+        // Don't reset here — project-sessions handler already cleared the screen.
+        // The server sends scrollback as 'output' messages right after this.
+        // Just fit and focus after a tick to ensure correct dimensions.
         setTimeout(() => {
           fitAddonRef.current?.fit();
           xtermRef.current?.focus();
@@ -468,25 +475,22 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
   // Track previous projectId to detect switches
   const prevProjectIdRef = useRef(null);
 
-  // When projectId changes or we connect: ask the SERVER for existing sessions,
-  // then attach to one or create a new one. This is the single source of truth.
+  // When projectId changes: ask the server for sessions for this project + role.
+  // The server response (project-sessions) triggers attach or create.
   useEffect(() => {
     if (!connected || !wsRef.current || !projectId) return;
 
-    const projectChanged = prevProjectIdRef.current !== projectId;
+    // Only act on actual project changes (not re-renders)
+    if (prevProjectIdRef.current === projectId) return;
     prevProjectIdRef.current = projectId;
 
-    // If project changed, clear local state (but DON'T kill the old session — it keeps running)
-    if (projectChanged) {
-      setSessionId(null);
-      sessionIdRef.current = null;
-    }
+    // Clear local session state — old session keeps running on the server
+    setSessionId(null);
+    sessionIdRef.current = null;
 
-    // Ask the server: "what sessions exist for this project + role?"
-    // Don't reset() here — wait for the response to avoid DA garbage in the gap
     const role = isUtility ? 'utility' : 'main';
     wsRef.current.send(JSON.stringify({ type: 'get-project-sessions', projectId, role }));
-  }, [projectId, connected]);
+  }, [projectId, connected, isUtility]);
 
   // Create new session (manual)
   const createSession = useCallback(() => {
