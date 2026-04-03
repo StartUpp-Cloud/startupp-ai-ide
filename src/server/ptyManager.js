@@ -126,17 +126,16 @@ class PTYManager extends EventEmitter {
       // dtach -A creates new or attaches to existing session socket
       // Unlike tmux, dtach passes ALL terminal escape sequences through untouched,
       // which prevents garbled rendering of TUI apps like Claude Code.
+      //
+      // We spawn /bin/bash and exec into docker from there, because node-pty's
+      // posix_spawnp can fail on macOS when spawning docker directly (code signing).
+      const dockerBin = findDockerBinary();
       const socketPath = `/tmp/${role}-session.dtach`;
       const workDir = cwd || '/workspace';
-      shell = findDockerBinary();
+      shell = '/bin/bash';
       args = [
-        'exec', '-it',
-        '-e', 'TERM=xterm-256color',
-        '-e', 'COLORTERM=truecolor',
-        '-w', workDir,
-        containerName,
-        'dtach', '-A', socketPath, '-z',
-        'bash', '-l',
+        '-c',
+        `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -w '${workDir}' '${containerName}' dtach -A '${socketPath}' -z bash -l`,
       ];
       spawnCwd = undefined;
     } else {
