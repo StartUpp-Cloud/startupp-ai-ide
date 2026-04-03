@@ -286,11 +286,15 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
       case 'output': {
         // Filter out DA/tmux capability responses from output
+        // Patterns: \x1b[?1;2c  or bare  0;276;0c  (repeated, no escape prefix)
         let outputData = msg.data;
         if (outputData) {
-          outputData = outputData.replace(/\x1b\[\??[\d;]*c/g, '').replace(/(?:^|\n)[\d;]+c/g, '');
+          outputData = outputData
+            .replace(/\x1b\[\??[\d;]*c/g, '')   // ESC [ ? digits ; digits c
+            .replace(/(\d+;)+\d+c/g, '')         // bare digits;digits;digitsc (tmux)
+            .replace(/\d+;\d+c/g, '');            // bare digits;digitsc
         }
-        if (outputData) xtermRef.current?.write(outputData);
+        if (outputData?.trim()) xtermRef.current?.write(outputData);
 
         // Dispatch event for LiveAnalysisPanel to consume (main terminal only)
         if (!isUtility) {
