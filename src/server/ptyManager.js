@@ -70,10 +70,18 @@ class PTYManager extends EventEmitter {
     let shell, args, spawnCwd;
 
     if (containerName) {
-      // Docker container session — use full path to docker binary
-      // pty.spawn uses posix_spawnp which needs the binary resolvable
+      // Docker container session via tmux — survives PM2 restarts
+      // tmux -A attaches to existing session or creates new
+      // Session name = role (main/utility) so we always reconnect to the same one
+      const tmuxSession = `${role}-session`;
+      const workDir = cwd || '/workspace';
       shell = findDockerBinary();
-      args = ['exec', '-it', '-w', cwd || '/workspace', containerName, 'bash'];
+      args = [
+        'exec', '-it',
+        '-e', `TMUX_TMPDIR=/tmp`,
+        containerName,
+        'tmux', 'new-session', '-A', '-s', tmuxSession, '-c', workDir,
+      ];
       spawnCwd = undefined;
     } else {
       // Local session
