@@ -18,6 +18,9 @@ const EXTRA_PATHS = [
   "/usr/bin",
   "/snap/bin",
   `${os.homedir()}/.docker/bin`,
+  // macOS Docker Desktop paths
+  "/Applications/Docker.app/Contents/Resources/bin",
+  `${os.homedir()}/Library/Group Containers/group.com.docker/bin`,
 ].join(path.delimiter);
 
 const EXEC_OPTS_BASE = {
@@ -34,7 +37,7 @@ const EXEC_OPTS_BASE = {
  * Wraps execSync with the enhanced PATH so Docker is always found.
  */
 function dockerExec(cmd, opts = {}) {
-  return dockerExec(cmd, {
+  return execSync(cmd, {
     ...EXEC_OPTS_BASE,
     ...opts,
     env: { ...EXEC_OPTS_BASE.env, ...(opts.env || {}) },
