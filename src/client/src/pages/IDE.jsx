@@ -253,18 +253,9 @@ export default function IDE() {
       addNotification('needs-input', 'Input needed', text, sessionId, proj?.name);
     };
 
-    const handleError = (e) => {
-      const { sessionId, text } = e.detail;
-      const session = allSessions.find(s => s.id === sessionId);
-      const proj = projects.find(p => p.id === session?.projectId);
-      addNotification('error-detected', 'Error detected', text, sessionId, proj?.name);
-    };
-
     window.addEventListener('session-needs-input', handleNeedsInput);
-    window.addEventListener('session-error', handleError);
     return () => {
       window.removeEventListener('session-needs-input', handleNeedsInput);
-      window.removeEventListener('session-error', handleError);
     };
   }, [allSessions, projects, addNotification]);
 

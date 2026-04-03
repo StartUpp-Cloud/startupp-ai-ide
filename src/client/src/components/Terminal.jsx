@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { Zap, X, MessageSquare, Bot, Brain, Sparkles, Cpu, Settings, Shield, AlertTriangle, FolderOpen } from 'lucide-react';
 import LLMSettingsPanel from './LLMSettingsPanel';
 import '@xterm/xterm/css/xterm.css';
@@ -104,9 +105,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
+    const unicode11Addon = new Unicode11Addon();
 
     xterm.loadAddon(fitAddon);
     xterm.loadAddon(webLinksAddon);
+    xterm.loadAddon(unicode11Addon);
+    xterm.unicode.activeVersion = '11';
 
     xterm.open(terminalRef.current);
     fitAddon.fit();
@@ -118,21 +122,16 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     // This is synchronous — xterm.open() triggers the DA, reset() flushes it
     xterm.write('\x1b[2J\x1b[H'); // Clear screen + cursor home
 
-    // Handle terminal input - only send when session is attached
+    // Handle terminal input — forward everything to the PTY.
+    // DA responses from xterm.js (e.g. \x1b[?62;c) MUST reach the application
+    // so it can detect terminal capabilities and render correctly.
     xterm.onData((data) => {
       if (!sessionIdRef.current) return;
-      // Strip DA/tmux capability responses from input data
-      // These arrive as auto-responses mixed with user input
-      let cleaned = data
-        .replace(/\x1b\[[\?>]?[\d;]*c/g, '') // ESC sequence DA responses (primary + secondary)
-        .replace(/(\d+;)+\d+c/g, '')          // bare tmux responses (0;276;0c)
-        .replace(/\d+;\d+c/g, '');            // shorter variants
-      if (!cleaned) return; // Nothing left after filtering
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'input',
           sessionId: sessionIdRef.current,
-          data: cleaned,
+          data,
         }));
       }
     });
@@ -295,11 +294,15 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         let outputData = msg.data;
         if (outputData) {
           outputData = outputData
-            .replace(/\x1b\[[\?>]?[\d;]*c/g, '') // ESC [ ? or > digits;digits c (primary + secondary DA)
-            .replace(/(\d+;)+\d+c/g, '')          // bare digits;digits;digitsc (tmux)
-            .replace(/\d+;\d+c/g, '');             // bare digits;digitsc
+            .replace(/\x1b\[[\?>]?[\d;]*c/g, '')   // Full DA responses: \x1b[?1;2c, \x1b[>0;276;0c
+            .replace(/\x1b\[>[\d;]*/g, '')           // Partial secondary DA (has escape, no trailing c yet)
+            .replace(/\[\?[\d;]*c/g, '')             // Split DA1 (escape in prev chunk): [?1;2c
+            .replace(/\[>[\d;]*c/g, '')              // Split DA2 (escape in prev chunk): [>0;276;0c
+            .replace(/\[>/g, '')                     // Bare [> fragment from split chunks
+            .replace(/(\d+;)+\d+c/g, '')             // Bare numeric DA: 0;276;0c
+            .replace(/\d+;\d+c/g, '');               // Short bare: 276;0c
         }
-        if (outputData?.trim()) xtermRef.current?.write(outputData);
+        if (outputData) xtermRef.current?.write(outputData);
 
         // Dispatch event for LiveAnalysisPanel to consume (main terminal only)
         if (!isUtility) {
@@ -335,10 +338,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
               return prev;
             }), 15000);
 
-            // Notify IDE of error event
-            window.dispatchEvent(new CustomEvent('session-error', {
-              detail: { sessionId: msg.sessionId, text: cleanData.trim().slice(0, 200) },
-            }));
+            // Error captured locally (capturedError state) — no notification dispatched.
+            // Notifications are reserved for "needs input" events only.
           }
         }
         break;

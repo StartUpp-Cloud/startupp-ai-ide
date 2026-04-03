@@ -6,23 +6,49 @@
 import * as pty from 'node-pty';
 import os from 'os';
 import fs from 'fs';
+import { execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import { sessionHistory } from './sessionHistory.js';
 
-// Resolve the full path to the docker binary (needed for pty.spawn on macOS)
+// Resolve the full path to the docker binary (needed for pty.spawn on macOS).
+// PM2/Node inherits a minimal PATH that often excludes Docker's install location.
+// We try `which docker` with an expanded PATH first, then fall back to known paths.
 function findDockerBinary() {
-  const candidates = [
-    '/usr/local/bin/docker',
-    '/opt/homebrew/bin/docker',
-    '/usr/bin/docker',
-    `${os.homedir()}/.docker/bin/docker`,
-    '/Applications/Docker.app/Contents/Resources/bin/docker',
-    '/snap/bin/docker',
+  // Expanded PATH covering Docker Desktop, Homebrew, OrbStack, Rancher Desktop, etc.
+  const extraPaths = [
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+    '/usr/bin',
+    `${os.homedir()}/.docker/bin`,
+    '/Applications/Docker.app/Contents/Resources/bin',
+    `${os.homedir()}/.rd/bin`,
+    `${os.homedir()}/.orbstack/bin`,
+    '/opt/local/bin',
+    '/snap/bin',
   ];
-  for (const p of candidates) {
+  const expandedPath = `${process.env.PATH || ''}:${extraPaths.join(':')}`;
+
+  // Try dynamic lookup first
+  try {
+    const resolved = execSync('which docker', {
+      env: { ...process.env, PATH: expandedPath },
+      encoding: 'utf8',
+      timeout: 3000,
+    }).trim();
+    if (resolved) {
+      console.log(`[ptyManager] Docker binary found at: ${resolved}`);
+      return resolved;
+    }
+  } catch {}
+
+  // Static fallback — check each candidate
+  for (const dir of extraPaths) {
+    const p = `${dir}/docker`;
     try { if (fs.existsSync(p)) return p; } catch {}
   }
-  return 'docker'; // fallback to PATH lookup
+
+  console.warn('[ptyManager] Docker binary not found in any known location, falling back to "docker"');
+  return 'docker';
 }
 
 class PTYManager extends EventEmitter {
@@ -70,18 +96,21 @@ class PTYManager extends EventEmitter {
     let shell, args, spawnCwd;
 
     if (containerName) {
-      // Docker container session via tmux — survives PM2 restarts
-      // tmux -A attaches to existing session or creates new
-      // Session name = role (main/utility) so we always reconnect to the same one
-      const tmuxSession = `${role}-session`;
+      // Docker container session via dtach — survives PM2 restarts
+      // dtach -A creates new or attaches to existing session socket
+      // Unlike tmux, dtach passes ALL terminal escape sequences through untouched,
+      // which prevents garbled rendering of TUI apps like Claude Code.
+      const socketPath = `/tmp/${role}-session.dtach`;
       const workDir = cwd || '/workspace';
       shell = findDockerBinary();
       args = [
         'exec', '-it',
-        '-e', 'TMUX_TMPDIR=/tmp',
         '-e', 'TERM=xterm-256color',
+        '-e', 'COLORTERM=truecolor',
+        '-w', workDir,
         containerName,
-        'tmux', 'new-session', '-A', '-s', tmuxSession, '-c', workDir,
+        'dtach', '-A', socketPath, '-z',
+        'bash', '-l',
       ];
       spawnCwd = undefined;
     } else {
