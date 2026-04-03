@@ -152,15 +152,17 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     };
   }, []);
 
-  // Connect to WebSocket
+  // Connect to WebSocket with heartbeat and auto-recovery
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
     let mounted = true;
     let reconnectTimer = null;
+    let heartbeatInterval = null;
+    let lastPong = Date.now();
 
     const connect = () => {
-      if (!mounted) return; // Don't connect if unmounted (StrictMode cleanup)
+      if (!mounted) return;
       setStatus('connecting');
       const ws = new WebSocket(wsUrl);
 
@@ -169,30 +171,48 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setConnected(true);
         setStatus('connected');
         wsRef.current = ws;
+        lastPong = Date.now();
 
-        // Only request session list — the auto-session useEffect handles attach/create
-        // to avoid double-attach on reconnection
+        // Reset sessionsLoaded so the auto-session effect re-triggers on reconnect
+        setSessionsLoaded(false);
         ws.send(JSON.stringify({ type: 'list-sessions' }));
+
+        // Start heartbeat — ping every 30s, check for dead connection
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        heartbeatInterval = setInterval(() => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+          // If no message received in 60s, connection is probably dead
+          if (Date.now() - lastPong > 60000) {
+            console.warn('WebSocket heartbeat timeout — reconnecting');
+            ws.close();
+            return;
+          }
+
+          // Send a ping (server ignores unknown message types gracefully)
+          try { ws.send(JSON.stringify({ type: 'ping' })); } catch {}
+        }, 30000);
       };
 
       ws.onmessage = (event) => {
         if (!mounted) return;
+        lastPong = Date.now(); // Any message counts as proof of life
         const msg = JSON.parse(event.data);
         handleWebSocketMessage(msg);
       };
 
       ws.onclose = () => {
-        if (!mounted) return; // Don't reconnect if component was unmounted
+        if (!mounted) return;
         setConnected(false);
         setStatus('disconnected');
         wsRef.current = null;
+        if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
 
         // Reconnect after delay
         reconnectTimer = setTimeout(connect, 3000);
       };
 
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
+      ws.onerror = () => {
         setStatus('error');
       };
     };
@@ -202,6 +222,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     return () => {
       mounted = false;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;

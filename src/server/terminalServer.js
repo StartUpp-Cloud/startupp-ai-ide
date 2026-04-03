@@ -314,6 +314,10 @@ class TerminalServer {
         this.handleRenameSession(ws, payload);
         break;
 
+      case 'ping':
+        this.send(ws, { type: 'pong' });
+        break;
+
       case 'kill-switch':
         this.handleKillSwitch(ws, payload);
         break;
