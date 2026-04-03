@@ -468,9 +468,17 @@ export default function ProjectManagerPanel({
                         const date = s.createdAt ? new Date(s.createdAt) : null;
                         const timeStr = date ? date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
                         return (
-                          <div
+                          <button
                             key={s.id}
-                            className={`flex items-center gap-1.5 px-1.5 py-1 rounded text-[10px] ${
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              // Select this project and switch to this session
+                              onSelectProject(project.id);
+                              if (window.switchMainSession && s.role === 'main') {
+                                window.switchMainSession(s.id);
+                              }
+                            }}
+                            className={`w-full flex items-center gap-1.5 px-1.5 py-1 rounded text-[10px] cursor-pointer transition-colors ${
                               isActive
                                 ? 'bg-primary-500/10 text-primary-300'
                                 : 'text-surface-400 hover:bg-surface-700/40 hover:text-surface-200'
@@ -485,7 +493,7 @@ export default function ProjectManagerPanel({
                               <Clock className="w-2.5 h-2.5" />
                               {timeStr}
                             </span>
-                          </div>
+                          </button>
                         );
                       })}
                     </div>
