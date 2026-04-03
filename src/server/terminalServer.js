@@ -62,26 +62,45 @@ class TerminalServer {
       this.send(ws, { type: 'connected', timestamp: Date.now() });
     });
 
-    // Listen to PTY manager events
+    // Listen to PTY manager events.
+    // Coalesce output with a 5ms buffer so escape sequences aren't split across
+    // WebSocket messages. This prevents fragments like [2, [34, ;165R, RRR from
+    // appearing as visible text when the client-side filter can't match them.
+    const coalesceBufs = new Map(); // sessionId -> { data, timer }
+
     ptyManager.on('data', ({ sessionId, data }) => {
-      // Broadcast raw output to clients
-      this.broadcastToSession(sessionId, {
-        type: 'output',
-        sessionId,
-        data,
-      });
-
-      // Buffer output for history parsing
-      const buffer = this.outputBuffers.get(sessionId);
-      if (buffer) {
-        buffer.append(data);
+      let buf = coalesceBufs.get(sessionId);
+      if (!buf) {
+        buf = { data: '', timer: null };
+        coalesceBufs.set(sessionId, buf);
       }
+      buf.data += data;
 
-      // Track recent output for prompt detection
-      this.trackOutputForPromptDetection(sessionId, data);
+      if (buf.timer) clearTimeout(buf.timer);
+      buf.timer = setTimeout(() => {
+        const coalesced = buf.data;
+        buf.data = '';
+        coalesceBufs.delete(sessionId);
 
-      // Forward to orchestrator if it has an active execution for this session
-      orchestrator.feedOutput(sessionId, data);
+        // Broadcast coalesced output to clients
+        this.broadcastToSession(sessionId, {
+          type: 'output',
+          sessionId,
+          data: coalesced,
+        });
+
+        // Buffer output for history parsing
+        const buffer = this.outputBuffers.get(sessionId);
+        if (buffer) {
+          buffer.append(coalesced);
+        }
+
+        // Track recent output for prompt detection
+        this.trackOutputForPromptDetection(sessionId, coalesced);
+
+        // Forward to orchestrator if it has an active execution for this session
+        orchestrator.feedOutput(sessionId, coalesced);
+      }, 5);
     });
 
     ptyManager.on('exit', ({ sessionId, exitCode, signal }) => {

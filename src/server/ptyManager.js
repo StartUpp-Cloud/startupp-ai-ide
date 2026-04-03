@@ -143,6 +143,35 @@ function fixPtyPermissions() {
   return fixed > 0;
 }
 
+// Ensure dtach is installed inside a container. Runs once per container name.
+const _dtachChecked = new Set();
+
+function ensureDtach(containerName) {
+  if (_dtachChecked.has(containerName)) return;
+
+  const dockerBin = findDockerBinary();
+  try {
+    execSync(`${dockerBin} exec ${containerName} which dtach`, {
+      encoding: 'utf8', timeout: 5000, stdio: 'pipe',
+    });
+    // dtach exists
+    _dtachChecked.add(containerName);
+  } catch {
+    // dtach not found — install it
+    console.log(`[ptyManager] Installing dtach in container ${containerName}...`);
+    try {
+      execSync(
+        `${dockerBin} exec -u root ${containerName} sh -c "apt-get update -qq && apt-get install -y -qq dtach"`,
+        { encoding: 'utf8', timeout: 60000, stdio: 'pipe' },
+      );
+      console.log(`[ptyManager] ✓ dtach installed in ${containerName}`);
+      _dtachChecked.add(containerName);
+    } catch (err) {
+      console.error(`[ptyManager] ✗ Failed to install dtach in ${containerName}:`, err.message);
+    }
+  }
+}
+
 class PTYManager extends EventEmitter {
   constructor() {
     super();
@@ -196,6 +225,7 @@ class PTYManager extends EventEmitter {
       // We spawn /bin/bash and exec into docker from there, because node-pty's
       // posix_spawnp can fail on macOS when spawning docker directly (code signing).
       const dockerBin = findDockerBinary();
+      ensureDtach(containerName);
       const socketPath = `/tmp/${role}-session.dtach`;
       const workDir = cwd || '/workspace';
       shell = '/bin/bash';

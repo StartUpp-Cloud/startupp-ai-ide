@@ -119,25 +119,37 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     // This is synchronous — xterm.open() triggers the DA, reset() flushes it
     xterm.write('\x1b[2J\x1b[H'); // Clear screen + cursor home
 
-    // Handle terminal input — filter auto-responses that cause echo garbage,
-    // but ALLOW DA responses through (apps need them for capability detection).
+    // Handle terminal input — coalesce for 3ms then filter auto-responses
+    // that cause echo garbage. DA responses are allowed through (apps need them).
+    // The coalesce window ensures split sequences (e.g. \x1b[1;1 | R) arrive
+    // complete so the regex can match them reliably.
+    let inputBuf = '';
+    let inputTimer = null;
+
     xterm.onData((data) => {
       if (!sessionIdRef.current) return;
-      // Strip responses that the PTY will echo back as visible garbage:
-      // - OSC responses (background/foreground color queries): \x1b]11;rgb:...\x07
-      // - CPR (Cursor Position Report): \x1b[row;colR
-      // DA responses (\x1b[?...c, \x1b[>...c) are NOT stripped — apps need them.
-      let cleaned = data
-        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC with BEL or ST terminator
-        .replace(/\x1b\[\??\d+(?:;\d+)*R/g, '');            // CPR: \x1b[1;165R, \x1b[56R
-      if (!cleaned) return;
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'input',
-          sessionId: sessionIdRef.current,
-          data: cleaned,
-        }));
-      }
+      inputBuf += data;
+
+      if (inputTimer) clearTimeout(inputTimer);
+      inputTimer = setTimeout(() => {
+        let cleaned = inputBuf;
+        inputBuf = '';
+
+        // Strip responses that the PTY echoes back as visible garbage:
+        cleaned = cleaned
+          .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC (color queries): \x1b]11;rgb:...\x07
+          .replace(/\x1b\[\??\d+(?:;\d+)*R/g, '');            // CPR: \x1b[1;165R, \x1b[56R
+        // DA responses (\x1b[?...c, \x1b[>...c) pass through untouched.
+
+        if (!cleaned) return;
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'input',
+            sessionId: sessionIdRef.current,
+            data: cleaned,
+          }));
+        }
+      }, 3);
     });
 
     // Handle resize - always include sessionId

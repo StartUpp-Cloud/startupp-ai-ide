@@ -1,5 +1,7 @@
 import { execSync } from "child_process";
+import crypto from "crypto";
 import { EventEmitter } from "events";
+import fs from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -62,26 +64,52 @@ class ContainerManager extends EventEmitter {
   }
 
   /**
-   * Build the dev container image (if not already built)
+   * Build the dev container image if not built or if the Dockerfile has changed.
+   * Stores a hash of the Dockerfile as a label on the image so we can detect
+   * when it's outdated and auto-rebuild.
    */
   async buildImage() {
     try {
-      // Check if image exists
+      const dockerfilePath = path.join(__dirname, "../../docker/Dockerfile.dev");
+      const dockerContext = path.join(__dirname, "../../docker");
+
+      // Hash the Dockerfile content to detect changes
+      const dockerfileContent = fs.readFileSync(dockerfilePath, "utf-8");
+      const currentHash = crypto.createHash("md5").update(dockerfileContent).digest("hex").slice(0, 12);
+
+      // Check if image exists AND has the correct hash
       const images = dockerExec(`docker images -q ${DEV_IMAGE}`, {
         encoding: "utf-8",
       }).trim();
-      if (images) return { exists: true, image: DEV_IMAGE };
 
-      // Build from Dockerfile
-      const dockerfilePath = path.join(__dirname, "../../docker/Dockerfile.dev");
+      if (images) {
+        // Check the stored hash label
+        try {
+          const storedHash = dockerExec(
+            `docker inspect --format='{{index .Config.Labels "dockerfile.hash"}}' ${DEV_IMAGE}`,
+            { encoding: "utf-8" },
+          ).trim().replace(/'/g, "");
+
+          if (storedHash === currentHash) {
+            return { exists: true, image: DEV_IMAGE };
+          }
+          console.log(`[containerManager] Dockerfile changed (${storedHash} → ${currentHash}), rebuilding image...`);
+        } catch {
+          // No hash label = old image, rebuild
+          console.log(`[containerManager] Image exists but has no version label, rebuilding...`);
+        }
+      }
+
+      // Build with the hash label baked in
+      console.log(`[containerManager] Building ${DEV_IMAGE} (hash: ${currentHash})...`);
       dockerExec(
-        `docker build -t ${DEV_IMAGE} -f "${dockerfilePath}" "${path.join(__dirname, "../../docker")}"`,
+        `docker build --label "dockerfile.hash=${currentHash}" -t ${DEV_IMAGE} -f "${dockerfilePath}" "${dockerContext}"`,
         {
           stdio: "inherit",
           timeout: 300000, // 5 min
         },
       );
-      return { built: true, image: DEV_IMAGE };
+      return { built: true, image: DEV_IMAGE, hash: currentHash };
     } catch (error) {
       throw new Error(`Failed to build image: ${error.message}`);
     }
