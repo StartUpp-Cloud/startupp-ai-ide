@@ -1,5 +1,6 @@
 import { execSync } from "child_process";
 import { EventEmitter } from "events";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -8,6 +9,37 @@ const __dirname = path.dirname(__filename);
 
 const DEV_IMAGE = "startupp-ai-ide-dev:latest";
 const CONTAINER_PREFIX = "sai-";
+
+// Ensure Docker is in PATH — Docker Desktop on macOS and Homebrew install
+// to locations that might not be in Node's PATH when launched via PM2/launchd
+const EXTRA_PATHS = [
+  "/usr/local/bin",
+  "/opt/homebrew/bin",
+  "/usr/bin",
+  "/snap/bin",
+  `${os.homedir()}/.docker/bin`,
+].join(path.delimiter);
+
+const EXEC_OPTS_BASE = {
+  encoding: "utf-8",
+  stdio: "pipe",
+  env: {
+    ...process.env,
+    PATH: `${process.env.PATH || ""}${path.delimiter}${EXTRA_PATHS}`,
+  },
+};
+
+/**
+ * Run a shell command with Docker-aware PATH.
+ * Wraps execSync with the enhanced PATH so Docker is always found.
+ */
+function dockerExec(cmd, opts = {}) {
+  return dockerExec(cmd, {
+    ...EXEC_OPTS_BASE,
+    ...opts,
+    env: { ...EXEC_OPTS_BASE.env, ...(opts.env || {}) },
+  });
+}
 
 class ContainerManager extends EventEmitter {
   constructor() {
@@ -19,7 +51,7 @@ class ContainerManager extends EventEmitter {
    */
   isDockerAvailable() {
     try {
-      execSync("docker info", { stdio: "pipe" });
+      dockerExec("docker info", { stdio: "pipe" });
       return true;
     } catch {
       return false;
@@ -32,14 +64,14 @@ class ContainerManager extends EventEmitter {
   async buildImage() {
     try {
       // Check if image exists
-      const images = execSync(`docker images -q ${DEV_IMAGE}`, {
+      const images = dockerExec(`docker images -q ${DEV_IMAGE}`, {
         encoding: "utf-8",
       }).trim();
       if (images) return { exists: true, image: DEV_IMAGE };
 
       // Build from Dockerfile
       const dockerfilePath = path.join(__dirname, "../../docker/Dockerfile.dev");
-      execSync(
+      dockerExec(
         `docker build -t ${DEV_IMAGE} -f "${dockerfilePath}" "${path.join(__dirname, "../../docker")}"`,
         {
           stdio: "inherit",
@@ -70,7 +102,7 @@ class ContainerManager extends EventEmitter {
 
     // Check if container already exists
     try {
-      const existing = execSync(
+      const existing = dockerExec(
         `docker inspect ${containerName} --format '{{.State.Status}}'`,
         { encoding: "utf-8", stdio: "pipe" },
       ).trim();
@@ -114,10 +146,10 @@ class ContainerManager extends EventEmitter {
       .join(" ");
 
     try {
-      execSync(cmd, { encoding: "utf-8", stdio: "pipe" });
+      dockerExec(cmd, { encoding: "utf-8", stdio: "pipe" });
 
       // Start the container
-      execSync(`docker start ${containerName}`, {
+      dockerExec(`docker start ${containerName}`, {
         encoding: "utf-8",
         stdio: "pipe",
       });
@@ -133,14 +165,14 @@ class ContainerManager extends EventEmitter {
         const folder = repo.folder?.trim() || repo.url.split('/').pop().replace(/\.git$/, '');
         const targetPath = `/workspace/${folder}`;
         try {
-          execSync(
+          dockerExec(
             `docker exec ${containerName} git clone "${repo.url}" "${targetPath}"`,
             { encoding: "utf-8", stdio: "pipe", timeout: 120000 },
           );
         } catch {
           // Already cloned or failed — try pulling
           try {
-            execSync(
+            dockerExec(
               `docker exec ${containerName} bash -c "cd ${targetPath} && git pull"`,
               { encoding: "utf-8", stdio: "pipe", timeout: 30000 },
             );
@@ -159,7 +191,7 @@ class ContainerManager extends EventEmitter {
    */
   startContainer(containerName) {
     try {
-      execSync(`docker start ${containerName}`, {
+      dockerExec(`docker start ${containerName}`, {
         encoding: "utf-8",
         stdio: "pipe",
       });
@@ -174,7 +206,7 @@ class ContainerManager extends EventEmitter {
    */
   stopContainer(containerName) {
     try {
-      execSync(`docker stop ${containerName}`, {
+      dockerExec(`docker stop ${containerName}`, {
         encoding: "utf-8",
         stdio: "pipe",
       });
@@ -189,13 +221,13 @@ class ContainerManager extends EventEmitter {
    */
   removeContainer(containerName) {
     try {
-      execSync(`docker rm -f ${containerName}`, {
+      dockerExec(`docker rm -f ${containerName}`, {
         encoding: "utf-8",
         stdio: "pipe",
       });
       // Also remove volumes
       try {
-        execSync(
+        dockerExec(
           `docker volume rm ${containerName}-home ${containerName}-workspace`,
           { encoding: "utf-8", stdio: "pipe" },
         );
@@ -213,7 +245,7 @@ class ContainerManager extends EventEmitter {
    */
   getContainerStatus(containerName) {
     try {
-      const status = execSync(
+      const status = dockerExec(
         `docker inspect ${containerName} --format '{{.State.Status}}'`,
         { encoding: "utf-8", stdio: "pipe" },
       ).trim();
@@ -228,7 +260,7 @@ class ContainerManager extends EventEmitter {
    */
   listContainers() {
     try {
-      const output = execSync(
+      const output = dockerExec(
         `docker ps -a --filter "label=sai.projectId" --format '{{.Names}}||{{.Status}}||{{.Labels}}'`,
         { encoding: "utf-8", stdio: "pipe" },
       ).trim();
@@ -258,7 +290,7 @@ class ContainerManager extends EventEmitter {
    */
   execInContainer(containerName, command, options = {}) {
     try {
-      return execSync(
+      return dockerExec(
         `docker exec ${containerName} bash -c "${command.replace(/"/g, '\\"')}"`,
         {
           encoding: "utf-8",

@@ -73,6 +73,8 @@ class PTYManager extends EventEmitter {
         cwd: spawnCwd,
         env: {
           ...process.env,
+          // Ensure Docker is in PATH on macOS (Docker Desktop, Homebrew)
+          PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin`,
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',
         },

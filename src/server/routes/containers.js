@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { execSync } from "child_process";
+import { execSync as rawExecSync } from "child_process";
+import path from "path";
 import os from "os";
 import { containerManager } from "../containerManager.js";
 
@@ -16,8 +17,12 @@ router.get("/status", (req, res) => {
 
     if (dockerAvailable) {
       try {
-        const images = execSync("docker images -q startupp-ai-ide-dev:latest", {
+        // Use enhanced PATH so Docker is found on macOS (Docker Desktop, Homebrew)
+        const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].join(path.delimiter);
+        const envWithDocker = { ...process.env, PATH: `${process.env.PATH || ""}${path.delimiter}${extraPaths}` };
+        const images = rawExecSync("docker images -q startupp-ai-ide-dev:latest", {
           encoding: "utf-8",
+          env: envWithDocker,
         }).trim();
         imageReady = images.length > 0;
       } catch {

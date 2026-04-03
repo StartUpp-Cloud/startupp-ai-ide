@@ -31,8 +31,10 @@ function run(cmd, ctx) {
   if (ctx.containerName) {
     const dir = ctx.workDir || '/workspace';
     const escaped = cmd.replace(/"/g, '\\"');
+    const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin'].join(':');
     return execSync(`docker exec -w "${dir}" ${ctx.containerName} bash -c "${escaped}"`, {
       encoding: 'utf-8', stdio: 'pipe', timeout: 30000,
+      env: { ...process.env, PATH: `${process.env.PATH || ''}:${extraPaths}` },
     }).trim();
   }
   return execSync(cmd, { cwd: ctx.projectPath, encoding: 'utf-8', stdio: 'pipe' }).trim();
