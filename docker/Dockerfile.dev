@@ -31,6 +31,8 @@ set -g history-limit 50000\n\
 set -g escape-time 10\n\
 set -g focus-events on\n\
 set -g status off\n\
+set -g allow-passthrough on\n\
+set -ga terminal-features ",xterm-256color:hyperlinks"\n\
 ' > /home/dev/.tmux.conf && chown dev:dev /home/dev/.tmux.conf
 
 USER dev
