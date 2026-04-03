@@ -408,6 +408,61 @@ class TerminalServer {
       // Auto-attach the creating client
       this.attachClient(ws, session.sessionId);
 
+      // Replay saved scrollback from a previous session (if any)
+      // This preserves terminal history across PM2 restarts
+      try {
+        const { sessionHistory } = await import('./sessionHistory.js');
+        const fs = await import('fs');
+        const path = await import('path');
+        const { fileURLToPath } = await import('url');
+        const __dirname = path.dirname(fileURLToPath(import.meta.url));
+        const liveDir = path.join(__dirname, '../../data/session-live');
+
+        // Look for live files from previous sessions for this project + role
+        let replayText = null;
+
+        if (fs.existsSync(liveDir)) {
+          const files = fs.readdirSync(liveDir).filter(f => f.endsWith('.txt'));
+          for (const file of files) {
+            try {
+              const content = fs.readFileSync(path.join(liveDir, file), 'utf-8');
+              // Check if this file matches our project + role
+              const matchProject = content.includes(`Project: ${projectId}`);
+              const matchRole = content.includes(`Role: ${role || 'main'}`);
+              if (matchProject && matchRole) {
+                // Extract scrollback (after the header)
+                const headerEnd = content.indexOf('─'.repeat(10));
+                replayText = headerEnd >= 0 ? content.slice(headerEnd).replace(/^─+\n/, '') : content;
+                // Clean up the live file since we're creating a new session
+                try { fs.unlinkSync(path.join(liveDir, file)); } catch {}
+                break;
+              }
+            } catch {}
+          }
+        }
+
+        // If no live file, check session history for the most recent
+        if (!replayText) {
+          const history = sessionHistory.getHistory(projectId, 5);
+          const match = history.find(h => (h.role || 'main') === (role || 'main'));
+          if (match) {
+            const entry = sessionHistory.getScrollback(match.id);
+            if (entry?.scrollback && entry.scrollback.length > 50) {
+              replayText = entry.scrollback;
+            }
+          }
+        }
+
+        // Send saved output as a replay before the session-created message
+        if (replayText) {
+          this.send(ws, {
+            type: 'output',
+            sessionId: session.sessionId,
+            data: `\x1b[90m── Previous session output ──\x1b[0m\r\n${replayText}\r\n\x1b[90m── Session resumed ──\x1b[0m\r\n`,
+          });
+        }
+      } catch {}
+
       this.send(ws, {
         type: 'session-created',
         ...session,
