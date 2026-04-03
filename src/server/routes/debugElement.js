@@ -1,5 +1,6 @@
 import express from "express";
 import { WebSocket } from "ws";
+import { execSync, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -522,6 +523,112 @@ router.post("/full-capture", async (req, res) => {
       error: "Full capture failed",
       message: err.message,
     });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /launch-chrome — Auto-launch Chrome with remote debugging
+// ---------------------------------------------------------------------------
+
+router.post("/launch-chrome", async (req, res) => {
+  const port = req.body?.port || 9222;
+
+  // Check if already running
+  try {
+    const check = await fetch(`http://localhost:${port}/json/version`);
+    if (check.ok) {
+      return res.json({ success: true, message: "Chrome already running with debugging enabled" });
+    }
+  } catch {}
+
+  // Find Chrome binary
+  const platform = os.platform();
+  const candidates = platform === "darwin"
+    ? [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      ]
+    : platform === "win32"
+    ? []
+    : [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+        "/usr/bin/brave-browser",
+        "/usr/bin/microsoft-edge",
+      ];
+
+  // Also try `which` for linux
+  if (platform !== "win32" && platform !== "darwin") {
+    try {
+      const which = execSync("which google-chrome || which chromium || which chromium-browser", {
+        encoding: "utf8", timeout: 3000,
+      }).trim();
+      if (which && !candidates.includes(which)) candidates.unshift(which);
+    } catch {}
+  }
+
+  let chromeBin = null;
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) { chromeBin = c; break; } } catch {}
+  }
+
+  if (!chromeBin) {
+    return res.status(404).json({
+      error: "Chrome/Chromium not found",
+      message: "Install Google Chrome or Chromium and try again",
+      checkedPaths: candidates,
+    });
+  }
+
+  // Launch detached
+  try {
+    const child = spawn(chromeBin, [
+      `--remote-debugging-port=${port}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+    ], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+
+    // Wait briefly and verify
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const verify = await fetch(`http://localhost:${port}/json/version`);
+      if (verify.ok) {
+        return res.json({ success: true, message: `Chrome launched with debugging on port ${port}`, chromeBin });
+      }
+    } catch {}
+
+    res.json({ success: true, message: `Chrome launch initiated (${path.basename(chromeBin)}), may take a moment...`, chromeBin });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to launch Chrome", message: err.message, chromeBin });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /save-screenshot — Save a manually uploaded/pasted screenshot
+// ---------------------------------------------------------------------------
+
+router.post("/save-screenshot", async (req, res) => {
+  const { screenshot } = req.body; // base64 data
+  if (!screenshot) return res.status(400).json({ error: "No screenshot data provided" });
+
+  try {
+    const base64Data = screenshot.replace(/^data:image\/\w+;base64,/, "");
+    const filename = `manual-${Date.now()}.png`;
+    const filepath = path.join(SCREENSHOTS_DIR, filename);
+    fs.writeFileSync(filepath, base64Data, "base64");
+    res.json({ path: filepath, filename });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to save screenshot", message: err.message });
   }
 });
 

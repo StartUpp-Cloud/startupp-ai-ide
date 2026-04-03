@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Camera, Monitor, MousePointer, AlertCircle, Copy, Check,
   Paperclip, RefreshCw, Loader2, ExternalLink, XCircle, Terminal, Image,
+  Upload, Zap, Chrome,
 } from 'lucide-react';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -76,6 +77,14 @@ export default function DebugElement() {
   const [inspecting, setInspecting] = useState(false);
   const [selectedElement, setSelectedElement] = useState(null);
   const [clickMarker, setClickMarker] = useState(null); // { x, y } relative to displayed image (%)
+
+  // Manual capture mode
+  const [manualMode, setManualMode] = useState(false);
+  const [manualScreenshot, setManualScreenshot] = useState(null); // data URL
+  const [manualUrl, setManualUrl] = useState('');
+  const [manualErrors, setManualErrors] = useState('');
+  const [launchingChrome, setLaunchingChrome] = useState(false);
+  const [launchMessage, setLaunchMessage] = useState(null);
 
   // UI
   const [copied, setCopied] = useState(false);
@@ -257,6 +266,121 @@ export default function DebugElement() {
     navigate('/');
   }, [pageUrl, screenshotPath, screenshot, selectedElement, consoleErrors, navigate]);
 
+  // ── Launch Chrome ──────────────────────────────────────────────────────
+
+  const launchChrome = useCallback(async () => {
+    setLaunchingChrome(true);
+    setLaunchMessage(null);
+    try {
+      const res = await fetch('/api/debug/launch-chrome', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setLaunchMessage({ type: 'success', text: data.message });
+        // Re-check connection after a moment
+        setTimeout(checkConnection, 2000);
+      } else {
+        setLaunchMessage({ type: 'error', text: data.message || data.error });
+      }
+    } catch (err) {
+      setLaunchMessage({ type: 'error', text: err.message });
+    } finally {
+      setLaunchingChrome(false);
+    }
+  }, [checkConnection]);
+
+  // ── Manual capture helpers ────────────────────────────────────────────
+
+  const handleManualPaste = useCallback((e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        const reader = new FileReader();
+        reader.onload = (ev) => setManualScreenshot(ev.target.result);
+        reader.readAsDataURL(file);
+        return;
+      }
+    }
+  }, []);
+
+  const handleManualDrop = useCallback((e) => {
+    e.preventDefault();
+    const file = e.dataTransfer?.files?.[0];
+    if (file?.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (ev) => setManualScreenshot(ev.target.result);
+      reader.readAsDataURL(file);
+    }
+  }, []);
+
+  const handleManualFileSelect = useCallback((e) => {
+    const file = e.target.files?.[0];
+    if (file?.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (ev) => setManualScreenshot(ev.target.result);
+      reader.readAsDataURL(file);
+    }
+  }, []);
+
+  const handleManualAttach = useCallback(async () => {
+    // Save screenshot server-side if present
+    let savedPath = null;
+    if (manualScreenshot) {
+      try {
+        const res = await fetch('/api/debug/save-screenshot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ screenshot: manualScreenshot }),
+        });
+        const data = await res.json();
+        savedPath = data.path;
+      } catch {}
+    }
+
+    const errors = manualErrors.trim()
+      ? manualErrors.trim().split('\n').map(line => ({ text: line }))
+      : [];
+
+    const payload = {
+      type: 'debug-capture',
+      timestamp: new Date().toISOString(),
+      url: manualUrl,
+      screenshotPath: savedPath,
+      screenshot: manualScreenshot,
+      element: null,
+      consoleErrors: errors,
+    };
+
+    if (window.opener) {
+      window.opener.postMessage({ action: 'debug-capture', payload }, '*');
+    }
+    localStorage.setItem('debug-capture', JSON.stringify(payload));
+    navigate('/');
+  }, [manualScreenshot, manualUrl, manualErrors, navigate]);
+
+  const handleManualCopy = useCallback(async () => {
+    const errors = manualErrors.trim()
+      ? manualErrors.trim().split('\n').map(line => ({ text: line }))
+      : [];
+    const text = formatCopyText({
+      url: manualUrl,
+      screenshotPath: null,
+      element: null,
+      consoleErrors: errors,
+    });
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  }, [manualUrl, manualErrors]);
+
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
@@ -319,37 +443,216 @@ export default function DebugElement() {
       </header>
 
       {/* ── Disconnected state ── */}
-      {connectionStatus === CONNECTION_STATUS.disconnected && (
+      {connectionStatus === CONNECTION_STATUS.disconnected && !manualMode && (
         <div className="flex-1 flex items-center justify-center p-8">
-          <div className="max-w-md text-center space-y-5">
-            <div className="w-16 h-16 mx-auto rounded-2xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
-              <XCircle className="w-8 h-8 text-rose-400" />
+          <div className="max-w-lg text-center space-y-6">
+            <div className="w-16 h-16 mx-auto rounded-2xl bg-surface-800 border border-surface-700 flex items-center justify-center">
+              <Monitor className="w-8 h-8 text-surface-400" />
             </div>
             <div>
               <h2 className="font-display text-xl font-semibold text-white mb-2">
-                Chrome Not Connected
+                Debug Element
               </h2>
               <p className="text-sm text-surface-400 leading-relaxed">
-                Launch Chrome with remote debugging enabled to use this tool.
-                Run the following command in your terminal:
+                Capture screenshots, inspect elements, and collect console errors from your app.
               </p>
             </div>
-            <div className="bg-surface-900 border border-surface-700 rounded-lg p-4 text-left">
-              <div className="flex items-center gap-2 mb-2">
-                <Terminal className="w-3.5 h-3.5 text-surface-500" />
-                <span className="text-[11px] font-medium text-surface-500 uppercase tracking-wider">Terminal</span>
+
+            {/* Option 1: Auto-launch Chrome */}
+            <div className="bg-surface-900 border border-surface-700 rounded-lg p-5 text-left space-y-3">
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 text-primary-400" />
+                <span className="text-sm font-medium text-surface-200">Auto-connect to Chrome</span>
               </div>
-              <code className="text-sm font-mono text-primary-400 leading-relaxed">
-                ./scripts/launch-chrome-debug.sh
-              </code>
+              <p className="text-xs text-surface-400">
+                Launches Chrome with remote debugging for live element inspection and screenshots.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={launchChrome}
+                  disabled={launchingChrome}
+                  className="btn-primary !px-4 !py-2 !text-sm"
+                >
+                  {launchingChrome ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Launching...</>
+                  ) : (
+                    <><Monitor className="w-4 h-4" /> Launch Chrome</>
+                  )}
+                </button>
+                <button
+                  onClick={checkConnection}
+                  className="btn-ghost !px-3 !py-2 !text-sm"
+                  title="Check if Chrome is already running with debugging"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Retry
+                </button>
+              </div>
+              {launchMessage && (
+                <p className={`text-xs ${launchMessage.type === 'error' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                  {launchMessage.text}
+                </p>
+              )}
             </div>
-            <button
-              onClick={checkConnection}
-              className="btn-primary !px-6"
-            >
-              <RefreshCw className="w-4 h-4" />
-              Retry Connection
-            </button>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-surface-700" />
+              <span className="text-xs text-surface-500 font-medium">or</span>
+              <div className="flex-1 h-px bg-surface-700" />
+            </div>
+
+            {/* Option 2: Manual capture */}
+            <div className="bg-surface-900 border border-surface-700 rounded-lg p-5 text-left space-y-3">
+              <div className="flex items-center gap-2">
+                <Upload className="w-4 h-4 text-cyan-400" />
+                <span className="text-sm font-medium text-surface-200">Manual Capture</span>
+              </div>
+              <p className="text-xs text-surface-400">
+                Paste a screenshot and console errors manually — no Chrome setup required.
+              </p>
+              <button
+                onClick={() => setManualMode(true)}
+                className="btn-secondary !px-4 !py-2 !text-sm"
+              >
+                <Camera className="w-4 h-4" />
+                Open Manual Capture
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Manual capture mode ── */}
+      {manualMode && connectionStatus !== CONNECTION_STATUS.connected && (
+        <div className="flex-1 flex min-h-0">
+          {/* Left: screenshot drop zone */}
+          <div
+            className="flex-1 min-w-0 flex flex-col border-r border-surface-700/60"
+            onPaste={handleManualPaste}
+            onDrop={handleManualDrop}
+            onDragOver={(e) => e.preventDefault()}
+          >
+            <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 bg-surface-900/40 border-b border-surface-700/40">
+              <div className="flex items-center gap-2">
+                <Camera className="w-3.5 h-3.5 text-surface-500" />
+                <span className="text-xs font-medium text-surface-400">Screenshot</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setManualMode(false)}
+                  className="btn-ghost !px-2 !py-1 !text-xs"
+                >
+                  <ArrowLeft className="w-3 h-3" />
+                  Back
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-auto p-4 flex items-center justify-center">
+              {manualScreenshot ? (
+                <div className="relative inline-block">
+                  <img
+                    src={manualScreenshot}
+                    alt="Manual screenshot"
+                    className="max-w-full h-auto rounded-lg border border-surface-700/60 shadow-card"
+                    draggable={false}
+                  />
+                  <button
+                    onClick={() => setManualScreenshot(null)}
+                    className="absolute top-2 right-2 p-1 bg-surface-900/80 border border-surface-700 rounded-lg hover:bg-surface-800 transition-colors"
+                  >
+                    <X className="w-4 h-4 text-surface-400" />
+                  </button>
+                </div>
+              ) : (
+                <div className="text-center space-y-4 max-w-sm">
+                  <div className="w-20 h-20 mx-auto rounded-2xl bg-surface-800 border-2 border-dashed border-surface-600 flex items-center justify-center">
+                    <Upload className="w-8 h-8 text-surface-500" />
+                  </div>
+                  <div>
+                    <p className="text-sm text-surface-300 font-medium mb-1">
+                      Paste or drop a screenshot
+                    </p>
+                    <p className="text-xs text-surface-500">
+                      Press <kbd className="px-1.5 py-0.5 bg-surface-800 border border-surface-600 rounded text-[10px] font-mono">Ctrl+V</kbd> to paste from clipboard, or drag an image file here
+                    </p>
+                  </div>
+                  <label className="btn-secondary !px-4 !py-2 !text-sm cursor-pointer inline-flex items-center gap-2">
+                    <Image className="w-4 h-4" />
+                    Choose File
+                    <input type="file" accept="image/*" className="hidden" onChange={handleManualFileSelect} />
+                  </label>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right: URL + errors + actions */}
+          <div className="w-[380px] flex-shrink-0 flex flex-col bg-surface-900/30 overflow-y-auto">
+            <div className="p-4 space-y-5">
+              {/* URL */}
+              <section>
+                <label className="text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">
+                  Page URL
+                </label>
+                <input
+                  type="text"
+                  value={manualUrl}
+                  onChange={(e) => setManualUrl(e.target.value)}
+                  placeholder="http://localhost:3000/page"
+                  className="w-full px-3 py-2 text-xs font-mono bg-surface-850 border border-surface-700 rounded-lg text-surface-200 placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
+                />
+              </section>
+
+              <div className="border-t border-surface-700/60" />
+
+              {/* Console errors */}
+              <section>
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Terminal className="w-3.5 h-3.5 text-rose-400" />
+                  <span className="text-[10px] text-surface-500 uppercase tracking-wider">
+                    Console Errors
+                  </span>
+                </div>
+                <textarea
+                  value={manualErrors}
+                  onChange={(e) => setManualErrors(e.target.value)}
+                  rows={8}
+                  placeholder="Paste console errors here (one per line)..."
+                  className="w-full px-3 py-2 text-[11px] font-mono bg-surface-850 border border-surface-700 rounded-lg text-rose-300 placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none resize-none leading-relaxed"
+                />
+              </section>
+
+              <div className="border-t border-surface-700/60" />
+
+              {/* Actions */}
+              <section>
+                <h3 className="text-xs font-semibold text-surface-300 uppercase tracking-wider mb-3">
+                  Actions
+                </h3>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={handleManualCopy}
+                    className="btn-secondary !text-xs !px-3 !py-2"
+                  >
+                    {copied ? (
+                      <><Check className="w-3.5 h-3.5 text-emerald-400" /><span className="text-emerald-300">Copied!</span></>
+                    ) : (
+                      <><Copy className="w-3.5 h-3.5" />Copy All</>
+                    )}
+                  </button>
+                  <button
+                    onClick={handleManualAttach}
+                    disabled={!manualScreenshot && !manualErrors.trim()}
+                    className="btn-primary !text-xs !px-3 !py-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Paperclip className="w-3.5 h-3.5" />
+                    Attach to IDE
+                  </button>
+                </div>
+              </section>
+            </div>
           </div>
         </div>
       )}
