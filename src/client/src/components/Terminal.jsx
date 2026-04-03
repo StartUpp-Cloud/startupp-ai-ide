@@ -284,8 +284,13 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         }, 50);
         break;
 
-      case 'output':
-        xtermRef.current?.write(msg.data);
+      case 'output': {
+        // Filter out DA/tmux capability responses from output
+        let outputData = msg.data;
+        if (outputData) {
+          outputData = outputData.replace(/\x1b\[\??[\d;]*c/g, '').replace(/(?:^|\n)[\d;]+c/g, '');
+        }
+        if (outputData) xtermRef.current?.write(outputData);
 
         // Dispatch event for LiveAnalysisPanel to consume (main terminal only)
         if (!isUtility) {
@@ -328,6 +333,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           }
         }
         break;
+      }
 
       case 'exit':
         xtermRef.current?.writeln(`\n\x1b[33m\u25CF Session exited (code: ${msg.exitCode})\x1b[0m`);
