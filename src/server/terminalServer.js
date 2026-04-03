@@ -423,21 +423,35 @@ class TerminalServer {
 
         if (fs.existsSync(liveDir)) {
           const files = fs.readdirSync(liveDir).filter(f => f.endsWith('.txt'));
+          // Find the LARGEST matching file (most content = most useful session)
+          let bestFile = null;
+          let bestSize = 0;
+          const matchingFiles = [];
+
           for (const file of files) {
             try {
-              const content = fs.readFileSync(path.join(liveDir, file), 'utf-8');
-              // Check if this file matches our project + role
+              const filePath = path.join(liveDir, file);
+              const content = fs.readFileSync(filePath, 'utf-8');
               const matchProject = content.includes(`Project: ${projectId}`);
               const matchRole = content.includes(`Role: ${role || 'main'}`);
               if (matchProject && matchRole) {
-                // Extract scrollback (after the header)
-                const headerEnd = content.indexOf('─'.repeat(10));
-                replayText = headerEnd >= 0 ? content.slice(headerEnd).replace(/^─+\n/, '') : content;
-                // Clean up the live file since we're creating a new session
-                try { fs.unlinkSync(path.join(liveDir, file)); } catch {}
-                break;
+                matchingFiles.push(filePath);
+                if (content.length > bestSize) {
+                  bestSize = content.length;
+                  bestFile = { filePath, content };
+                }
               }
             } catch {}
+          }
+
+          if (bestFile && bestSize > 300) { // Skip tiny files (just a prompt)
+            const headerEnd = bestFile.content.indexOf('─'.repeat(10));
+            replayText = headerEnd >= 0 ? bestFile.content.slice(headerEnd).replace(/^─+\n/, '') : bestFile.content;
+          }
+
+          // Clean up ALL matching live files
+          for (const fp of matchingFiles) {
+            try { fs.unlinkSync(fp); } catch {}
           }
         }
 
