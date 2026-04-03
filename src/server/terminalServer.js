@@ -272,6 +272,10 @@ class TerminalServer {
         this.handleGetSession(ws, payload);
         break;
 
+      case 'get-project-sessions':
+        this.handleGetProjectSessions(ws, payload);
+        break;
+
       case 'get-history':
         this.handleGetHistory(ws, payload);
         break;
@@ -947,6 +951,15 @@ class TerminalServer {
    */
   handleOrchestratorSkip(ws, { executionId }) {
     orchestrator.skipStep(executionId);
+  }
+
+  /**
+   * Get active sessions for a specific project
+   */
+  handleGetProjectSessions(ws, { projectId }) {
+    if (!projectId) { this.sendError(ws, 'projectId is required'); return; }
+    const sessions = ptyManager.getProjectSessions(projectId);
+    this.send(ws, { type: 'project-sessions', projectId, sessions });
   }
 
   /**

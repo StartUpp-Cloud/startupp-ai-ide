@@ -348,6 +348,27 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         ));
         break;
 
+      case 'project-sessions': {
+        // Server tells us which sessions exist for the requested project
+        const activeSessions = (msg.sessions || []).filter(s => s.status === 'active');
+
+        if (activeSessions.length > 0) {
+          // Reattach to the most recent active session
+          const target = activeSessions[activeSessions.length - 1];
+          wsRef.current?.send(JSON.stringify({ type: 'attach', sessionId: target.id }));
+        } else {
+          // No session exists for this project — create one
+          wsRef.current?.send(JSON.stringify({
+            type: 'create-session',
+            projectId: msg.projectId,
+            cliTool: null,
+            cols: xtermRef.current?.cols || 120,
+            rows: xtermRef.current?.rows || 30,
+          }));
+        }
+        break;
+      }
+
       case 'error':
         xtermRef.current?.writeln(`\x1b[31m\u2717 Error: ${msg.error}\x1b[0m`);
         break;
@@ -436,41 +457,28 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     }
   }, [onSessionChange, autoResponderEnabled, isUtility]);
 
-  // Track previous projectId to detect project switches
-  const prevProjectIdRef = useRef(projectId);
+  // Track previous projectId to detect switches
+  const prevProjectIdRef = useRef(null);
 
-  // Create or switch session when projectId changes or on connect
+  // When projectId changes or we connect: ask the SERVER for existing sessions,
+  // then attach to one or create a new one. This is the single source of truth.
   useEffect(() => {
-    if (!connected || !sessionsLoaded || !wsRef.current || !projectId) return;
+    if (!connected || !wsRef.current || !projectId) return;
 
     const projectChanged = prevProjectIdRef.current !== projectId;
     prevProjectIdRef.current = projectId;
 
-    // On project switch: always start fresh
-    if (projectChanged || !sessionIdRef.current) {
+    // If project changed, clear local state (but DON'T kill the old session — it keeps running)
+    if (projectChanged) {
       setSessionId(null);
       sessionIdRef.current = null;
-
-      // Check if there's already a session for this project from sessions-list
-      const existing = projectSessionsRef.current.get(projectId);
-
-      if (existing && !projectChanged) {
-        // Page refresh with existing session — reattach
-        xtermRef.current?.reset();
-        wsRef.current.send(JSON.stringify({ type: 'attach', sessionId: existing }));
-      } else {
-        // New project or project switch — create fresh session
-        xtermRef.current?.reset();
-        wsRef.current.send(JSON.stringify({
-          type: 'create-session',
-          projectId,
-          cliTool: null,
-          cols: xtermRef.current?.cols || 120,
-          rows: xtermRef.current?.rows || 30,
-        }));
-      }
     }
-  }, [projectId, connected, sessionsLoaded, isUtility]);
+
+    // Ask the server: "what sessions exist for this project?"
+    // The response handler will attach or create as needed.
+    xtermRef.current?.reset();
+    wsRef.current.send(JSON.stringify({ type: 'get-project-sessions', projectId }));
+  }, [projectId, connected]);
 
   // Create new session (manual)
   const createSession = useCallback(() => {
