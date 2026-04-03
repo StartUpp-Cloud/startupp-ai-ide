@@ -252,11 +252,14 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setSessionId(msg.sessionId);
         sessionIdRef.current = msg.sessionId; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.sessionId);
-        // Don't reset — already cleared in project-sessions handler.
-        setTimeout(() => {
+        // Fit and focus after render settles
+        requestAnimationFrame(() => {
           fitAddonRef.current?.fit();
           xtermRef.current?.focus();
-        }, 50);
+          // Double-focus: xterm sometimes needs the textarea focused directly
+          const textarea = terminalRef.current?.querySelector('.xterm-helper-textarea');
+          if (textarea) textarea.focus();
+        });
         setSessions(prev => {
           const exists = prev.some(s => s.id === msg.sessionId);
           if (exists) return prev;
@@ -845,9 +848,17 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       {/* Terminal container */}
       <div
         ref={terminalRef}
-        className="flex-1 p-2"
+        className="flex-1 p-2 cursor-text"
         style={{ minHeight: isUtility ? '120px' : '300px' }}
-        onClick={() => xtermRef.current?.focus()}
+        onMouseDown={(e) => {
+          // Aggressive focus: find xterm's textarea and focus it directly
+          const textarea = terminalRef.current?.querySelector('.xterm-helper-textarea');
+          if (textarea) {
+            textarea.focus();
+          } else {
+            xtermRef.current?.focus();
+          }
+        }}
       />
 
       {/* LLM Settings Panel */}
