@@ -334,7 +334,7 @@ class TerminalServer {
   /**
    * Create a new PTY session
    */
-  async handleCreateSession(ws, { projectId, cliTool, cols, rows, cwd }) {
+  async handleCreateSession(ws, { projectId, cliTool, cols, rows, cwd, role }) {
     try {
       // If projectId provided, use project's folder path as cwd
       let workingDir = cwd;
@@ -362,7 +362,8 @@ class TerminalServer {
       const session = ptyManager.createSession({
         projectId,
         cliTool,
-        containerName,  // Passed through to ptyManager for container-based sessions
+        containerName,
+        role: role || 'main',
         cols: cols || 120,
         rows: rows || 30,
         cwd: workingDir,
@@ -956,10 +957,12 @@ class TerminalServer {
   /**
    * Get active sessions for a specific project
    */
-  handleGetProjectSessions(ws, { projectId }) {
+  handleGetProjectSessions(ws, { projectId, role }) {
     if (!projectId) { this.sendError(ws, 'projectId is required'); return; }
-    const sessions = ptyManager.getProjectSessions(projectId);
-    this.send(ws, { type: 'project-sessions', projectId, sessions });
+    let sessions = ptyManager.getProjectSessions(projectId);
+    // Filter by role if specified (main vs utility)
+    if (role) sessions = sessions.filter(s => (s.role || 'main') === role);
+    this.send(ws, { type: 'project-sessions', projectId, role, sessions });
   }
 
   /**

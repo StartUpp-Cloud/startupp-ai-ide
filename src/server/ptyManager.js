@@ -41,6 +41,7 @@ class PTYManager extends EventEmitter {
       projectId = null,
       cliTool = null,
       containerName = null,
+      role = 'main', // 'main' or 'utility'
       cols = 120,
       rows = 30,
       cwd = process.env.HOME || os.homedir(),
@@ -81,6 +82,7 @@ class PTYManager extends EventEmitter {
         projectId,
         cliTool,
         containerName,
+        role,
         ptyProcess,
         status: 'active',
         name: null, // LLM-generated descriptive name, set after first activity
@@ -128,6 +130,7 @@ class PTYManager extends EventEmitter {
         projectId,
         cliTool,
         containerName,
+        role,
         status: 'active',
         createdAt: session.createdAt,
       };
@@ -180,6 +183,7 @@ class PTYManager extends EventEmitter {
       projectId: session.projectId,
       cliTool: session.cliTool,
       containerName: session.containerName,
+      role: session.role || 'main',
       status: session.status,
       name: session.name,
       createdAt: session.createdAt,
@@ -218,6 +222,7 @@ class PTYManager extends EventEmitter {
       projectId: session.projectId,
       cliTool: session.cliTool,
       containerName: session.containerName,
+      role: session.role || 'main',
       status: session.status,
       name: session.name,
       createdAt: session.createdAt,

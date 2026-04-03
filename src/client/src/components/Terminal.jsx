@@ -349,18 +349,19 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         break;
 
       case 'project-sessions': {
-        // Server tells us which sessions exist for the requested project
+        // Server returns sessions filtered by project + role
         const activeSessions = (msg.sessions || []).filter(s => s.status === 'active');
 
         if (activeSessions.length > 0) {
-          // Reattach to the most recent active session
+          // Reattach to the most recent active session for this role
           const target = activeSessions[activeSessions.length - 1];
           wsRef.current?.send(JSON.stringify({ type: 'attach', sessionId: target.id }));
         } else {
-          // No session exists for this project — create one
+          // No session for this project + role — create one
           wsRef.current?.send(JSON.stringify({
             type: 'create-session',
             projectId: msg.projectId,
+            role: msg.role || (isUtility ? 'utility' : 'main'),
             cliTool: null,
             cols: xtermRef.current?.cols || 120,
             rows: xtermRef.current?.rows || 30,
@@ -474,10 +475,10 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       sessionIdRef.current = null;
     }
 
-    // Ask the server: "what sessions exist for this project?"
-    // The response handler will attach or create as needed.
+    // Ask the server: "what sessions exist for this project + role?"
+    const role = isUtility ? 'utility' : 'main';
     xtermRef.current?.reset();
-    wsRef.current.send(JSON.stringify({ type: 'get-project-sessions', projectId }));
+    wsRef.current.send(JSON.stringify({ type: 'get-project-sessions', projectId, role }));
   }, [projectId, connected]);
 
   // Create new session (manual)
@@ -492,11 +493,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     wsRef.current.send(JSON.stringify({
       type: 'create-session',
       projectId,
+      role: isUtility ? 'utility' : 'main',
       cliTool: selectedCLI === 'shell' ? null : selectedCLI,
       cols: xtermRef.current?.cols || 120,
       rows: xtermRef.current?.rows || 30,
     }));
-  }, [projectId, selectedCLI]);
+  }, [projectId, selectedCLI, isUtility]);
 
   // Kill current session
   const killSession = useCallback(() => {
