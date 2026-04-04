@@ -385,6 +385,22 @@ class TerminalServer {
         break;
       }
 
+      case 'chat-approve-plan': {
+        const { agentGateway } = await import('./agentGateway.js');
+        agentGateway.executePlan({
+          projectId: payload.projectId,
+          steps: payload.steps,
+          broadcastFn: (data) => this.broadcast(data),
+        }).catch(err => {
+          console.error('Plan execution error:', err);
+          this.broadcast({
+            type: 'chat-message',
+            message: { id: Date.now().toString(), projectId: payload.projectId, role: 'error', content: `Plan failed: ${err.message}`, createdAt: new Date().toISOString() },
+          });
+        });
+        break;
+      }
+
       case 'chat-stop': {
         const { agentGateway } = await import('./agentGateway.js');
         agentGateway._abort(payload.projectId);

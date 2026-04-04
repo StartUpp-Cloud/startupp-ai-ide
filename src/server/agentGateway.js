@@ -162,6 +162,25 @@ class AgentGateway extends EventEmitter {
 
           case 'done':
             this._addAgentMessage(projectId, action.content, broadcastFn);
+            // Extract context memory for future sessions
+            try {
+              const recentOutput = [];
+              for (const [, entry] of agentShellPool.sessions) {
+                if (entry.projectId === projectId) {
+                  recentOutput.push(agentShellPool.getRecentOutput(entry.sessionId));
+                }
+              }
+              const contextResult = await llmProvider.generateResponse(
+                `Extract key technical context from this completed task that would be useful for future tasks. Include: file paths changed, architecture decisions, bugs found, patterns used. Be concise (2-3 paragraphs max).\n\nTask: ${content}\n\nOutput: ${recentOutput.join('\n').slice(-3000)}`,
+                { systemPrompt: 'You extract key technical context from completed coding tasks.', maxTokens: 300, temperature: 0.1 }
+              );
+              chatStore.addMessage({
+                projectId,
+                role: 'system',
+                content: contextResult.response,
+                metadata: { isContextMemory: true },
+              });
+            } catch {}
             this._finish(projectId, broadcastFn);
             return;
 
@@ -177,6 +196,47 @@ class AgentGateway extends EventEmitter {
       }
     } catch (error) {
       this._addErrorMessage(projectId, `Agent error: ${error.message}`, broadcastFn);
+    } finally {
+      this._finish(projectId, broadcastFn);
+    }
+  }
+
+  /**
+   * Execute an approved plan step by step.
+   */
+  async executePlan({ projectId, steps, broadcastFn }) {
+    this._abort(projectId);
+    const ctx = { aborted: false };
+    this._running.set(projectId, ctx);
+
+    try {
+      broadcastFn({ type: 'agent-status', projectId, busy: true });
+
+      for (let i = 0; i < steps.length && !ctx.aborted; i++) {
+        const step = steps[i];
+        const tasks = steps.map((s, j) => ({
+          title: s.title,
+          status: j < i ? 'done' : j === i ? 'running' : 'pending',
+        }));
+        this._addProgressMessage(projectId, `Step ${i + 1}/${steps.length}: ${step.title}`, broadcastFn, tasks);
+
+        // Execute each step using handleTask in agent mode
+        await this.handleTask({
+          projectId,
+          content: step.prompt,
+          mode: 'agent',
+          broadcastFn,
+        });
+
+        if (ctx.aborted) break;
+      }
+
+      if (!ctx.aborted) {
+        const tasks = steps.map(s => ({ title: s.title, status: 'done' }));
+        this._addAgentMessage(projectId, 'Plan completed successfully.', broadcastFn, { tasks });
+      }
+    } catch (error) {
+      this._addErrorMessage(projectId, `Plan execution failed: ${error.message}`, broadcastFn);
     } finally {
       this._finish(projectId, broadcastFn);
     }
