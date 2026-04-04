@@ -152,6 +152,24 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
     }
   };
 
+  const saveGitHubConfig = async (updates) => {
+    try {
+      setSaving(true);
+      const res = await fetch(`${API_BASE}/llm/github/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      await res.json();
+      await loadSettings();
+      loadHealth();
+    } catch (error) {
+      console.error('Failed to save GitHub config:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const testConnection = async () => {
     try {
       setTesting(true);
@@ -966,9 +984,9 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                   <div>
                     <label className="block text-sm font-medium text-surface-300 mb-2">GitHub Token (PAT)</label>
                     <input
-                      type={showKey?.github ? 'text' : 'password'}
+                      type="password"
                       value={settings.github?.apiKey || ''}
-                      onChange={(e) => handleSettingChange('github', { ...settings.github, apiKey: e.target.value })}
+                      onChange={(e) => saveGitHubConfig({ apiKey: e.target.value })}
                       placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
                       className="w-full px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm font-mono placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
                     />
@@ -981,7 +999,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                     <label className="block text-sm font-medium text-surface-300 mb-2">Model</label>
                     <select
                       value={settings.github?.model || 'openai/gpt-4o-mini'}
-                      onChange={(e) => handleSettingChange('github', { ...settings.github, model: e.target.value })}
+                      onChange={(e) => saveGitHubConfig({ model: e.target.value })}
                       className="w-full px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
                     >
                       <option value="openai/gpt-4o-mini">GPT-4o Mini (Fast, recommended)</option>
@@ -998,7 +1016,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                     <input
                       type="text"
                       value={settings.github?.endpoint || 'https://models.github.ai/inference'}
-                      onChange={(e) => handleSettingChange('github', { ...settings.github, endpoint: e.target.value })}
+                      onChange={(e) => saveGitHubConfig({ endpoint: e.target.value })}
                       className="w-full px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm font-mono placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
                     />
                   </div>
