@@ -30,6 +30,12 @@ const DEFAULT_LLM_SETTINGS = {
     apiKey: '', // User must provide
     timeout: 60000, // DeepSeek can be slower
   },
+  github: {
+    endpoint: 'https://models.github.ai/inference',
+    model: 'openai/gpt-4o-mini', // Free with Copilot subscription. Options: openai/gpt-4o-mini, openai/gpt-4o, meta-llama/Llama-4-Scout-17B-16E-Instruct
+    apiKey: '', // GitHub Personal Access Token (PAT) with copilot scope
+    timeout: 30000,
+  },
   // When to use LLM
   useForLowConfidence: true,
   confidenceThreshold: 0.5, // Use LLM when smart engine confidence is below this
@@ -185,10 +191,11 @@ class LLMProvider extends EventEmitter {
     // Decrypt API keys loaded from disk
     if (this.settings.openai?.apiKey) this.settings.openai.apiKey = decrypt(this.settings.openai.apiKey);
     if (this.settings.deepseek?.apiKey) this.settings.deepseek.apiKey = decrypt(this.settings.deepseek.apiKey);
+    if (this.settings.github?.apiKey) this.settings.github.apiKey = decrypt(this.settings.github.apiKey);
 
-    // Check if Ollama is available
-    if (this.settings.enabled && this.settings.provider === 'ollama') {
-      await this.checkOllamaHealth();
+    // Check if provider is available
+    if (this.settings.enabled) {
+      await this.checkHealth();
     }
 
     console.log(`LLM Provider initialized (enabled: ${this.settings.enabled}, provider: ${this.settings.provider})`);
@@ -202,6 +209,7 @@ class LLMProvider extends EventEmitter {
     // Mask API keys — show only last 4 chars for identification
     if (s.openai?.apiKey) s.openai.apiKey = s.openai.apiKey.length > 4 ? '••••' + s.openai.apiKey.slice(-4) : s.openai.apiKey;
     if (s.deepseek?.apiKey) s.deepseek.apiKey = s.deepseek.apiKey.length > 4 ? '••••' + s.deepseek.apiKey.slice(-4) : s.deepseek.apiKey;
+    if (s.github?.apiKey) s.github.apiKey = s.github.apiKey.length > 4 ? '••••' + s.github.apiKey.slice(-4) : s.github.apiKey;
     return s;
   }
 
@@ -217,12 +225,14 @@ class LLMProvider extends EventEmitter {
       ollama: { ...this.settings.ollama, ...updates.ollama },
       openai: { ...this.settings.openai, ...updates.openai },
       deepseek: { ...this.settings.deepseek, ...updates.deepseek },
+      github: { ...this.settings.github, ...updates.github },
     };
 
     // Write encrypted copy to disk — never store plaintext API keys in db.json
     const toSave = JSON.parse(JSON.stringify(this.settings));
     if (toSave.openai?.apiKey) toSave.openai.apiKey = encrypt(toSave.openai.apiKey);
     if (toSave.deepseek?.apiKey) toSave.deepseek.apiKey = encrypt(toSave.deepseek.apiKey);
+    if (toSave.github?.apiKey) toSave.github.apiKey = encrypt(toSave.github.apiKey);
     db.data.llmSettings = toSave;
     await db.write();
 
@@ -292,6 +302,8 @@ class LLMProvider extends EventEmitter {
         return this.generateOpenAIResponse(prompt, context);
       case 'deepseek':
         return this.generateDeepSeekResponse(prompt, context);
+      case 'github':
+        return this.generateGitHubResponse(prompt, context);
       default:
         throw new Error(`Unknown LLM provider: ${provider}`);
     }
@@ -524,6 +536,70 @@ class LLMProvider extends EventEmitter {
   }
 
   /**
+   * Generate response using GitHub Models API (free with Copilot subscription).
+   * Uses the OpenAI-compatible chat completions endpoint.
+   */
+  async generateGitHubResponse(prompt, context) {
+    const { endpoint, model, apiKey, timeout } = this.settings.github;
+
+    if (!apiKey) {
+      throw new Error('GitHub token not configured. Go to LLM Settings and add a GitHub PAT with "copilot" scope.');
+    }
+
+    const systemPrompt = context.systemPrompt || this.buildSystemPrompt(context);
+    const userPrompt = context.systemPrompt ? prompt : this.buildUserPrompt(prompt, context);
+    const maxTokens = context.maxTokens || this.settings.maxTokens;
+    const temperature = context.temperature ?? this.settings.temperature;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), maxTokens > 1000 ? timeout * 3 : timeout);
+
+    try {
+      const response = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: maxTokens,
+          temperature,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: { message: `HTTP ${response.status}` } }));
+        throw new Error(`GitHub Models error: ${error.error?.message || 'Unknown error'}`);
+      }
+
+      const data = await response.json();
+      const rawContent = data.choices[0]?.message?.content || '';
+      const generatedResponse = context.systemPrompt ? rawContent.trim() : this.cleanResponse(rawContent);
+
+      return {
+        response: generatedResponse,
+        provider: 'github',
+        model,
+        tokensUsed: data.usage?.total_tokens,
+      };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('GitHub Models request timed out');
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Build system prompt with context
    */
   buildSystemPrompt(context) {
@@ -733,9 +809,51 @@ class LLMProvider extends EventEmitter {
         return this.checkOpenAIHealth();
       case 'deepseek':
         return this.checkDeepSeekHealth();
+      case 'github':
+        return this.checkGitHubHealth();
       default:
         this.available = false;
         return { available: false, error: `Unknown provider: ${provider}` };
+    }
+  }
+
+  /**
+   * Check if GitHub Models API is available
+   */
+  async checkGitHubHealth() {
+    const { endpoint, apiKey } = this.settings.github;
+
+    if (!apiKey) {
+      this.available = false;
+      return { available: false, error: 'GitHub token not configured' };
+    }
+
+    try {
+      const response = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.settings.github.model,
+          messages: [{ role: 'user', content: 'Hi' }],
+          max_tokens: 5,
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (response.ok) {
+        this.available = true;
+        return { available: true, provider: 'github', model: this.settings.github.model };
+      }
+
+      const error = await response.json().catch(() => ({}));
+      this.available = false;
+      return { available: false, error: error.error?.message || `HTTP ${response.status}` };
+    } catch (error) {
+      this.available = false;
+      return { available: false, error: error.message };
     }
   }
 

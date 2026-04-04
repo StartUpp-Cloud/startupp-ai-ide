@@ -96,8 +96,9 @@ class AgentGateway extends EventEmitter {
     switch (tool) {
       case 'claude': {
         // Claude: -p for print mode, --output-format json to capture session_id
+        // --dangerously-skip-permissions: safe in containers, allows file edits/commands
         // --resume to continue a previous conversation with full context
-        let cmd = `claude -p '${escaped}' --output-format json`;
+        let cmd = `claude -p '${escaped}' --output-format json --dangerously-skip-permissions`;
         if (cliState?.cliSessionId) {
           cmd += ` --resume '${cliState.cliSessionId}'`;
         }
@@ -106,7 +107,7 @@ class AgentGateway extends EventEmitter {
 
       case 'copilot': {
         // Copilot CLI: -p for print mode, --output-format json to capture session_id
-        // --resume to continue conversation (same pattern as Claude)
+        // --resume to continue conversation
         let cmd = `copilot -p '${escaped}' --output-format json`;
         if (cliState?.cliSessionId) {
           cmd += ` --resume '${cliState.cliSessionId}'`;
@@ -115,8 +116,7 @@ class AgentGateway extends EventEmitter {
       }
 
       case 'aider':
-        // Aider: --message for non-interactive, --yes to auto-approve
-        // No session resume — context comes from git history + repo map
+        // Aider: --message for non-interactive, --yes to auto-approve all edits
         return `aider --message '${escaped}' --yes`;
 
       case 'gemini':

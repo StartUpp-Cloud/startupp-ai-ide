@@ -4,10 +4,12 @@ import {
   MousePointer,
   ChevronDown,
   UserCircle,
+  Settings,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import SystemHealth from './SystemHealth';
 import ModeToggle from './ModeToggle';
+import LLMSettingsPanel from './LLMSettingsPanel';
 
 const CLI_TOOLS = [
   { id: 'claude', name: 'Claude', color: 'text-orange-400', context: 'Full conversation memory via --resume' },
@@ -32,6 +34,7 @@ export default function TopBar({
   const completedSteps = planSteps ? planSteps.filter((_, i) => i < (planCurrentStep || 0)).length : 0;
   const totalSteps = planSteps?.length || 0;
   const [showToolMenu, setShowToolMenu] = useState(false);
+  const [showLLMSettings, setShowLLMSettings] = useState(false);
   const toolMenuRef = useRef(null);
 
   const activeTool = CLI_TOOLS.find(t => t.id === selectedTool) || CLI_TOOLS[0];
@@ -150,11 +153,24 @@ export default function TopBar({
             <UserCircle className="w-3.5 h-3.5" />
           </button>
 
+          <button
+            onClick={() => setShowLLMSettings(true)}
+            className="p-1.5 rounded hover:bg-surface-750 text-surface-400 hover:text-surface-200 transition-colors"
+            title="LLM Settings"
+          >
+            <Settings className="w-3.5 h-3.5" />
+          </button>
+
           <SystemHealth />
 
           {notificationSlot}
         </div>
       </div>
+
+      {/* LLM Settings Modal */}
+      {showLLMSettings && (
+        <LLMSettingsPanel onClose={() => setShowLLMSettings(false)} />
+      )}
     </div>
   );
 }
