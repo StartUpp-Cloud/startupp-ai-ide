@@ -33,7 +33,7 @@ class AgentGateway extends EventEmitter {
     this._abort(projectId);
     this._sessionId = sessionId;
 
-    const ctx = { aborted: false };
+    const ctx = { aborted: false, startedAt: Date.now() };
     this._running.set(projectId, ctx);
 
     try {
@@ -158,11 +158,13 @@ class AgentGateway extends EventEmitter {
     // Send the command
     agentShellPool.write(shellSessionId, cmd + '\n');
 
-    // ── Collect output until the shell prompt returns ──
+    // ── Collect output with live progress streaming ──
     let totalOutput = '';
     let idleRounds = 0;
     const MAX_IDLE = 90;
     const POLL_MS = 3000;
+    let lastProgressUpdate = 0;
+    const PROGRESS_INTERVAL_MS = 8000; // Update progress every 8s of new output
 
     while (!ctx.aborted && idleRounds < MAX_IDLE) {
       const chunk = await this._waitForOutput(shellSessionId, ctx, POLL_MS);
@@ -170,12 +172,21 @@ class AgentGateway extends EventEmitter {
 
       if (chunk.length === 0) {
         idleRounds++;
-        if (idleRounds === 7) {
-          this._addProgressMessage(projectId, `${tool} is still working...`, broadcastFn);
-        }
+
+        // While idle, periodically show what we have so far
         if (idleRounds >= 2 && totalOutput.length > 0) {
           const clean = this._stripAnsi(totalOutput);
           if (this._shellPromptReturned(clean)) break;
+
+          // Show live progress if enough time passed
+          const now = Date.now();
+          if (now - lastProgressUpdate > PROGRESS_INTERVAL_MS) {
+            lastProgressUpdate = now;
+            const snippet = this._getOutputSnippet(clean);
+            if (snippet) {
+              this._updateLiveProgress(projectId, tool, snippet, broadcastFn);
+            }
+          }
         }
         continue;
       }
@@ -195,6 +206,17 @@ class AgentGateway extends EventEmitter {
       if (promptResponse !== null) {
         agentShellPool.write(shellSessionId, promptResponse + '\n');
         this._addProgressMessage(projectId, `Auto: "${promptResponse || '(enter)'}"`, broadcastFn);
+        continue;
+      }
+
+      // Live progress update — show what's happening as it happens
+      const now = Date.now();
+      if (now - lastProgressUpdate > PROGRESS_INTERVAL_MS) {
+        lastProgressUpdate = now;
+        const snippet = this._getOutputSnippet(clean);
+        if (snippet) {
+          this._updateLiveProgress(projectId, tool, snippet, broadcastFn);
+        }
       }
     }
 
@@ -267,6 +289,43 @@ class AgentGateway extends EventEmitter {
     }
 
     return { text, sessionId };
+  }
+
+  // ── Live progress helpers ──
+
+  /**
+   * Extract a meaningful snippet from the output so far.
+   * Shows the last few non-empty lines (skipping command echo and prompts).
+   */
+  _getOutputSnippet(cleanOutput) {
+    const lines = cleanOutput.split('\n')
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith('claude ') && !l.startsWith('copilot ') && !/[$#>]\s*$/.test(l));
+
+    if (lines.length === 0) return null;
+
+    // Take last 6 meaningful lines
+    const recent = lines.slice(-6);
+    // Truncate each line to 120 chars
+    return recent.map(l => l.length > 120 ? l.slice(0, 117) + '...' : l).join('\n');
+  }
+
+  /**
+   * Broadcast a live progress update that replaces the previous progress message.
+   * Uses chat-progress type which the UI replaces in-place.
+   */
+  _updateLiveProgress(projectId, tool, snippet, broadcastFn) {
+    const elapsed = this._running.get(projectId)?.startedAt
+      ? Math.round((Date.now() - this._running.get(projectId).startedAt) / 1000)
+      : null;
+
+    const timeLabel = elapsed ? ` (${elapsed}s)` : '';
+    const content = `**${tool}** working${timeLabel}...\n\n\`\`\`\n${snippet}\n\`\`\``;
+
+    // Use progress message type — UI replaces the last one in-place
+    const sessionId = this._sessionId;
+    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { live: true } });
+    broadcastFn({ type: 'chat-progress', projectId, message: msg });
   }
 
   // ── Shell prompt detection ──
