@@ -40,6 +40,7 @@ import skillRoutes from "./routes/skills.js";
 import debugElementRoutes from "./routes/debugElement.js";
 import containerRoutes from "./routes/containers.js";
 import sessionHistoryRoutes from "./routes/sessionHistory.js";
+import chatRoutes from "./routes/chat.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
 import { scheduler } from "./scheduler.js";
@@ -129,6 +130,7 @@ async function startServer() {
     app.use("/api/debug", debugElementRoutes);
     app.use("/api/containers", containerRoutes);
     app.use("/api/session-history", sessionHistoryRoutes);
+    app.use("/api/projects", chatRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {
