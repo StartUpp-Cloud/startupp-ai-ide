@@ -365,11 +365,17 @@ class TerminalServer {
           // Container-based project
           containerName = project.containerName;
 
-          // Auto-start container if stopped
+          // Ensure container is running before creating a session
           const { containerManager } = await import('./containerManager.js');
           const status = containerManager.getContainerStatus(containerName);
-          if (status && status !== 'running') {
-            containerManager.startContainer(containerName);
+          if (!status) {
+            throw new Error(`Container '${containerName}' does not exist. Please recreate the project.`);
+          }
+          if (status !== 'running') {
+            const started = containerManager.startContainer(containerName);
+            if (!started) {
+              throw new Error(`Failed to start container '${containerName}' (status: ${status})`);
+            }
           }
 
           workingDir = containerManager.getWorkDir(containerName) || '/workspace';

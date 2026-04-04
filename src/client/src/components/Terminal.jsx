@@ -254,12 +254,49 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       mounted = false;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
     };
   }, []);
+
+  // Restart the current project's shell session after exit/termination.
+  // Uses refs to avoid stale closure issues. Debounced via restartTimerRef.
+  const restartTimerRef = useRef(null);
+  const restartRetriesRef = useRef(0);
+  const restartSession = useCallback((delay = 800) => {
+    const pid = prevProjectIdRef.current;
+    if (!pid || !wsRef.current) return;
+    if (restartRetriesRef.current >= 3) {
+      xtermRef.current?.writeln(`\x1b[31mFailed to restart shell after 3 attempts. Click "New" to try manually.\x1b[0m`);
+      restartRetriesRef.current = 0;
+      return;
+    }
+    // Debounce: only one restart at a time
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    restartTimerRef.current = setTimeout(() => {
+      restartTimerRef.current = null;
+      // Don't restart if a session was created in the meantime
+      if (sessionIdRef.current) {
+        restartRetriesRef.current = 0;
+        return;
+      }
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      restartRetriesRef.current++;
+      xtermRef.current?.writeln(`\x1b[90mRestarting shell...\x1b[0m`);
+      const role = isUtility ? 'utility' : 'main';
+      wsRef.current.send(JSON.stringify({
+        type: 'create-session',
+        projectId: pid,
+        role,
+        cliTool: null,
+        cols: xtermRef.current?.cols || 120,
+        rows: xtermRef.current?.rows || 30,
+      }));
+    }, delay);
+  }, [isUtility]);
 
   // Handle WebSocket messages - use sessionIdRef to avoid stale closure
   const handleWebSocketMessage = useCallback((msg) => {
@@ -273,6 +310,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setSessionId(msg.sessionId);
         sessionIdRef.current = msg.sessionId; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.sessionId);
+        restartRetriesRef.current = 0; // Reset retry counter on success
         // Re-enable cursor blink now that we have an active session
         xtermRef.current?.options && (xtermRef.current.options.cursorBlink = true);
         // Fit and focus after render settles
@@ -297,6 +335,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setSessionId(msg.session.id);
         sessionIdRef.current = msg.session.id; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.session.id);
+        restartRetriesRef.current = 0; // Reset retry counter on success
         // Re-enable cursor blink now that we have an active session
         xtermRef.current?.options && (xtermRef.current.options.cursorBlink = true);
         // Don't reset here — project-sessions handler already cleared the screen.
@@ -376,11 +415,9 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       case 'exit': {
         xtermRef.current?.writeln(`\n\x1b[33m\u25CF Session exited (code: ${msg.exitCode})\x1b[0m`);
         const wasCurrentSession = msg.sessionId === sessionIdRef.current;
-        // Use ref to get current sessionId value
         if (wasCurrentSession) {
           setSessionId(null);
           onSessionChange?.(null);
-          // Stop cursor blink — no active session
           xtermRef.current?.options && (xtermRef.current.options.cursorBlink = false);
         }
         // Remove from project mapping
@@ -391,24 +428,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           }
         }
         setSessions(prev => prev.filter(s => s.id !== msg.sessionId));
-
-        // Auto-recreate session if the exited session belonged to the current project
-        const currentProjectId = prevProjectIdRef.current;
-        if (wasCurrentSession && currentProjectId && wsRef.current) {
-          xtermRef.current?.writeln(`\x1b[90mRestarting shell...\x1b[0m`);
-          setTimeout(() => {
-            if (!wsRef.current) return;
-            const role = isUtility ? 'utility' : 'main';
-            wsRef.current.send(JSON.stringify({
-              type: 'create-session',
-              projectId: currentProjectId,
-              role,
-              cliTool: null,
-              cols: xtermRef.current?.cols || 120,
-              rows: xtermRef.current?.rows || 30,
-            }));
-          }, 500);
-        }
+        // Auto-restart if this was the active session for the current project
+        if (wasCurrentSession) restartSession();
         break;
       }
 
@@ -462,17 +483,22 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
       case 'error':
         xtermRef.current?.writeln(`\x1b[31m\u2717 Error: ${msg.error}\x1b[0m`);
+        // If session creation failed and we have no active session, retry
+        if (!sessionIdRef.current && msg.error?.includes('create session')) {
+          restartSession(2000); // Retry with longer delay
+        }
         break;
 
       case 'cli-started':
         xtermRef.current?.writeln(`\x1b[32m\u25CF Started ${msg.cliTool}\x1b[0m\n`);
         break;
 
-      case 'session-terminated':
-        // Use ref to get current sessionId value
-        if (msg.sessionId === sessionIdRef.current) {
+      case 'session-terminated': {
+        const wasActive = msg.sessionId === sessionIdRef.current;
+        if (wasActive) {
           setSessionId(null);
           onSessionChange?.(null);
+          xtermRef.current?.options && (xtermRef.current.options.cursorBlink = false);
           xtermRef.current?.writeln('\n\x1b[33m\u25CF Session terminated\x1b[0m');
         }
         // Remove from project mapping
@@ -483,10 +509,15 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           }
         }
         setSessions(prev => prev.filter(s => s.id !== msg.sessionId));
+        // Auto-restart if this was the active session
+        if (wasActive) restartSession();
         break;
+      }
 
       case 'session-killed':
-        // Session was killed, clear it
+        // session-killed is sent to the requester; session-terminated is broadcast.
+        // The exit event from PTY also fires — avoid double-restart by ignoring
+        // session-killed (the exit handler will do the restart).
         if (msg.sessionId === sessionIdRef.current) {
           setSessionId(null);
           onSessionChange?.(null);
@@ -546,7 +577,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setPromptSuggestion(null);
         break;
     }
-  }, [onSessionChange, autoResponderEnabled, isUtility]);
+  }, [onSessionChange, autoResponderEnabled, isUtility, restartSession]);
 
   // When projectId changes: ask the server for sessions for this project + role.
   // The server response (project-sessions) triggers attach or create.
