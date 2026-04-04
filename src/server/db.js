@@ -10,9 +10,12 @@ const __dirname = path.dirname(__filename);
 // Data directory at project root
 const dataDir = path.join(__dirname, "../../data");
 
-// Ensure data directory exists
+// Ensure data directory exists with restrictive permissions (owner-only)
 if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+} else {
+  // Tighten permissions on existing data directory
+  try { fs.chmodSync(dataDir, 0o700); } catch {}
 }
 
 const dbPath = path.join(dataDir, "db.json");

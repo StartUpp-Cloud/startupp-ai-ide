@@ -37,20 +37,20 @@ export default function ChatInput({ mode, onSend, onSearch, disabled = false }) 
     : 'Tell the agent what to do... (Ctrl+Enter to send)';
 
   return (
-    <div className="border-t border-gray-700 bg-gray-900/80 px-3 py-2">
+    <div className="flex-shrink-0 border-t border-surface-700 bg-surface-850/80 px-3 py-2">
       {searching && (
         <div className="flex items-center gap-2 mb-2">
-          <Search size={14} className="text-gray-500" />
+          <Search size={14} className="text-surface-500" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => handleSearch(e.target.value)}
             placeholder="Search chat history..."
-            className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-gray-200 outline-none focus:border-blue-500"
+            className="flex-1 bg-surface-800 border border-surface-700 rounded px-2 py-1 text-sm text-surface-200 outline-none focus:border-primary-500/50"
             autoFocus
           />
           <button onClick={() => { setSearching(false); setSearchQuery(''); handleSearch(''); }}>
-            <X size={14} className="text-gray-500 hover:text-gray-300" />
+            <X size={14} className="text-surface-500 hover:text-surface-200" />
           </button>
         </div>
       )}
@@ -58,8 +58,8 @@ export default function ChatInput({ mode, onSend, onSearch, disabled = false }) 
       <div className="flex items-end gap-2">
         <button
           onClick={() => setSearching(!searching)}
-          className="p-1.5 text-gray-500 hover:text-gray-300 rounded"
-          title="Search chat (Ctrl+F)"
+          className="p-1.5 text-surface-500 hover:text-surface-200 rounded"
+          title="Search chat"
         >
           <Search size={16} />
         </button>
@@ -71,7 +71,7 @@ export default function ChatInput({ mode, onSend, onSearch, disabled = false }) 
           placeholder={placeholder}
           disabled={disabled}
           rows={1}
-          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 resize-none outline-none focus:border-blue-500 disabled:opacity-50 placeholder:text-gray-600"
+          className="flex-1 bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 resize-none outline-none focus:border-primary-500/50 focus:ring-1 focus:ring-primary-500/20 disabled:opacity-40 placeholder:text-surface-500 transition-colors"
         />
         <button
           onClick={handleSend}
@@ -81,7 +81,7 @@ export default function ChatInput({ mode, onSend, onSearch, disabled = false }) 
               ? mode === 'plan'
                 ? 'bg-purple-600 hover:bg-purple-500 text-white'
                 : 'bg-green-600 hover:bg-green-500 text-white'
-              : 'bg-gray-800 text-gray-600'
+              : 'bg-surface-800 text-surface-600'
           }`}
         >
           <Send size={16} />

@@ -41,6 +41,7 @@ import debugElementRoutes from "./routes/debugElement.js";
 import containerRoutes from "./routes/containers.js";
 import sessionHistoryRoutes from "./routes/sessionHistory.js";
 import chatRoutes from "./routes/chat.js";
+import { authMiddleware, getToken } from "./authToken.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
 import { scheduler } from "./scheduler.js";
@@ -81,6 +82,14 @@ app.use(cors(corsOptions));
 // Body parsing middleware
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// API authentication — token endpoint + middleware
+app.get("/api/auth/token", (req, res) => {
+  // Only same-origin requests can reach this (CORS enforced).
+  // The frontend fetches the token once and includes it in all subsequent requests.
+  res.json({ token: getToken() });
+});
+app.use(authMiddleware);
 
 // Initialize database and start server
 async function startServer() {

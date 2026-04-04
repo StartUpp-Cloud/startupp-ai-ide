@@ -7,6 +7,7 @@
 import { getDB } from './db.js';
 import { EventEmitter } from 'events';
 import { sessionContext, RISK_LEVELS } from './sessionContext.js';
+import { encrypt, decrypt } from './fieldEncryption.js';
 
 // Default LLM settings
 const DEFAULT_LLM_SETTINGS = {
@@ -181,6 +182,10 @@ class LLMProvider extends EventEmitter {
 
     this.settings = { ...DEFAULT_LLM_SETTINGS, ...db.data.llmSettings };
 
+    // Decrypt API keys loaded from disk
+    if (this.settings.openai?.apiKey) this.settings.openai.apiKey = decrypt(this.settings.openai.apiKey);
+    if (this.settings.deepseek?.apiKey) this.settings.deepseek.apiKey = decrypt(this.settings.deepseek.apiKey);
+
     // Check if Ollama is available
     if (this.settings.enabled && this.settings.provider === 'ollama') {
       await this.checkOllamaHealth();
@@ -190,10 +195,14 @@ class LLMProvider extends EventEmitter {
   }
 
   /**
-   * Get current settings
+   * Get current settings (API keys masked for frontend display).
    */
   getSettings() {
-    return { ...this.settings };
+    const s = JSON.parse(JSON.stringify(this.settings));
+    // Mask API keys — show only last 4 chars for identification
+    if (s.openai?.apiKey) s.openai.apiKey = s.openai.apiKey.length > 4 ? '••••' + s.openai.apiKey.slice(-4) : s.openai.apiKey;
+    if (s.deepseek?.apiKey) s.deepseek.apiKey = s.deepseek.apiKey.length > 4 ? '••••' + s.deepseek.apiKey.slice(-4) : s.deepseek.apiKey;
+    return s;
   }
 
   /**
@@ -210,7 +219,11 @@ class LLMProvider extends EventEmitter {
       deepseek: { ...this.settings.deepseek, ...updates.deepseek },
     };
 
-    db.data.llmSettings = this.settings;
+    // Write encrypted copy to disk — never store plaintext API keys in db.json
+    const toSave = JSON.parse(JSON.stringify(this.settings));
+    if (toSave.openai?.apiKey) toSave.openai.apiKey = encrypt(toSave.openai.apiKey);
+    if (toSave.deepseek?.apiKey) toSave.deepseek.apiKey = encrypt(toSave.deepseek.apiKey);
+    db.data.llmSettings = toSave;
     await db.write();
 
     // Re-check health if provider changed or enabled

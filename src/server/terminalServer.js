@@ -359,9 +359,14 @@ class TerminalServer {
         const { chatStore } = await import('./chatStore.js');
         const { agentGateway } = await import('./agentGateway.js');
 
+        // Ensure session exists
+        chatStore.migrateIfNeeded(payload.projectId);
+        const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
+
         // Persist user message
         const userMsg = chatStore.addMessage({
           projectId: payload.projectId,
+          sessionId: chatSessionId,
           role: 'user',
           content: payload.content,
           metadata: { mode: payload.mode },
@@ -371,12 +376,15 @@ class TerminalServer {
         // Dispatch to agent gateway (async — runs in background)
         agentGateway.handleTask({
           projectId: payload.projectId,
+          sessionId: chatSessionId,
           content: payload.content,
           mode: payload.mode,
+          tool: payload.tool || 'claude',
           broadcastFn: (data) => this.broadcast(data),
         }).catch(err => {
           const errMsg = chatStore.addMessage({
             projectId: payload.projectId,
+            sessionId: chatSessionId,
             role: 'error',
             content: `Gateway error: ${err.message}`,
           });

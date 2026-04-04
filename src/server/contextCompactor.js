@@ -5,8 +5,8 @@ import { llmProvider } from './llmProvider.js';
 const COMPACTION_THRESHOLD = 40;
 const KEEP_RECENT = 15;
 
-export async function buildAgentContext(projectId) {
-  const messages = chatStore.getMessages(projectId, { limit: 200 }).reverse();
+export async function buildAgentContext(projectId, sessionId = null) {
+  const messages = chatStore.getMessages(projectId, { sessionId, limit: 200 }).reverse();
 
   if (messages.length < COMPACTION_THRESHOLD) {
     // Short conversation — return all messages as context

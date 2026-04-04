@@ -1,48 +1,28 @@
 // src/server/agentGateway.js
+//
+// Architecture: Route EVERYTHING to the user's selected CLI tool (Claude, Copilot, etc.)
+// The tool is the brain — it handles questions, coding, research, everything.
+// Local LLM only: formats raw terminal output into chat-friendly messages,
+// auto-responds to y/n prompts, manages sessions.
+
 import { EventEmitter } from 'events';
 import { llmProvider } from './llmProvider.js';
 import { chatStore } from './chatStore.js';
 import { agentShellPool } from './agentShellPool.js';
-import { buildAgentContext } from './contextCompactor.js';
-
-const AGENT_SYSTEM_PROMPT = `You are an autonomous coding agent inside a development IDE. You control shell sessions that run AI coding tools (Claude Code, GitHub Copilot, Aider, etc.).
-
-Your job:
-1. Receive a user task/request
-2. Decide which tool to use and what prompt to send
-3. Monitor the tool's output
-4. Auto-respond to the tool's confirmation prompts (yes/no/continue)
-5. Report progress and results back to the user
-
-You communicate by returning JSON actions:
-
-ACTIONS:
-- {"action":"shell","tool":"claude","input":"the prompt to send"} — Send a prompt to a CLI tool
-- {"action":"shell","tool":"shell","input":"npm test"} — Run a shell command
-- {"action":"respond","input":"y"} — Respond to a tool's confirmation prompt
-- {"action":"report","content":"Status update for the user","tasks":[{"title":"Step 1","status":"done"},{"title":"Step 2","status":"running"}]} — Send a progress update
-- {"action":"done","content":"Final summary of what was accomplished"} — Task complete
-- {"action":"ask","content":"Question for the user"} — Need user input (ONLY when truly ambiguous)
-- {"action":"plan","steps":[{"title":"Step 1","prompt":"..."},{"title":"Step 2","prompt":"..."}]} — Return a plan for user approval (plan mode only)
-
-RULES:
-- In agent mode: act autonomously, minimize questions, approve tool requests automatically
-- In plan mode: return a plan first, wait for approval, then execute step by step
-- Always approve safe operations (file edits, reads, git operations, installs)
-- Only ask the user when genuinely ambiguous (multiple valid interpretations)
-- Keep progress reports concise but informative
-- Use the most appropriate tool for the task (claude for complex coding, shell for commands)
-
-Respond with a single JSON action per turn. No markdown wrapping. Just the JSON object.`;
 
 class AgentGateway extends EventEmitter {
   constructor() {
     super();
-    this._running = new Map(); // projectId -> { aborted }
+    this._running = new Map();
   }
 
-  async handleTask({ projectId, content, mode, broadcastFn }) {
+  /**
+   * Main entry point. Routes the user's message to their selected CLI tool.
+   * @param {string} tool - CLI tool to use: 'claude', 'copilot', 'aider', 'shell'
+   */
+  async handleTask({ projectId, sessionId = null, content, mode, tool = 'claude', broadcastFn }) {
     this._abort(projectId);
+    this._sessionId = sessionId;
 
     const ctx = { aborted: false };
     this._running.set(projectId, ctx);
@@ -50,162 +30,140 @@ class AgentGateway extends EventEmitter {
     try {
       broadcastFn({ type: 'agent-status', projectId, busy: true });
 
-      // Build context from recent chat history
-      const chatContext = await buildAgentContext(projectId);
-
-      const modeInstruction = mode === 'plan'
-        ? 'MODE: PLAN — Return a "plan" action with steps before executing anything.'
-        : 'MODE: AGENT — Act autonomously. Execute the task directly.';
-
-      let iterations = 0;
-      const MAX_ITERATIONS = 30;
-      let lastShellOutput = '';
-
-      while (!ctx.aborted && iterations < MAX_ITERATIONS) {
-        iterations++;
-
-        const userPrompt = iterations === 1
-          ? `${modeInstruction}\n\nChat context:\n${chatContext}\n\nUser request: ${content}`
-          : `${modeInstruction}\n\nShell output from last action:\n${lastShellOutput.slice(-3000)}\n\nDecide what to do next.`;
-
-        let llmResponse;
-        try {
-          const result = await llmProvider.generateResponse(userPrompt, {
-            systemPrompt: AGENT_SYSTEM_PROMPT,
-            maxTokens: 1000,
-            temperature: 0.2,
-          });
-          llmResponse = result.response;
-        } catch (err) {
-          this._addErrorMessage(projectId, `LLM error: ${err.message}`, broadcastFn);
-          break;
-        }
-
-        if (ctx.aborted) break;
-
-        let action;
-        try {
-          const cleaned = llmResponse.replace(/```json\n?|\n?```/g, '').trim();
-          action = JSON.parse(cleaned);
-        } catch {
-          // LLM returned non-JSON — treat as a direct response
-          this._addAgentMessage(projectId, llmResponse, broadcastFn);
-          break;
-        }
-
-        switch (action.action) {
-          case 'shell': {
-            let sessionId;
-            try {
-              const sess = await agentShellPool.getSession(projectId, action.tool);
-              sessionId = sess.sessionId;
-            } catch (err) {
-              this._addErrorMessage(projectId, `Failed to get shell session: ${err.message}`, broadcastFn);
-              this._finish(projectId, broadcastFn);
-              return;
-            }
-
-            const input = action.input.endsWith('\n') ? action.input : action.input + '\n';
-            agentShellPool.write(sessionId, input);
-
-            // Wait for output to settle
-            lastShellOutput = await this._waitForOutput(sessionId, ctx);
-            if (ctx.aborted) break;
-
-            // Check for confirmation prompts and auto-respond
-            try {
-              const { autoResponder } = await import('./autoResponder.js');
-              const promptMatch = autoResponder.detectPrompt?.(lastShellOutput, action.tool);
-              if (promptMatch) {
-                const response = promptMatch.defaultResponse || 'y';
-                agentShellPool.write(sessionId, response + '\n');
-                const moreOutput = await this._waitForOutput(sessionId, ctx, 3000);
-                lastShellOutput += moreOutput;
-              }
-            } catch {}
-
-            this._addProgressMessage(projectId,
-              `Running ${action.tool}: ${action.input.slice(0, 100)}${action.input.length > 100 ? '...' : ''}`,
-              broadcastFn);
-            break;
-          }
-
-          case 'respond': {
-            for (const [, entry] of agentShellPool.sessions) {
-              if (entry.projectId === projectId) {
-                agentShellPool.write(entry.sessionId, action.input + '\n');
-                break;
-              }
-            }
-            lastShellOutput = '';
-            await new Promise(r => setTimeout(r, 1000));
-            break;
-          }
-
-          case 'report':
-            this._addProgressMessage(projectId, action.content, broadcastFn, action.tasks);
-            // Continue loop — report is informational, not terminal
-            break;
-
-          case 'plan':
-            this._addAgentMessage(projectId,
-              `**Proposed Plan:**\n\n${action.steps.map((s, i) => `${i + 1}. ${s.title}`).join('\n')}\n\nApprove this plan to begin execution.`,
-              broadcastFn,
-              { plan: action.steps });
-            this._finish(projectId, broadcastFn);
-            return;
-
-          case 'ask':
-            this._addAgentMessage(projectId, action.content, broadcastFn);
-            this._finish(projectId, broadcastFn);
-            return;
-
-          case 'done':
-            this._addAgentMessage(projectId, action.content, broadcastFn);
-            // Extract context memory for future sessions
-            try {
-              const recentOutput = [];
-              for (const [, entry] of agentShellPool.sessions) {
-                if (entry.projectId === projectId) {
-                  recentOutput.push(agentShellPool.getRecentOutput(entry.sessionId));
-                }
-              }
-              const contextResult = await llmProvider.generateResponse(
-                `Extract key technical context from this completed task that would be useful for future tasks. Include: file paths changed, architecture decisions, bugs found, patterns used. Be concise (2-3 paragraphs max).\n\nTask: ${content}\n\nOutput: ${recentOutput.join('\n').slice(-3000)}`,
-                { systemPrompt: 'You extract key technical context from completed coding tasks.', maxTokens: 300, temperature: 0.1 }
-              );
-              chatStore.addMessage({
-                projectId,
-                role: 'system',
-                content: contextResult.response,
-                metadata: { isContextMemory: true },
-              });
-            } catch {}
-            this._finish(projectId, broadcastFn);
-            return;
-
-          default:
-            this._addAgentMessage(projectId, llmResponse, broadcastFn);
-            this._finish(projectId, broadcastFn);
-            return;
-        }
-      }
-
-      if (iterations >= MAX_ITERATIONS) {
-        this._addErrorMessage(projectId, 'Agent reached maximum iterations. Stopping.', broadcastFn);
+      if (mode === 'plan') {
+        // In plan mode, ask the tool to make a plan first
+        await this._sendToTool(projectId, `Create a step-by-step plan for the following task. List numbered steps but do NOT execute yet:\n\n${content}`, tool, broadcastFn, ctx);
+      } else {
+        // Agent mode: send directly to the tool
+        await this._sendToTool(projectId, content, tool, broadcastFn, ctx);
       }
     } catch (error) {
-      this._addErrorMessage(projectId, `Agent error: ${error.message}`, broadcastFn);
+      this._addErrorMessage(projectId, `Error: ${error.message}`, broadcastFn);
     } finally {
       this._finish(projectId, broadcastFn);
     }
   }
 
   /**
-   * Execute an approved plan step by step.
+   * Send a message to the selected CLI tool and monitor the response.
    */
-  async executePlan({ projectId, steps, broadcastFn }) {
+  async _sendToTool(projectId, message, tool, broadcastFn, ctx) {
+    // Get or create a session for this tool
+    let cliSessionId;
+    try {
+      const sess = await agentShellPool.getSession(projectId, tool);
+      cliSessionId = sess.sessionId;
+
+      if (sess.isNew) {
+        this._addProgressMessage(projectId, `Starting ${tool}...`, broadcastFn);
+        // Give the CLI tool time to initialize
+        await new Promise(r => setTimeout(r, tool === 'shell' ? 500 : 4000));
+      }
+    } catch (err) {
+      this._addErrorMessage(projectId, `Failed to start ${tool}: ${err.message}`, broadcastFn);
+      return;
+    }
+
+    this._addProgressMessage(projectId, `Sending to ${tool}...`, broadcastFn);
+
+    // Send the message
+    agentShellPool.write(cliSessionId, message + '\n');
+
+    // Monitor output, auto-respond to prompts, detect completion
+    let totalOutput = '';
+    let idleRounds = 0;
+    const MAX_IDLE = 60; // 60 x 2s = 2 min max silence before giving up
+    const POLL_MS = 2000;
+
+    while (!ctx.aborted && idleRounds < MAX_IDLE) {
+      const chunk = await this._waitForOutput(cliSessionId, ctx, POLL_MS);
+      if (ctx.aborted) return;
+
+      if (chunk.length === 0) {
+        idleRounds++;
+        // After 10 idle rounds (20s), give a progress update
+        if (idleRounds === 10) {
+          this._addProgressMessage(projectId, `${tool} is still working...`, broadcastFn);
+        }
+        continue;
+      }
+
+      idleRounds = 0;
+      totalOutput += chunk;
+
+      // Auto-respond to confirmation prompts (y/n, continue, approve, etc.)
+      try {
+        const { autoResponder } = await import('./autoResponder.js');
+        const promptMatch = autoResponder.detectPrompt?.(chunk, tool);
+        if (promptMatch) {
+          const response = promptMatch.defaultResponse || 'y';
+          agentShellPool.write(cliSessionId, response + '\n');
+          this._addProgressMessage(projectId, `Auto-approved: ${response}`, broadcastFn);
+          continue; // Don't check for completion yet — more output coming
+        }
+      } catch {}
+
+      // Check if the tool is done (shell prompt returned or tool-specific markers)
+      const clean = chunk.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+      if (this._looksComplete(clean, tool)) {
+        break;
+      }
+    }
+
+    // Format and present the result
+    const cleanOutput = totalOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+
+    if (!cleanOutput) {
+      this._addAgentMessage(projectId,
+        `Sent to ${tool} — no response received. The tool may still be processing. Check Internal Console for details.`,
+        broadcastFn, { tool });
+      return;
+    }
+
+    // Use local LLM to create a friendly summary
+    try {
+      const result = await llmProvider.generateResponse(
+        `You are formatting terminal output from "${tool}" for a developer chat UI.\n\nUser's message: "${message}"\n\nTool output:\n${cleanOutput.slice(-4000)}\n\nCreate a concise, helpful response. Include key results, file changes, errors, or answers. Use markdown for readability. If the output is a simple answer, just give the answer.`,
+        { maxTokens: 500, temperature: 0.1 }
+      );
+      this._addAgentMessage(projectId, result.response, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+    } catch {
+      // Local LLM failed — show cleaned output directly
+      const truncated = cleanOutput.length > 3000
+        ? '...\n' + cleanOutput.slice(-3000)
+        : cleanOutput;
+      this._addAgentMessage(projectId, `**${tool} output:**\n\`\`\`\n${truncated}\n\`\`\``, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+    }
+  }
+
+  /**
+   * Heuristic: does the output look like the tool finished?
+   */
+  _looksComplete(text, tool) {
+    const lastLine = text.split('\n').filter(l => l.trim()).pop() || '';
+
+    // Shell prompt returned
+    if (/[$#>]\s*$/.test(lastLine)) return true;
+
+    // Claude Code specific completion markers
+    if (tool === 'claude') {
+      if (/^[>❯]\s*$/.test(lastLine)) return true; // Claude's prompt
+      if (lastLine.includes('Cost:') && lastLine.includes('tokens')) return true;
+    }
+
+    // Copilot specific
+    if (tool === 'copilot') {
+      if (/^>\s*$/.test(lastLine)) return true;
+    }
+
+    return false;
+  }
+
+  // ── Plan execution ──
+
+  async executePlan({ projectId, sessionId = null, steps, tool = 'claude', broadcastFn }) {
     this._abort(projectId);
+    this._sessionId = sessionId;
     const ctx = { aborted: false };
     this._running.set(projectId, ctx);
 
@@ -220,27 +178,22 @@ class AgentGateway extends EventEmitter {
         }));
         this._addProgressMessage(projectId, `Step ${i + 1}/${steps.length}: ${step.title}`, broadcastFn, tasks);
 
-        // Execute each step using handleTask in agent mode
-        await this.handleTask({
-          projectId,
-          content: step.prompt,
-          mode: 'agent',
-          broadcastFn,
-        });
-
+        await this._sendToTool(projectId, step.prompt, tool, broadcastFn, ctx);
         if (ctx.aborted) break;
       }
 
       if (!ctx.aborted) {
         const tasks = steps.map(s => ({ title: s.title, status: 'done' }));
-        this._addAgentMessage(projectId, 'Plan completed successfully.', broadcastFn, { tasks });
+        this._addAgentMessage(projectId, 'Plan completed.', broadcastFn, { tasks });
       }
     } catch (error) {
-      this._addErrorMessage(projectId, `Plan execution failed: ${error.message}`, broadcastFn);
+      this._addErrorMessage(projectId, `Plan failed: ${error.message}`, broadcastFn);
     } finally {
       this._finish(projectId, broadcastFn);
     }
   }
+
+  // ── Helpers ──
 
   _abort(projectId) {
     const ctx = this._running.get(projectId);
@@ -253,7 +206,7 @@ class AgentGateway extends EventEmitter {
     broadcastFn({ type: 'agent-status', projectId, busy: false });
   }
 
-  _waitForOutput(sessionId, ctx, quietMs = 5000) {
+  _waitForOutput(sessionId, ctx, quietMs = 2000) {
     return new Promise((resolve) => {
       let timeout;
       let output = '';
@@ -275,17 +228,20 @@ class AgentGateway extends EventEmitter {
   }
 
   _addAgentMessage(projectId, content, broadcastFn, metadata = null) {
-    const msg = chatStore.addMessage({ projectId, role: 'agent', content, metadata });
+    const sessionId = this._sessionId;
+    const msg = chatStore.addMessage({ projectId, sessionId, role: 'agent', content, metadata });
     broadcastFn({ type: 'chat-message', message: msg });
   }
 
   _addProgressMessage(projectId, content, broadcastFn, tasks = null) {
-    const msg = chatStore.addMessage({ projectId, role: 'progress', content, metadata: { tasks } });
+    const sessionId = this._sessionId;
+    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks } });
     broadcastFn({ type: 'chat-progress', projectId, message: msg });
   }
 
   _addErrorMessage(projectId, content, broadcastFn) {
-    const msg = chatStore.addMessage({ projectId, role: 'error', content });
+    const sessionId = this._sessionId;
+    const msg = chatStore.addMessage({ projectId, sessionId, role: 'error', content });
     broadcastFn({ type: 'chat-message', message: msg });
   }
 }
