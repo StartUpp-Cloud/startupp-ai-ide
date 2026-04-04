@@ -228,6 +228,17 @@ class PTYManager extends EventEmitter {
       ensureDtach(containerName);
       const socketPath = `/tmp/${role}-session.dtach`;
       const workDir = cwd || '/workspace';
+
+      // If no active session exists for this container+role, the dtach socket
+      // is orphaned (from a killed/crashed session). Clean it so dtach -A
+      // creates a fresh session instead of reattaching to a dead one.
+      const hasActiveSession = Array.from(this.sessions.values()).some(
+        s => s.containerName === containerName && s.role === role && s.status === 'active'
+      );
+      if (!hasActiveSession) {
+        this._cleanDtachSocket(containerName, role);
+      }
+
       shell = '/bin/bash';
       args = [
         '-c',
@@ -305,6 +316,11 @@ class PTYManager extends EventEmitter {
         session.status = 'terminated';
         session.exitCode = exitCode;
         session.signal = signal;
+
+        // Clean up dtach socket inside container so the next session starts fresh
+        if (containerName) {
+          this._cleanDtachSocket(containerName, role);
+        }
 
         // Save session to history before cleanup
         sessionHistory.saveSession({
@@ -405,6 +421,11 @@ class PTYManager extends EventEmitter {
             session.status = 'terminated';
             session.exitCode = exitCode;
             session.signal = signal;
+
+            // Clean up dtach socket inside container so the next session starts fresh
+            if (containerName) {
+              this._cleanDtachSocket(containerName, role);
+            }
 
             sessionHistory.saveSession({
               sessionId,
@@ -586,11 +607,34 @@ class PTYManager extends EventEmitter {
         sessionHistory.nameWithLLM(savedEntry.id).catch(() => {});
       }).catch(err => console.warn('Failed to save session history:', err.message));
 
+      // Kill dtach session inside container so it doesn't leave a stale socket
+      if (session.containerName) {
+        this._cleanDtachSocket(session.containerName, session.role || 'main');
+      }
+
       session.ptyProcess.kill();
       session.status = 'terminated';
     }
 
     return true;
+  }
+
+  /**
+   * Kill the dtach process and remove its socket inside a container.
+   * This prevents stale dtach sessions from being reattached to.
+   */
+  _cleanDtachSocket(containerName, role) {
+    const dockerBin = findDockerBinary();
+    const socketPath = `/tmp/${role}-session.dtach`;
+    try {
+      // Kill any dtach process using this socket, then remove the socket file
+      execSync(
+        `${dockerBin} exec ${containerName} sh -c "pkill -f 'dtach -A ${socketPath}' 2>/dev/null; rm -f '${socketPath}'"`,
+        { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' },
+      );
+    } catch {
+      // Best-effort — container may be stopped or dtach already gone
+    }
   }
 
   /**
