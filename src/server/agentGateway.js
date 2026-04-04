@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import { llmProvider } from './llmProvider.js';
 import { chatStore } from './chatStore.js';
 import { agentShellPool } from './agentShellPool.js';
+import { buildAgentContext } from './contextCompactor.js';
 
 const AGENT_SYSTEM_PROMPT = `You are an autonomous coding agent inside a development IDE. You control shell sessions that run AI coding tools (Claude Code, GitHub Copilot, Aider, etc.).
 
@@ -50,10 +51,7 @@ class AgentGateway extends EventEmitter {
       broadcastFn({ type: 'agent-status', projectId, busy: true });
 
       // Build context from recent chat history
-      const recentMessages = chatStore.getMessages(projectId, { limit: 20 }).reverse();
-      const chatContext = recentMessages
-        .map(m => `[${m.role}]: ${m.content}`)
-        .join('\n');
+      const chatContext = await buildAgentContext(projectId);
 
       const modeInstruction = mode === 'plan'
         ? 'MODE: PLAN — Return a "plan" action with steps before executing anything.'
