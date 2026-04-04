@@ -64,6 +64,40 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, agentBusy]);
 
+  // Polling fallback: while agent is busy, poll API every 5s for new messages
+  // This catches responses even if the WebSocket disconnected
+  useEffect(() => {
+    if (!agentBusy || !projectId || !activeSessionId) return;
+
+    const poll = setInterval(() => {
+      fetch(`/api/projects/${projectId}/chat?limit=5&sessionId=${activeSessionId}`)
+        .then(r => r.json())
+        .then(data => {
+          const latest = (data.messages || []).reverse();
+          if (latest.length === 0) return;
+
+          // Check if there's a newer agent/error message we don't have
+          const lastKnownId = messages.length > 0 ? messages[messages.length - 1].id : null;
+          const newMsgs = latest.filter(m =>
+            m.role !== 'user' && m.role !== 'progress' &&
+            !messages.some(existing => existing.id === m.id)
+          );
+
+          if (newMsgs.length > 0) {
+            setMessages(prev => {
+              const ids = new Set(prev.map(m => m.id));
+              const toAdd = newMsgs.filter(m => !ids.has(m.id));
+              return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+            });
+            setAgentBusy(false);
+          }
+        })
+        .catch(() => {});
+    }, 5000);
+
+    return () => clearInterval(poll);
+  }, [agentBusy, projectId, activeSessionId, messages]);
+
   // Listen for real-time chat messages via WebSocket
   useEffect(() => {
     if (!wsRef?.current) return;

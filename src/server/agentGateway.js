@@ -2,23 +2,32 @@
 //
 // Architecture: Route EVERYTHING to the user's selected CLI tool (Claude, Copilot, etc.)
 // The tool is the brain — it handles questions, coding, research, everything.
-// Local LLM only: formats raw terminal output into chat-friendly messages,
-// auto-responds to y/n prompts, manages sessions.
+// Local LLM only: formats raw terminal output into chat-friendly messages.
+//
+// Context strategy:
+// - Claude: uses --continue to maintain conversation across messages in the same session
+//           uses --resume <id> to return to a previous session
+//           uses --output-format json to capture session_id for --resume
+// - CLAUDE.md: loaded automatically by Claude for persistent project context
+// - Other tools: context managed per their native mechanisms
 
 import { EventEmitter } from 'events';
 import { llmProvider } from './llmProvider.js';
 import { chatStore } from './chatStore.js';
 import { agentShellPool } from './agentShellPool.js';
+import { getDB } from './db.js';
 
 class AgentGateway extends EventEmitter {
   constructor() {
     super();
     this._running = new Map();
+    // Track CLI session IDs per chat session for --continue/--resume
+    // Map<chatSessionId, { cliSessionId, messageCount }>
+    this._cliSessions = new Map();
   }
 
   /**
    * Main entry point. Routes the user's message to their selected CLI tool.
-   * @param {string} tool - CLI tool to use: 'claude', 'copilot', 'aider', 'shell'
    */
   async handleTask({ projectId, sessionId = null, content, mode, tool = 'claude', broadcastFn }) {
     this._abort(projectId);
@@ -31,11 +40,9 @@ class AgentGateway extends EventEmitter {
       broadcastFn({ type: 'agent-status', projectId, busy: true });
 
       if (mode === 'plan') {
-        // In plan mode, ask the tool to make a plan first
-        await this._sendToTool(projectId, `Create a step-by-step plan for the following task. List numbered steps but do NOT execute yet:\n\n${content}`, tool, broadcastFn, ctx);
+        await this._sendToTool(projectId, sessionId, `Create a step-by-step plan for the following task. List numbered steps but do NOT execute yet:\n\n${content}`, tool, broadcastFn, ctx);
       } else {
-        // Agent mode: send directly to the tool
-        await this._sendToTool(projectId, content, tool, broadcastFn, ctx);
+        await this._sendToTool(projectId, sessionId, content, tool, broadcastFn, ctx);
       }
     } catch (error) {
       this._addErrorMessage(projectId, `Error: ${error.message}`, broadcastFn);
@@ -45,45 +52,130 @@ class AgentGateway extends EventEmitter {
   }
 
   /**
+   * Build the profile context string for the first message in a conversation.
+   * Loaded from db.json profile field.
+   */
+  _getProfileContext() {
+    try {
+      const db = getDB();
+      const p = db.data?.profile;
+      if (!p || !p.setupComplete) return '';
+
+      const parts = [];
+      if (p.name) parts.push(`My name is ${p.name}.`);
+      if (p.role) parts.push(`I'm a ${p.role}.`);
+      if (p.languages) parts.push(`I work with: ${p.languages}.`);
+      if (p.codeStyle) parts.push(`Code style: ${p.codeStyle}.`);
+      if (p.tone === 'concise') parts.push('Be concise and direct.');
+      if (p.tone === 'detailed') parts.push('Give thorough, detailed explanations.');
+      if (p.tone === 'casual') parts.push('Keep it casual and conversational.');
+      if (p.tone === 'formal') parts.push('Use a professional, structured tone.');
+      if (p.preferences) parts.push(p.preferences);
+
+      return parts.length > 0 ? parts.join(' ') + '\n\n' : '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Build the shell command to invoke a CLI tool in non-interactive/print mode.
+   * Handles conversation continuation and profile context injection.
+   */
+  _buildToolCommand(tool, message, chatSessionId) {
+    const cliState = this._cliSessions.get(chatSessionId);
+    const isFirstMessage = !cliState?.cliSessionId;
+
+    // Prepend profile context on first message only — tool remembers it for follow-ups
+    const fullMessage = isFirstMessage
+      ? this._getProfileContext() + message
+      : message;
+
+    const escaped = fullMessage.replace(/'/g, "'\\''");
+
+    switch (tool) {
+      case 'claude': {
+        // Claude: -p for print mode, --output-format json to capture session_id
+        // --resume to continue a previous conversation with full context
+        let cmd = `claude -p '${escaped}' --output-format json`;
+        if (cliState?.cliSessionId) {
+          cmd += ` --resume '${cliState.cliSessionId}'`;
+        }
+        return cmd;
+      }
+
+      case 'copilot': {
+        // Copilot CLI: -p for print mode, --output-format json to capture session_id
+        // --resume to continue conversation (same pattern as Claude)
+        let cmd = `copilot -p '${escaped}' --output-format json`;
+        if (cliState?.cliSessionId) {
+          cmd += ` --resume '${cliState.cliSessionId}'`;
+        }
+        return cmd;
+      }
+
+      case 'aider':
+        // Aider: --message for non-interactive, --yes to auto-approve
+        // No session resume — context comes from git history + repo map
+        return `aider --message '${escaped}' --yes`;
+
+      case 'gemini':
+        // Gemini CLI: -p for print mode (if available)
+        return `gemini -p '${escaped}'`;
+
+      case 'shell':
+      default:
+        return message;
+    }
+  }
+
+  /**
    * Send a message to the selected CLI tool and monitor the response.
    */
-  async _sendToTool(projectId, message, tool, broadcastFn, ctx) {
-    // Get or create a session for this tool
-    let cliSessionId;
+  async _sendToTool(projectId, chatSessionId, message, tool, broadcastFn, ctx) {
+    let shellSessionId;
     try {
-      const sess = await agentShellPool.getSession(projectId, tool);
-      cliSessionId = sess.sessionId;
+      const sess = await agentShellPool.getSession(projectId, 'shell');
+      shellSessionId = sess.sessionId;
 
       if (sess.isNew) {
-        this._addProgressMessage(projectId, `Starting ${tool}...`, broadcastFn);
-        // Give the CLI tool time to initialize
-        await new Promise(r => setTimeout(r, tool === 'shell' ? 500 : 4000));
+        this._addProgressMessage(projectId, `Starting shell...`, broadcastFn);
+        await new Promise(r => setTimeout(r, 1000));
       }
     } catch (err) {
-      this._addErrorMessage(projectId, `Failed to start ${tool}: ${err.message}`, broadcastFn);
+      this._addErrorMessage(projectId, `Failed to start shell: ${err.message}`, broadcastFn);
       return;
     }
 
-    this._addProgressMessage(projectId, `Sending to ${tool}...`, broadcastFn);
+    const cmd = this._buildToolCommand(tool, message, chatSessionId);
+    const cliState = this._cliSessions.get(chatSessionId);
+    const isFollowUp = !!(cliState?.cliSessionId);
 
-    // Send the message
-    agentShellPool.write(cliSessionId, message + '\n');
+    this._addProgressMessage(projectId,
+      `Running ${tool}${isFollowUp ? ' (continuing conversation)' : ''}...`,
+      broadcastFn);
 
-    // Monitor output, auto-respond to prompts, detect completion
+    // Send the command
+    agentShellPool.write(shellSessionId, cmd + '\n');
+
+    // ── Collect output until the shell prompt returns ──
     let totalOutput = '';
     let idleRounds = 0;
-    const MAX_IDLE = 60; // 60 x 2s = 2 min max silence before giving up
-    const POLL_MS = 2000;
+    const MAX_IDLE = 90;
+    const POLL_MS = 3000;
 
     while (!ctx.aborted && idleRounds < MAX_IDLE) {
-      const chunk = await this._waitForOutput(cliSessionId, ctx, POLL_MS);
+      const chunk = await this._waitForOutput(shellSessionId, ctx, POLL_MS);
       if (ctx.aborted) return;
 
       if (chunk.length === 0) {
         idleRounds++;
-        // After 10 idle rounds (20s), give a progress update
-        if (idleRounds === 10) {
+        if (idleRounds === 7) {
           this._addProgressMessage(projectId, `${tool} is still working...`, broadcastFn);
+        }
+        if (idleRounds >= 2 && totalOutput.length > 0) {
+          const clean = this._stripAnsi(totalOutput);
+          if (this._shellPromptReturned(clean)) break;
         }
         continue;
       }
@@ -91,72 +183,133 @@ class AgentGateway extends EventEmitter {
       idleRounds = 0;
       totalOutput += chunk;
 
-      // Auto-respond to confirmation prompts (y/n, continue, approve, etc.)
-      try {
-        const { autoResponder } = await import('./autoResponder.js');
-        const promptMatch = autoResponder.detectPrompt?.(chunk, tool);
-        if (promptMatch) {
-          const response = promptMatch.defaultResponse || 'y';
-          agentShellPool.write(cliSessionId, response + '\n');
-          this._addProgressMessage(projectId, `Auto-approved: ${response}`, broadcastFn);
-          continue; // Don't check for completion yet — more output coming
-        }
-      } catch {}
-
-      // Check if the tool is done (shell prompt returned or tool-specific markers)
-      const clean = chunk.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-      if (this._looksComplete(clean, tool)) {
+      const clean = this._stripAnsi(totalOutput);
+      if (this._shellPromptReturned(clean)) {
+        const trailing = await this._waitForOutput(shellSessionId, ctx, 1000);
+        if (trailing) totalOutput += trailing;
         break;
+      }
+
+      // Fast y/n prompt detection
+      const promptResponse = this._fastPromptDetect(this._stripAnsi(chunk));
+      if (promptResponse !== null) {
+        agentShellPool.write(shellSessionId, promptResponse + '\n');
+        this._addProgressMessage(projectId, `Auto: "${promptResponse || '(enter)'}"`, broadcastFn);
       }
     }
 
-    // Format and present the result
-    const cleanOutput = totalOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+    // ── Process output ──
+    const cleanOutput = this._stripAnsi(totalOutput).trim();
 
     if (!cleanOutput) {
-      this._addAgentMessage(projectId,
-        `Sent to ${tool} — no response received. The tool may still be processing. Check Internal Console for details.`,
-        broadcastFn, { tool });
+      this._addAgentMessage(projectId, `No response from ${tool}. Check Internal Console.`, broadcastFn, { tool });
       return;
     }
 
-    // Use local LLM to create a friendly summary
+    // For tools with JSON output (Claude, Copilot): extract session_id and result
+    let displayOutput = cleanOutput;
+    if (tool === 'claude' || tool === 'copilot') {
+      const parsed = this._parseJsonToolOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+
+      // Save CLI session ID for --resume on next message (conversation continuation)
+      if (parsed.sessionId) {
+        this._cliSessions.set(chatSessionId, {
+          cliSessionId: parsed.sessionId,
+          messageCount: (cliState?.messageCount || 0) + 1,
+        });
+      }
+    } else {
+      displayOutput = this._extractToolResponse(cleanOutput, cmd);
+    }
+
+    // Use LLM to format as markdown (format only, never rewrite)
     try {
       const result = await llmProvider.generateResponse(
-        `You are formatting terminal output from "${tool}" for a developer chat UI.\n\nUser's message: "${message}"\n\nTool output:\n${cleanOutput.slice(-4000)}\n\nCreate a concise, helpful response. Include key results, file changes, errors, or answers. Use markdown for readability. If the output is a simple answer, just give the answer.`,
+        `Format this terminal output as clean markdown. Keep the EXACT content — only clean up terminal artifacts and add markdown formatting (bold, code blocks, bullets). Never change the meaning.\n\nOutput:\n${displayOutput.slice(-3000)}`,
         { maxTokens: 500, temperature: 0.1 }
       );
       this._addAgentMessage(projectId, result.response, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
     } catch {
-      // Local LLM failed — show cleaned output directly
-      const truncated = cleanOutput.length > 3000
-        ? '...\n' + cleanOutput.slice(-3000)
-        : cleanOutput;
-      this._addAgentMessage(projectId, `**${tool} output:**\n\`\`\`\n${truncated}\n\`\`\``, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+      this._addAgentMessage(projectId, displayOutput, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
     }
   }
 
   /**
-   * Heuristic: does the output look like the tool finished?
+   * Parse JSON output from CLI tools (Claude, Copilot) to extract session_id and result text.
+   * Expected format: {"type":"result","session_id":"...","result":"..."}
    */
-  _looksComplete(text, tool) {
-    const lastLine = text.split('\n').filter(l => l.trim()).pop() || '';
+  _parseJsonToolOutput(cleanOutput, cmd) {
+    // The output contains the command echo, possibly multiple JSON lines, and a shell prompt
+    const lines = cleanOutput.split('\n');
+    let text = '';
+    let sessionId = null;
 
-    // Shell prompt returned
-    if (/[$#>]\s*$/.test(lastLine)) return true;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
 
-    // Claude Code specific completion markers
-    if (tool === 'claude') {
-      if (/^[>❯]\s*$/.test(lastLine)) return true; // Claude's prompt
-      if (lastLine.includes('Cost:') && lastLine.includes('tokens')) return true;
+      // Try to parse as JSON (Claude's output format)
+      if (trimmed.startsWith('{')) {
+        try {
+          const json = JSON.parse(trimmed);
+          if (json.session_id) sessionId = json.session_id;
+          if (json.result) text = json.result;
+          if (json.type === 'result' && json.result) text = json.result;
+          continue;
+        } catch {}
+      }
     }
 
-    // Copilot specific
-    if (tool === 'copilot') {
-      if (/^>\s*$/.test(lastLine)) return true;
+    // If we couldn't parse JSON, fall back to extracting text
+    if (!text) {
+      text = this._extractToolResponse(cleanOutput, cmd);
     }
 
+    return { text, sessionId };
+  }
+
+  // ── Shell prompt detection ──
+
+  _shellPromptReturned(cleanText) {
+    const lines = cleanText.split('\n').filter(l => l.trim());
+    if (lines.length === 0) return false;
+    const lastLine = lines[lines.length - 1].trim();
+    if (/[$#]\s*$/.test(lastLine) && lastLine.length > 1) return true;
+    if (/>\s*$/.test(lastLine) && lastLine.includes(':')) return true;
     return false;
+  }
+
+  _fastPromptDetect(text) {
+    const lastBit = text.slice(-500);
+    if (/\[Y\/n\]/i.test(lastBit)) return 'Y';
+    if (/\[y\/N\]/i.test(lastBit)) return 'y';
+    if (/\(y\/n\)/i.test(lastBit)) return 'y';
+    if (/\[Yes\].*\[No\]/i.test(lastBit)) return 'Yes';
+    if (/Allow.*\?\s*$/i.test(lastBit)) return 'y';
+    if (/Approve.*\?\s*$/i.test(lastBit)) return 'y';
+    if (/Continue\?\s*$/i.test(lastBit)) return '';
+    if (/Press Enter/i.test(lastBit)) return '';
+    if (/trust.*project/i.test(lastBit)) return 'y';
+    if (/Do you want to/i.test(lastBit)) return 'y';
+    if (/Would you like to/i.test(lastBit)) return 'y';
+    return null;
+  }
+
+  _extractToolResponse(cleanOutput, cmd) {
+    let lines = cleanOutput.split('\n');
+    const cmdBase = cmd.split("'")[0].trim();
+    const startIdx = lines.findIndex(l => l.includes(cmdBase));
+    if (startIdx >= 0) lines = lines.slice(startIdx + 1);
+
+    while (lines.length > 0) {
+      const last = lines[lines.length - 1].trim();
+      if (/[$#>]\s*$/.test(last) && last.length > 1) lines.pop();
+      else if (!last) lines.pop();
+      else break;
+    }
+
+    return lines.join('\n').trim() || cleanOutput;
   }
 
   // ── Plan execution ──
@@ -178,7 +331,7 @@ class AgentGateway extends EventEmitter {
         }));
         this._addProgressMessage(projectId, `Step ${i + 1}/${steps.length}: ${step.title}`, broadcastFn, tasks);
 
-        await this._sendToTool(projectId, step.prompt, tool, broadcastFn, ctx);
+        await this._sendToTool(projectId, sessionId, step.prompt, tool, broadcastFn, ctx);
         if (ctx.aborted) break;
       }
 
@@ -206,7 +359,7 @@ class AgentGateway extends EventEmitter {
     broadcastFn({ type: 'agent-status', projectId, busy: false });
   }
 
-  _waitForOutput(sessionId, ctx, quietMs = 2000) {
+  _waitForOutput(sessionId, ctx, quietMs = 3000) {
     return new Promise((resolve) => {
       let timeout;
       let output = '';
@@ -225,6 +378,15 @@ class AgentGateway extends EventEmitter {
         resolve(output);
       }, quietMs);
     });
+  }
+
+  _stripAnsi(text) {
+    return text
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+      .replace(/\x1b\][^\x07]*\x07/g, '')
+      .replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '')
+      .replace(/\x1b[()][A-Z0-9]/g, '')
+      .replace(/\r/g, '');
   }
 
   _addAgentMessage(projectId, content, broadcastFn, metadata = null) {

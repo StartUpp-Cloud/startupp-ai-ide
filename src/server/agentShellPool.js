@@ -6,6 +6,11 @@ class AgentShellPool extends EventEmitter {
     super();
     this.sessions = new Map(); // key -> { sessionId, projectId, tool, createdAt }
     this.outputBuffers = new Map(); // sessionId -> string (last 20KB)
+
+    // Listen directly to ptyManager data events — reliable, no dynamic imports needed
+    ptyManager.on('data', ({ sessionId, data }) => {
+      this.feedOutput(sessionId, data);
+    });
   }
 
   _key(projectId, tool) {

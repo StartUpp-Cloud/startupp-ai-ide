@@ -101,15 +101,8 @@ class TerminalServer {
         // Forward to orchestrator if it has an active execution for this session
         orchestrator.feedOutput(sessionId, coalesced);
 
-        // Feed output to agent shell pool
-        const { agentShellPool } = await import('./agentShellPool.js');
-        agentShellPool.feedOutput(sessionId, coalesced);
-
-        // Forward agent shell output for debug console
-        const session = ptyManager.getSession(sessionId);
-        if (session?.role === 'agent') {
-          this.broadcast({ type: 'agent-shell-output', sessionId, data: coalesced });
-        }
+        // agentShellPool.feedOutput is handled via ptyManager 'data' event listener
+        // (set up in agentShellPool constructor — no dynamic import needed)
       }, 5);
     });
 
