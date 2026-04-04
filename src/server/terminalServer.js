@@ -242,7 +242,7 @@ class TerminalServer {
   /**
    * Handle incoming WebSocket messages
    */
-  handleMessage(ws, msg) {
+  async handleMessage(ws, msg) {
     const { type, ...payload } = msg;
 
     switch (type) {
@@ -344,6 +344,34 @@ class TerminalServer {
       case 'kill-switch':
         this.handleKillSwitch(ws, payload);
         break;
+
+      case 'chat-send': {
+        // User sent a chat message — persist and echo back
+        const { chatStore } = await import('./chatStore.js');
+        const userMsg = chatStore.addMessage({
+          projectId: payload.projectId,
+          role: 'user',
+          content: payload.content,
+          metadata: { mode: payload.mode },
+        });
+        this.broadcast({ type: 'chat-message', message: userMsg });
+
+        // Placeholder agent response (Phase 3 will replace with agentGateway)
+        const agentMsg = chatStore.addMessage({
+          projectId: payload.projectId,
+          role: 'agent',
+          content: `Received your message. Agent gateway will be connected in Phase 3.\n\nYour request: "${payload.content}"`,
+          metadata: { mode: payload.mode },
+        });
+        this.broadcast({ type: 'chat-message', message: agentMsg });
+        break;
+      }
+
+      case 'chat-stop': {
+        // User wants to stop the current agent task (Phase 3)
+        // Placeholder — will wire to agentGateway._abort()
+        break;
+      }
 
       default:
         this.sendError(ws, `Unknown message type: ${type}`);
