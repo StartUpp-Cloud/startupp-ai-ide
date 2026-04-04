@@ -983,13 +983,27 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
 
                   <div>
                     <label className="block text-sm font-medium text-surface-300 mb-2">GitHub Token (PAT)</label>
-                    <input
-                      type="password"
-                      value={settings.github?.apiKey || ''}
-                      onChange={(e) => saveGitHubConfig({ apiKey: e.target.value })}
-                      placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-                      className="w-full px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm font-mono placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
-                    />
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        id="github-token-input"
+                        defaultValue=""
+                        placeholder={settings.github?.apiKey ? '••••••••(configured — paste new to replace)' : 'ghp_xxxxxxxxxxxxxxxxxxxx'}
+                        className="flex-1 px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm font-mono placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
+                      />
+                      <button
+                        onClick={() => {
+                          const input = document.getElementById('github-token-input');
+                          if (input?.value?.trim()) {
+                            saveGitHubConfig({ apiKey: input.value.trim() });
+                            input.value = '';
+                          }
+                        }}
+                        className="px-3 py-2 bg-primary-500 hover:bg-primary-600 text-surface-950 rounded-lg text-sm font-medium transition-colors"
+                      >
+                        Save
+                      </button>
+                    </div>
                     <p className="text-[11px] text-surface-500 mt-1">
                       Create at github.com/settings/tokens → Fine-grained → "copilot" permission
                     </p>
