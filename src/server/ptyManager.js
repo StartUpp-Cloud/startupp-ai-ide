@@ -324,6 +324,10 @@ class PTYManager extends EventEmitter {
         }).catch(err => console.warn('Failed to save session history:', err.message));
 
         this.emit('exit', { sessionId, exitCode, signal });
+
+        // Clean up terminated session from the map after a delay
+        // (allows exit event to be processed by clients first)
+        setTimeout(() => this.sessions.delete(sessionId), 5000);
       });
 
       this.sessions.set(sessionId, session);
@@ -418,6 +422,9 @@ class PTYManager extends EventEmitter {
             }).catch(err => console.warn('Failed to save session history:', err.message));
 
             this.emit('exit', { sessionId, exitCode, signal });
+
+            // Clean up terminated session from the map after a delay
+            setTimeout(() => this.sessions.delete(sessionId), 5000);
           });
 
           this.sessions.set(sessionId, session);

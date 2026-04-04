@@ -273,6 +273,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setSessionId(msg.sessionId);
         sessionIdRef.current = msg.sessionId; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.sessionId);
+        // Re-enable cursor blink now that we have an active session
+        xtermRef.current?.options && (xtermRef.current.options.cursorBlink = true);
         // Fit and focus after render settles
         requestAnimationFrame(() => {
           fitAddonRef.current?.fit();
@@ -295,6 +297,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setSessionId(msg.session.id);
         sessionIdRef.current = msg.session.id; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.session.id);
+        // Re-enable cursor blink now that we have an active session
+        xtermRef.current?.options && (xtermRef.current.options.cursorBlink = true);
         // Don't reset here — project-sessions handler already cleared the screen.
         // The server sends scrollback as 'output' messages right after this.
         // Just fit and focus after a tick to ensure correct dimensions.
@@ -369,12 +373,15 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         break;
       }
 
-      case 'exit':
+      case 'exit': {
         xtermRef.current?.writeln(`\n\x1b[33m\u25CF Session exited (code: ${msg.exitCode})\x1b[0m`);
+        const wasCurrentSession = msg.sessionId === sessionIdRef.current;
         // Use ref to get current sessionId value
-        if (msg.sessionId === sessionIdRef.current) {
+        if (wasCurrentSession) {
           setSessionId(null);
           onSessionChange?.(null);
+          // Stop cursor blink — no active session
+          xtermRef.current?.options && (xtermRef.current.options.cursorBlink = false);
         }
         // Remove from project mapping
         for (const [pid, sid] of projectSessionsRef.current.entries()) {
@@ -384,7 +391,26 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           }
         }
         setSessions(prev => prev.filter(s => s.id !== msg.sessionId));
+
+        // Auto-recreate session if the exited session belonged to the current project
+        const currentProjectId = prevProjectIdRef.current;
+        if (wasCurrentSession && currentProjectId && wsRef.current) {
+          xtermRef.current?.writeln(`\x1b[90mRestarting shell...\x1b[0m`);
+          setTimeout(() => {
+            if (!wsRef.current) return;
+            const role = isUtility ? 'utility' : 'main';
+            wsRef.current.send(JSON.stringify({
+              type: 'create-session',
+              projectId: currentProjectId,
+              role,
+              cliTool: null,
+              cols: xtermRef.current?.cols || 120,
+              rows: xtermRef.current?.rows || 30,
+            }));
+          }, 500);
+        }
         break;
+      }
 
       case 'sessions-list':
         setSessions(msg.sessions);
@@ -410,6 +436,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         const activeSessions = (msg.sessions || []).filter(s => s.status === 'active');
 
         xtermRef.current?.reset();
+        // Pause cursor blink during transition — re-enabled on attach/create
+        xtermRef.current?.options && (xtermRef.current.options.cursorBlink = false);
 
         if (activeSessions.length > 0) {
           // Reattach to the most recent active session for this role
