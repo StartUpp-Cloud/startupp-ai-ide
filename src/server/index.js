@@ -15,6 +15,8 @@ import { initDB } from "./db.js";
 // Import terminal server
 import { terminalServer } from "./terminalServer.js";
 import { ptyManager } from "./ptyManager.js";
+// Initialize agent shell pool (attaches ptyManager data listener in constructor)
+import "./agentShellPool.js";
 
 // Import routes
 import projectRoutes from "./routes/projects.js";
@@ -41,6 +43,7 @@ import debugElementRoutes from "./routes/debugElement.js";
 import containerRoutes from "./routes/containers.js";
 import sessionHistoryRoutes from "./routes/sessionHistory.js";
 import chatRoutes from "./routes/chat.js";
+import profileRoutes from "./routes/profile.js";
 import { authMiddleware, getToken } from "./authToken.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
@@ -140,6 +143,7 @@ async function startServer() {
     app.use("/api/containers", containerRoutes);
     app.use("/api/session-history", sessionHistoryRoutes);
     app.use("/api/projects", chatRoutes);
+    app.use("/api/profile", profileRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

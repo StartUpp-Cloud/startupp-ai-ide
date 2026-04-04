@@ -81,6 +81,7 @@ router.post('/', async (req, res) => {
       enabled,
       notifyOnFailure,
       notifyOnSuccess,
+      cliTool,
     } = req.body;
 
     // Validate required fields
@@ -120,6 +121,7 @@ router.post('/', async (req, res) => {
       enabled,
       notifyOnFailure,
       notifyOnSuccess,
+      cliTool,
     });
 
     res.status(201).json(schedule);
