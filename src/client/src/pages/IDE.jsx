@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useProjects } from '../contexts/ProjectContext';
 import ChatPanel from '../components/ChatPanel';
+import InternalConsole from '../components/InternalConsole';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import QuickActionsPanel from '../components/QuickActionsPanel';
 import TopBar from '../components/TopBar';
@@ -393,6 +394,7 @@ export default function IDE() {
             projectId={selectedProjectId}
             wsRef={chatWsRef}
           />
+          <InternalConsole wsRef={chatWsRef} />
         </div>
 
         {/* Right Resizer */}
