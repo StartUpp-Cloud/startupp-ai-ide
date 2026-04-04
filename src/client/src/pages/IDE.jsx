@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useProjects } from '../contexts/ProjectContext';
-import Terminal, { useTerminal } from '../components/Terminal';
+import ChatPanel from '../components/ChatPanel';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import QuickActionsPanel from '../components/QuickActionsPanel';
 import TopBar from '../components/TopBar';
@@ -20,8 +20,6 @@ import {
 // Storage keys
 const STORAGE_KEYS = {
   SELECTED_PROJECT: 'ide-selected-project',
-  SESSION_ID: 'ide-session-id',
-  UTIL_SESSION_ID: 'ide-util-session-id',
   LEFT_PANEL_WIDTH: 'ide-left-panel-width',
   RIGHT_PANEL_WIDTH: 'ide-right-panel-width',
   LEFT_PANEL_COLLAPSED: 'ide-left-collapsed',
@@ -29,8 +27,6 @@ const STORAGE_KEYS = {
 
 export default function IDE() {
   const { projects, getProject, getGlobalRules, notify } = useProjects();
-  const { sendToTerminal } = useTerminal();
-
   // Layout state (with persistence)
   const [leftPanelWidth, setLeftPanelWidth] = useState(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.LEFT_PANEL_WIDTH);
@@ -50,19 +46,7 @@ export default function IDE() {
   });
   const [selectedProject, setSelectedProject] = useState(null);
 
-  // Session state (with persistence)
-  const [currentSessionId, setCurrentSessionId] = useState(() => {
-    return localStorage.getItem(STORAGE_KEYS.SESSION_ID) || null;
-  });
-  const [utilSessionId, setUtilSessionId] = useState(() => {
-    return localStorage.getItem(STORAGE_KEYS.UTIL_SESSION_ID) || null;
-  });
-
-  // Utility terminal
-  const [utilTerminalCollapsed, setUtilTerminalCollapsed] = useState(false);
-
-  // Sessions & notifications state
-  const [allSessions, setAllSessions] = useState([]);
+  // Notifications state
   const [notifications, setNotifications] = useState([]);
 
   // Git branch state (legacy local projects)
@@ -79,6 +63,17 @@ export default function IDE() {
 
   // Resizer state
   const [isResizing, setIsResizing] = useState(null);
+
+  // Chat WebSocket connection
+  const chatWsRef = useRef(null);
+
+  useEffect(() => {
+    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/terminal`;
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => { chatWsRef.current = ws; };
+    ws.onclose = () => { chatWsRef.current = null; };
+    return () => ws.close();
+  }, []);
 
   // ── Persist state ──
 
@@ -101,22 +96,6 @@ export default function IDE() {
       localStorage.removeItem(STORAGE_KEYS.SELECTED_PROJECT);
     }
   }, [selectedProjectId]);
-
-  useEffect(() => {
-    if (currentSessionId) {
-      localStorage.setItem(STORAGE_KEYS.SESSION_ID, currentSessionId);
-    } else {
-      localStorage.removeItem(STORAGE_KEYS.SESSION_ID);
-    }
-  }, [currentSessionId]);
-
-  useEffect(() => {
-    if (utilSessionId) {
-      localStorage.setItem(STORAGE_KEYS.UTIL_SESSION_ID, utilSessionId);
-    } else {
-      localStorage.removeItem(STORAGE_KEYS.UTIL_SESSION_ID);
-    }
-  }, [utilSessionId]);
 
   // ── Load project ──
 
@@ -144,17 +123,6 @@ export default function IDE() {
       setSelectedProject(null);
     }
   };
-
-  // ── New session pair — creates main + utility together ──
-  useEffect(() => {
-    window.createNewSessionPair = () => {
-      // Trigger both terminals to create new sessions
-      // Each terminal's createSession is exposed via the "New" button internally
-      // But we need a way to trigger both. Use a custom event.
-      window.dispatchEvent(new CustomEvent('create-new-session-pair'));
-    };
-    return () => { window.createNewSessionPair = null; };
-  }, []);
 
   // ── Repos + branches polling (container or local) ──
 
@@ -198,18 +166,6 @@ export default function IDE() {
     return () => clearInterval(interval);
   }, [selectedProject?.containerName, selectedProject?.folderPath]);
 
-  // ── Listen for run-in-util events from QuickActionsPanel ──
-
-  useEffect(() => {
-    const handler = (e) => {
-      if (window.sendUtilTerminal) {
-        window.sendUtilTerminal(e.detail.command);
-      }
-    };
-    window.addEventListener('run-in-util', handler);
-    return () => window.removeEventListener('run-in-util', handler);
-  }, []);
-
   // ── Notification helpers ──
 
   const addNotification = useCallback((type, title, detail, sessionId, projectName) => {
@@ -236,35 +192,11 @@ export default function IDE() {
   }, []);
 
   const handleNotificationClick = useCallback((notification) => {
-    if (notification.sessionId && window.switchMainSession) {
-      window.switchMainSession(notification.sessionId);
-    }
     // Mark as read
     setNotifications(prev => prev.map(n => n.id === notification.id ? { ...n, read: true } : n));
   }, []);
 
-  // ── Listen for session events (needs-input, errors) via window events ──
-
-  useEffect(() => {
-    const handleNeedsInput = (e) => {
-      const { sessionId, text } = e.detail;
-      const session = allSessions.find(s => s.id === sessionId);
-      const proj = projects.find(p => p.id === session?.projectId);
-      addNotification('needs-input', 'Input needed', text, sessionId, proj?.name);
-    };
-
-    window.addEventListener('session-needs-input', handleNeedsInput);
-    return () => {
-      window.removeEventListener('session-needs-input', handleNeedsInput);
-    };
-  }, [allSessions, projects, addNotification]);
-
   // ── TopBar callbacks ──
-
-  const handleSendRaw = useCallback((text) => {
-    if (!currentSessionId || !text?.trim()) return;
-    sendToTerminal(text.trim() + '\n');
-  }, [currentSessionId, sendToTerminal]);
 
   const handleGeneratePlan = useCallback((plan) => {
     setPlanSteps(plan.steps);
@@ -274,51 +206,6 @@ export default function IDE() {
     setExecutionId(null);
     notify(`Plan ready: ${plan.steps.length} steps`);
   }, [notify]);
-
-  const handleStartAutonomous = useCallback(() => {
-    if (!planSteps || !currentSessionId || !selectedProject) return;
-    fetch('/api/orchestrator/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: currentSessionId,
-        projectId: selectedProjectId,
-        projectPath: selectedProject.folderPath || null,
-        steps: planSteps,
-        planTitle,
-        cliTool: 'claude',
-        config: { autoCommit: true, runTests: false, maxRetries: 1, gitStrategy: 'current-branch' },
-      }),
-    }).then(r => r.json()).then(data => {
-      if (data.executionId) {
-        setExecutionId(data.executionId);
-        setPlanRunning(true);
-        notify('Autonomous execution started');
-      } else if (data.error) {
-        notify(data.error, 'error');
-      }
-    }).catch(err => notify(err.message, 'error'));
-  }, [planSteps, currentSessionId, selectedProject, selectedProjectId, planTitle, notify]);
-
-  const handlePlanControl = useCallback((action) => {
-    if (!executionId) return;
-    fetch(`/api/orchestrator/${action}/${executionId}`, { method: 'POST' })
-      .then(r => r.json())
-      .then(() => {
-        if (action === 'stop') { setPlanRunning(false); setExecutionId(null); }
-        if (action === 'pause') { setPlanRunning(false); }
-        if (action === 'resume') { setPlanRunning(true); }
-      })
-      .catch(err => notify(err.message, 'error'));
-  }, [executionId, notify]);
-
-  const handleKill = useCallback(() => {
-    if (!executionId) return;
-    fetch(`/api/orchestrator/kill/${executionId}`, { method: 'POST' });
-    setPlanRunning(false);
-    setExecutionId(null);
-    notify('Execution killed', 'error');
-  }, [executionId, notify]);
 
   // ── Resize handling ──
 
@@ -358,18 +245,12 @@ export default function IDE() {
         selectedProject={selectedProject}
         selectedProjectId={selectedProjectId}
         currentBranch={currentBranch}
-        currentSessionId={currentSessionId}
         executionId={executionId}
         planRunning={planRunning}
         planSteps={planSteps}
         planTitle={planTitle}
         planCurrentStep={planCurrentStep}
-        onSendRaw={handleSendRaw}
-        onOptimizeAndSend={handleSendRaw}
         onGeneratePlan={handleGeneratePlan}
-        onStartAutonomous={handleStartAutonomous}
-        onPlanControl={handlePlanControl}
-        onKill={handleKill}
         notify={notify}
         notificationSlot={
           <NotificationCenter
@@ -409,8 +290,6 @@ export default function IDE() {
                     onProjectChanged={() => {
                       if (selectedProjectId) loadProject(selectedProjectId);
                     }}
-                    sessions={allSessions}
-                    activeSessionId={currentSessionId}
                   />
                 </div>
               </div>
@@ -508,42 +387,12 @@ export default function IDE() {
           </div>
         )}
 
-        {/* ── Center: Terminals ── */}
+        {/* ── Center: Chat ── */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* Main Terminal */}
-          <div className="flex-1 flex flex-col min-h-0" style={{ flex: utilTerminalCollapsed ? 1 : 0.65 }}>
-            <Terminal
-              projectId={selectedProjectId}
-              projects={projects}
-              onSessionChange={setCurrentSessionId}
-              onSessionsChange={setAllSessions}
-              initialSessionId={currentSessionId}
-            />
-          </div>
-
-          {/* Utility Terminal Divider */}
-          <div className="flex items-center bg-surface-800 border-y border-surface-700 px-2">
-            <button
-              onClick={() => setUtilTerminalCollapsed(prev => !prev)}
-              className="flex items-center gap-1.5 py-0.5 text-[11px] text-surface-400 hover:text-surface-200"
-            >
-              {utilTerminalCollapsed ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-              <span>&gt;_ Utility Shell</span>
-            </button>
-          </div>
-
-          {/* Utility Terminal */}
-          {!utilTerminalCollapsed && (
-            <div className="flex flex-col min-h-0" style={{ flex: 0.35 }}>
-              <Terminal
-                projectId={selectedProjectId}
-                projects={projects}
-                onSessionChange={setUtilSessionId}
-                initialSessionId={utilSessionId}
-                isUtility={true}
-              />
-            </div>
-          )}
+          <ChatPanel
+            projectId={selectedProjectId}
+            wsRef={chatWsRef}
+          />
         </div>
 
         {/* Right Resizer */}
@@ -557,7 +406,6 @@ export default function IDE() {
           <RightPanel
             projectId={selectedProjectId}
             projectPath={selectedProject?.folderPath}
-            sessionId={currentSessionId}
           />
         </div>
       </div>
