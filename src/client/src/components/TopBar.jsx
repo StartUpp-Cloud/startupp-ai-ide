@@ -168,9 +168,7 @@ export default function TopBar({
       </div>
 
       {/* LLM Settings Modal */}
-      {showLLMSettings && (
-        <LLMSettingsPanel onClose={() => setShowLLMSettings(false)} />
-      )}
+      <LLMSettingsPanel isOpen={showLLMSettings} onClose={() => setShowLLMSettings(false)} />
     </div>
   );
 }
