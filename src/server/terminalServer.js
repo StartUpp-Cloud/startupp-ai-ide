@@ -77,7 +77,7 @@ class TerminalServer {
       buf.data += data;
 
       if (buf.timer) clearTimeout(buf.timer);
-      buf.timer = setTimeout(() => {
+      buf.timer = setTimeout(async () => {
         const coalesced = buf.data;
         buf.data = '';
         coalesceBufs.delete(sessionId);
@@ -100,6 +100,16 @@ class TerminalServer {
 
         // Forward to orchestrator if it has an active execution for this session
         orchestrator.feedOutput(sessionId, coalesced);
+
+        // Feed output to agent shell pool
+        const { agentShellPool } = await import('./agentShellPool.js');
+        agentShellPool.feedOutput(sessionId, coalesced);
+
+        // Forward agent shell output for debug console
+        const session = ptyManager.getSession(sessionId);
+        if (session?.role === 'agent') {
+          this.broadcast({ type: 'agent-shell-output', sessionId, data: coalesced });
+        }
       }, 5);
     });
 
@@ -346,8 +356,10 @@ class TerminalServer {
         break;
 
       case 'chat-send': {
-        // User sent a chat message — persist and echo back
         const { chatStore } = await import('./chatStore.js');
+        const { agentGateway } = await import('./agentGateway.js');
+
+        // Persist user message
         const userMsg = chatStore.addMessage({
           projectId: payload.projectId,
           role: 'user',
@@ -356,20 +368,27 @@ class TerminalServer {
         });
         this.broadcast({ type: 'chat-message', message: userMsg });
 
-        // Placeholder agent response (Phase 3 will replace with agentGateway)
-        const agentMsg = chatStore.addMessage({
+        // Dispatch to agent gateway (async — runs in background)
+        agentGateway.handleTask({
           projectId: payload.projectId,
-          role: 'agent',
-          content: `Received your message. Agent gateway will be connected in Phase 3.\n\nYour request: "${payload.content}"`,
-          metadata: { mode: payload.mode },
+          content: payload.content,
+          mode: payload.mode,
+          broadcastFn: (data) => this.broadcast(data),
+        }).catch(err => {
+          const errMsg = chatStore.addMessage({
+            projectId: payload.projectId,
+            role: 'error',
+            content: `Gateway error: ${err.message}`,
+          });
+          this.broadcast({ type: 'chat-message', message: errMsg });
         });
-        this.broadcast({ type: 'chat-message', message: agentMsg });
         break;
       }
 
       case 'chat-stop': {
-        // User wants to stop the current agent task (Phase 3)
-        // Placeholder — will wire to agentGateway._abort()
+        const { agentGateway } = await import('./agentGateway.js');
+        agentGateway._abort(payload.projectId);
+        this.broadcast({ type: 'agent-status', projectId: payload.projectId, busy: false });
         break;
       }
 
