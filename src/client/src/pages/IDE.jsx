@@ -424,7 +424,7 @@ export default function IDE() {
             mode={agentMode}
             tool={selectedTool}
           />
-          <InternalConsole wsRef={chatWsRef} />
+          <InternalConsole projectId={selectedProjectId} wsRef={chatWsRef} />
         </div>
 
         {/* Right resizer */}
@@ -438,6 +438,7 @@ export default function IDE() {
           <RightPanel
             projectId={selectedProjectId}
             projectPath={selectedProject?.folderPath}
+            selectedTool={selectedTool}
           />
         </div>
       </div>

@@ -56,7 +56,7 @@ function relativeTime(timestamp) {
   return `${days}d ago`;
 }
 
-export default function SchedulerPanel({ projectId, projectPath }) {
+export default function SchedulerPanel({ projectId, projectPath, selectedTool }) {
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateForm, setShowCreateForm] = useState(false);
@@ -70,6 +70,7 @@ export default function SchedulerPanel({ projectId, projectPath }) {
   const [formType, setFormType] = useState('command');
   const [formCommand, setFormCommand] = useState('');
   const [formIntervalMs, setFormIntervalMs] = useState(300000);
+  const [formCliTool, setFormCliTool] = useState('');
   const [creating, setCreating] = useState(false);
 
   const fetchSchedules = async () => {
@@ -112,7 +113,8 @@ export default function SchedulerPanel({ projectId, projectPath }) {
           projectId,
           name: formName.trim(),
           type: formType,
-          command: formType === 'command' ? formCommand.trim() : undefined,
+          command: formCommand.trim(),
+          cliTool: formCliTool || undefined,
           projectPath,
           intervalMs: formIntervalMs,
           enabled: true,
@@ -135,6 +137,7 @@ export default function SchedulerPanel({ projectId, projectPath }) {
     setFormType('command');
     setFormCommand('');
     setFormIntervalMs(300000);
+    setFormCliTool('');
   };
 
   const handleToggle = async (schedule) => {
@@ -239,7 +242,8 @@ export default function SchedulerPanel({ projectId, projectPath }) {
                       setFormName(data.config.name || '');
                       setFormType(data.config.type || 'command');
                       setFormCommand(data.config.command || data.config.webhookUrl || '');
-                      setFormInterval(data.config.intervalMs || 300000);
+                      setFormIntervalMs(data.config.intervalMs || 300000);
+                      setFormCliTool(selectedTool || 'claude');
                       setAiQuery('');
                     }
                   } catch { /* ignore */ }
@@ -298,6 +302,31 @@ export default function SchedulerPanel({ projectId, projectPath }) {
               className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 placeholder-surface-500 focus:ring-1 focus:ring-primary-500 font-mono"
             />
           )}
+
+          {/* CLI Tool selector */}
+          <div>
+            <label className="text-[10px] text-surface-500 uppercase mb-1 block">Run via</label>
+            <div className="flex gap-1 flex-wrap">
+              {[
+                { id: '', label: 'Shell', color: 'surface' },
+                { id: 'claude', label: 'Claude', color: 'orange' },
+                { id: 'copilot', label: 'Copilot', color: 'blue' },
+                { id: 'aider', label: 'Aider', color: 'green' },
+              ].map(t => (
+                <button
+                  key={t.id}
+                  onClick={() => setFormCliTool(t.id)}
+                  className={`px-2 py-0.5 text-[10px] rounded border transition-colors ${
+                    formCliTool === t.id
+                      ? `bg-${t.color}-500/20 border-${t.color}-500/40 text-${t.color}-300`
+                      : 'bg-surface-800 border-surface-700 text-surface-400 hover:text-surface-200'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
           {/* Interval dropdown */}
           <select

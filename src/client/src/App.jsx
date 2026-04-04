@@ -8,6 +8,7 @@ import EditProject from "./pages/EditProject";
 import GlobalRules from "./pages/GlobalRules";
 import QuickPrompt from "./pages/QuickPrompt";
 import IDE from "./pages/IDE";
+import Profile from "./pages/Profile";
 import BranchReview from "./pages/BranchReview";
 import DebugElement from "./pages/DebugElement";
 import Onboarding from "./pages/Onboarding";
@@ -86,6 +87,7 @@ function App() {
           <Route path="/setup" element={<Onboarding />} />
           <Route path="/branch-review" element={<BranchReview />} />
           <Route path="/debug" element={<DebugElement />} />
+          <Route path="/profile" element={<Profile />} />
         </Routes>
       </SetupGate>
       <NotificationToast />
