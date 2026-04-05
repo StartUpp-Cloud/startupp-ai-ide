@@ -4,6 +4,44 @@ import ChatInput from './ChatInput';
 import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal } from 'lucide-react';
 
 /**
+ * Format job progress for display
+ */
+function formatJobProgress(progress) {
+  if (!progress) return 'Working...';
+
+  const statusEmoji = {
+    starting: '🚀',
+    thinking: '🤔',
+    reading: '📖',
+    writing: '✍️',
+    running: '⚡',
+    searching: '🔍',
+    responding: '💬',
+    working: '⚙️',
+    done: '✅',
+    error: '❌',
+  };
+
+  const emoji = statusEmoji[progress.status] || '⏳';
+  let text = `${emoji} ${progress.status.charAt(0).toUpperCase() + progress.status.slice(1)}`;
+
+  if (progress.detail) {
+    // Truncate long details
+    const detail = progress.detail.length > 60
+      ? progress.detail.slice(0, 60) + '...'
+      : progress.detail;
+    text += `: ${detail}`;
+  }
+
+  // Add LLM summary if available
+  if (progress.summary) {
+    text = progress.summary;
+  }
+
+  return text;
+}
+
+/**
  * Working indicator with live timer and stop button.
  * Shows as a single message that counts up, not spammed progress messages.
  */
@@ -238,6 +276,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           // A new streaming message started
           setStreamingMessage({
             id: msg.messageId,
+            jobId: msg.jobId,
             role: 'agent',
             content: 'Thinking...',
             createdAt: new Date().toISOString(),
@@ -289,6 +328,17 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               sessionId: msg.chatSessionId,
               messageId: incomplete.messageId,
             }));
+          }
+          break;
+
+        case 'job-progress':
+          // Update streaming message with job progress
+          if (msg.progress) {
+            setStreamingMessage(prev => prev ? {
+              ...prev,
+              content: formatJobProgress(msg.progress),
+              progress: msg.progress,
+            } : null);
           }
           break;
       }

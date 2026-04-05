@@ -49,6 +49,7 @@ import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
 import { scheduler } from "./scheduler.js";
 import { skillManager } from "./skillManager.js";
+import { jobManager } from "./jobManager.js";
 
 // Load environment variables
 dotenv.config();
@@ -115,6 +116,10 @@ async function startServer() {
     await skillManager.init();
     console.log("Skill manager ready");
 
+    // Initialize job manager (recovers interrupted jobs from previous session)
+    await jobManager.init();
+    console.log("Job manager ready");
+
     // API routes
     app.use("/api/projects", projectRoutes);
     app.use("/api/projects", promptRoutes); // This will handle /api/projects/:id/prompts
@@ -142,6 +147,7 @@ async function startServer() {
     app.use("/api/session-history", sessionHistoryRoutes);
     app.use("/api/projects", chatRoutes);
     app.use("/api/profile", profileRoutes);
+    app.use("/api/jobs", (await import("./routes/jobs.js")).default);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

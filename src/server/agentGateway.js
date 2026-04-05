@@ -16,6 +16,7 @@ import { EventEmitter } from 'events';
 import { llmProvider } from './llmProvider.js';
 import { chatStore } from './chatStore.js';
 import { agentShellPool } from './agentShellPool.js';
+import { jobManager } from './jobManager.js';
 import { getDB } from './db.js';
 
 class AgentGateway extends EventEmitter {
@@ -247,10 +248,11 @@ RULES:
   /**
    * Send to CLI tool with autonomous agent loop:
    * - Auto-retry on failure (up to 3 attempts with compaction)
-   * - Stall detection (soft 25s, hard 60s)
+   * - Activity-based timeout (10 min silence, 60 min hard limit)
    * - Event-driven completion from stream-json
    * - Live status reactions (thinking/reading/editing/running/done/error)
    * - Context recovery on "lost context" responses
+   * - JOB PERSISTENCE: Full operation tracked via JobManager for reliability
    * - STREAMING PERSISTENCE: Saves response chunks to disk as they arrive
    */
   async _sendToCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, mode = 'agent') {
@@ -266,112 +268,153 @@ RULES:
       metadata: { tool, streaming: true },
     });
 
+    // Create a job for reliable tracking
+    const job = jobManager.createJob({
+      projectId,
+      sessionId: chatSessionId,
+      messageId: streamingMsg.id,
+      tool,
+      prompt: message,
+    });
+
+    // Set up job event handlers for this operation
+    const jobProgressHandler = ({ job: j, progress }) => {
+      if (j.id !== job.id) return;
+      // Broadcast progress to client
+      broadcastFn({
+        type: 'job-progress',
+        projectId,
+        sessionId: chatSessionId,
+        jobId: job.id,
+        progress,
+      });
+      // Also send as a progress message for the chat
+      if (progress.summary) {
+        this._addProgressMessage(projectId, progress.summary, broadcastFn);
+      }
+    };
+    jobManager.on('job-progress', jobProgressHandler);
+
     // Notify client that streaming has started
     broadcastFn({
       type: 'chat-message-stream-start',
       projectId,
       sessionId: chatSessionId,
       messageId: streamingMsg.id,
+      jobId: job.id,
     });
 
     let chunkIndex = 0;
-    let accumulatedContent = '';
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
-      const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode, {
-        // Callback to persist chunks as they arrive (for recovery)
-        // NOTE: Raw chunks are saved to disk but NOT broadcast to client
-        // Client only sees progress messages and the final cleaned response
-        onChunk: (chunk) => {
-          accumulatedContent += chunk;
-          chatStore.appendStreamChunk({
+    try {
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
+        const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode, {
+          job, // Pass job for output recording
+          // Callback to persist chunks as they arrive (for recovery)
+          // NOTE: Raw chunks are saved to disk but NOT broadcast to client
+          // Client only sees progress messages and the final cleaned response
+          onChunk: (chunk) => {
+            chatStore.appendStreamChunk({
+              projectId,
+              sessionId: chatSessionId,
+              messageId: streamingMsg.id,
+              chunk,
+              chunkIndex: chunkIndex++,
+            });
+            // Record output to job (handles timeout tracking, progress parsing)
+            jobManager.recordOutput(job.id, chunk);
+          },
+        });
+
+        if (result.success) {
+          // ── Success: format and finalize ──
+          const finalContent = await this._cleanContent(result.displayOutput);
+          const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
+
+          // Complete the job
+          jobManager.completeJob(job.id, finalContent);
+
+          // Finalize the streaming message with complete content
+          chatStore.finalizeStreamingMessage({
             projectId,
             sessionId: chatSessionId,
             messageId: streamingMsg.id,
-            chunk,
-            chunkIndex: chunkIndex++,
+            finalContent,
+            metadata: {
+              tool,
+              jobId: job.id,
+              rawOutput: rawForDisplay.slice(-8000),
+              attempts: attempt,
+            },
           });
-          // Don't broadcast raw chunks - they contain JSON/ANSI that shouldn't be displayed
-          // Progress updates are sent separately via _parseStreamEvent()
-        },
-      });
 
-      if (result.success) {
-        // ── Success: format and finalize ──
-        const finalContent = await this._cleanContent(result.displayOutput);
-        const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
+          // Broadcast completion
+          broadcastFn({
+            type: 'chat-message-stream-complete',
+            projectId,
+            sessionId: chatSessionId,
+            messageId: streamingMsg.id,
+            jobId: job.id,
+            message: {
+              ...streamingMsg,
+              content: finalContent,
+              metadata: { tool, jobId: job.id, rawOutput: rawForDisplay.slice(-8000), attempts: attempt },
+            },
+          });
 
-        // Finalize the streaming message with complete content
+          this._persistContext(projectId, chatSessionId, message, finalContent);
+          return;
+        }
+
+        if (result.retry && attempt < MAX_ATTEMPTS) {
+          // ── Retry: compaction or context recovery ──
+          this._addProgressMessage(projectId,
+            `⚠ ${result.retryReason} — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})...`,
+            broadcastFn);
+
+          if (result.retryType === 'context-lost') {
+            this._cliSessions.delete(chatSessionId);
+            const contextSummary = await this._getContextSummary(projectId, chatSessionId);
+            message = `Context from our conversation:\n${contextSummary}\n\nUser's request: ${message}`;
+          }
+
+          await new Promise(r => setTimeout(r, 2000)); // Brief pause before retry
+          continue;
+        }
+
+        // ── Final failure: still finalize with whatever we got ──
+        const failureContent = result.error
+          ? `Error: ${result.error}`
+          : result.displayOutput || `No response from ${tool}. Check Internal Console.`;
+
+        // Fail the job
+        jobManager.failJob(job.id, failureContent);
+
         chatStore.finalizeStreamingMessage({
           projectId,
           sessionId: chatSessionId,
           messageId: streamingMsg.id,
-          finalContent,
-          metadata: {
-            tool,
-            rawOutput: rawForDisplay.slice(-8000),
-            attempts: attempt,
-          },
+          finalContent: failureContent,
+          metadata: { tool, jobId: job.id, error: true, attempts: attempt },
         });
 
-        // Broadcast completion
         broadcastFn({
           type: 'chat-message-stream-complete',
           projectId,
           sessionId: chatSessionId,
           messageId: streamingMsg.id,
+          jobId: job.id,
           message: {
             ...streamingMsg,
-            content: finalContent,
-            metadata: { tool, rawOutput: rawForDisplay.slice(-8000), attempts: attempt },
+            content: failureContent,
+            metadata: { tool, jobId: job.id, error: true },
           },
         });
-
-        this._persistContext(projectId, chatSessionId, message, finalContent);
         return;
       }
-
-      if (result.retry && attempt < MAX_ATTEMPTS) {
-        // ── Retry: compaction or context recovery ──
-        this._addProgressMessage(projectId,
-          `⚠ ${result.retryReason} — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})...`,
-          broadcastFn);
-
-        if (result.retryType === 'context-lost') {
-          this._cliSessions.delete(chatSessionId);
-          const contextSummary = await this._getContextSummary(projectId, chatSessionId);
-          message = `Context from our conversation:\n${contextSummary}\n\nUser's request: ${message}`;
-        }
-
-        await new Promise(r => setTimeout(r, 2000)); // Brief pause before retry
-        continue;
-      }
-
-      // ── Final failure: still finalize with whatever we got ──
-      const failureContent = result.error
-        ? `Error: ${result.error}`
-        : result.displayOutput || `No response from ${tool}. Check Internal Console.`;
-
-      chatStore.finalizeStreamingMessage({
-        projectId,
-        sessionId: chatSessionId,
-        messageId: streamingMsg.id,
-        finalContent: failureContent,
-        metadata: { tool, error: true, attempts: attempt },
-      });
-
-      broadcastFn({
-        type: 'chat-message-stream-complete',
-        projectId,
-        sessionId: chatSessionId,
-        messageId: streamingMsg.id,
-        message: {
-          ...streamingMsg,
-          content: failureContent,
-          metadata: { tool, error: true },
-        },
-      });
-      return;
+    } finally {
+      // Clean up event handler
+      jobManager.removeListener('job-progress', jobProgressHandler);
     }
   }
 
@@ -379,10 +422,12 @@ RULES:
    * Single attempt to run a CLI tool command.
    * Returns: { success, displayOutput, cleanOutput, retry, retryReason, retryType, error }
    * @param {Object} streamOpts - Optional streaming options
+   * @param {Object} streamOpts.job - Job for tracking (managed by JobManager)
    * @param {Function} streamOpts.onChunk - Callback for each output chunk (for persistence)
    */
   async _attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
-    const { onChunk } = streamOpts;
+    const { job, onChunk } = streamOpts;
+
     // Get or create shell session
     let shellSessionId;
     try {
@@ -391,6 +436,11 @@ RULES:
       if (sess.isNew) await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
       return { success: false, error: `Failed to start shell: ${err.message}` };
+    }
+
+    // Start the job if provided
+    if (job) {
+      jobManager.startJob(job.id, shellSessionId);
     }
 
     const cliState = this._cliSessions.get(chatSessionId);
@@ -403,15 +453,19 @@ RULES:
 
     agentShellPool.write(shellSessionId, cmd + '\n');
 
-    // ── Collect output with stall detection and live status ──
+    // ── Collect output with activity-based timeout ──
+    // JobManager handles timeout detection (10 min silence, 60 min hard limit)
+    // We just need to detect completion via result event or shell prompt
     let totalOutput = '';
     let idleRounds = 0;
     let lastOutputTime = Date.now();
     let lastProgressTime = 0;
     let resultEventSeen = false;
-    const MAX_IDLE = 180; // 180 x 2s = 6 min max
-    const STALL_SOFT_MS = 25000;
-    const STALL_HARD_MS = 90000;
+
+    // Support operations up to 60 minutes (1800 rounds × 2s = 60 min)
+    // Actual timeout is managed by JobManager based on activity
+    const MAX_IDLE = 1800;
+    const PROGRESS_INTERVAL_MS = 30000; // Show progress every 30s
 
     while (!ctx.aborted && idleRounds < MAX_IDLE) {
       const chunk = await this._waitForOutput(shellSessionId, ctx, 2000);
@@ -423,12 +477,13 @@ RULES:
         idleRounds++;
         const silenceMs = now - lastOutputTime;
 
-        // Stall detection
-        if (silenceMs > STALL_HARD_MS && totalOutput.length > 0) {
-          this._addProgressMessage(projectId, `⚠ ${tool} has been silent for ${Math.round(silenceMs / 1000)}s — may be stalled`, broadcastFn);
-        } else if (silenceMs > STALL_SOFT_MS && totalOutput.length > 0 && now - lastProgressTime > 10000) {
+        // Show periodic progress for long-running operations
+        if (silenceMs > PROGRESS_INTERVAL_MS && totalOutput.length > 0 && now - lastProgressTime > PROGRESS_INTERVAL_MS) {
           lastProgressTime = now;
-          this._addProgressMessage(projectId, `⏳ ${tool} is still working... (${Math.round(silenceMs / 1000)}s)`, broadcastFn);
+          const mins = Math.floor(silenceMs / 60000);
+          const secs = Math.floor((silenceMs % 60000) / 1000);
+          const duration = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+          this._addProgressMessage(projectId, `⏳ ${tool} is still working... (${duration} since last activity)`, broadcastFn);
         }
 
         // Check for completion via shell prompt or result event
@@ -436,6 +491,15 @@ RULES:
           const clean = this._stripAnsi(totalOutput);
           if (resultEventSeen || this._shellPromptReturned(clean)) break;
         }
+
+        // Check if job was failed by JobManager (activity timeout)
+        if (job) {
+          const currentJob = jobManager.getJob(job.id);
+          if (currentJob && (currentJob.status === 'failed' || currentJob.status === 'timeout')) {
+            return { success: false, error: currentJob.error || 'Operation timed out due to inactivity' };
+          }
+        }
+
         continue;
       }
 
@@ -443,7 +507,7 @@ RULES:
       lastOutputTime = now;
       totalOutput += chunk;
 
-      // Persist chunk if callback provided (streaming persistence)
+      // Persist chunk if callback provided (streaming persistence + job tracking)
       if (onChunk) {
         onChunk(chunk);
       }
@@ -456,14 +520,20 @@ RULES:
         resultEventSeen = true;
         // Wait briefly for trailing output (shell prompt)
         const trailing = await this._waitForOutput(shellSessionId, ctx, 1500);
-        if (trailing) totalOutput += trailing;
+        if (trailing) {
+          totalOutput += trailing;
+          if (onChunk) onChunk(trailing);
+        }
         break;
       }
 
       // Shell prompt fallback
       if (this._shellPromptReturned(cleanTotal)) {
         const trailing = await this._waitForOutput(shellSessionId, ctx, 1000);
-        if (trailing) totalOutput += trailing;
+        if (trailing) {
+          totalOutput += trailing;
+          if (onChunk) onChunk(trailing);
+        }
         break;
       }
 
