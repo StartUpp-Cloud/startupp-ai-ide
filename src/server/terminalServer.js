@@ -24,6 +24,75 @@ class TerminalServer {
     this.recentOutput = new Map(); // sessionId -> recent output for prompt detection
     this.sessionCliTools = new Map(); // sessionId -> cliTool
     this.autoResponseTimers = new Map(); // sessionId -> pending auto-response timer
+
+    // Per-session WebSocket tracking for isolation
+    // Each chat session gets its own dedicated client set
+    this.chatSessionClients = new Map(); // chatSessionId -> Set of ws clients
+    this.clientChatSessions = new Map(); // ws -> chatSessionId (for cleanup)
+  }
+
+  /**
+   * Attach a WebSocket client to a specific chat session.
+   * This enables per-session isolation for parallel work.
+   */
+  attachToChatSession(ws, chatSessionId) {
+    // Remove from previous chat session if any
+    const prevSession = this.clientChatSessions.get(ws);
+    if (prevSession && prevSession !== chatSessionId) {
+      const prevClients = this.chatSessionClients.get(prevSession);
+      if (prevClients) {
+        prevClients.delete(ws);
+        if (prevClients.size === 0) {
+          this.chatSessionClients.delete(prevSession);
+        }
+      }
+    }
+
+    // Add to new chat session
+    if (!this.chatSessionClients.has(chatSessionId)) {
+      this.chatSessionClients.set(chatSessionId, new Set());
+    }
+    this.chatSessionClients.get(chatSessionId).add(ws);
+    this.clientChatSessions.set(ws, chatSessionId);
+
+    console.log(`[TerminalServer] Client attached to chat session ${chatSessionId}`);
+  }
+
+  /**
+   * Broadcast to all clients attached to a specific chat session.
+   * Used for isolated per-session communication.
+   */
+  broadcastToChatSession(chatSessionId, message) {
+    const clients = this.chatSessionClients.get(chatSessionId);
+    if (!clients || clients.size === 0) return;
+
+    const data = JSON.stringify(message);
+    for (const client of clients) {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        try {
+          client.send(data);
+        } catch (err) {
+          console.warn(`[TerminalServer] Failed to send to chat session client:`, err.message);
+        }
+      }
+    }
+  }
+
+  /**
+   * Clean up chat session tracking when a client disconnects.
+   */
+  detachFromChatSession(ws) {
+    const chatSessionId = this.clientChatSessions.get(ws);
+    if (chatSessionId) {
+      const clients = this.chatSessionClients.get(chatSessionId);
+      if (clients) {
+        clients.delete(ws);
+        if (clients.size === 0) {
+          this.chatSessionClients.delete(chatSessionId);
+        }
+      }
+      this.clientChatSessions.delete(ws);
+    }
   }
 
   /**
@@ -354,6 +423,53 @@ class TerminalServer {
         this.handleKillSwitch(ws, payload);
         break;
 
+      // ── Per-session WebSocket management ──
+
+      case 'attach-chat-session': {
+        // Attach this WebSocket to a specific chat session for isolated communication
+        const { chatSessionId, projectId } = payload;
+        if (chatSessionId) {
+          this.attachToChatSession(ws, chatSessionId);
+          this.send(ws, { type: 'chat-session-attached', chatSessionId, projectId });
+
+          // Check for incomplete streaming messages and send recovery info
+          const { chatStore } = await import('./chatStore.js');
+          const incomplete = chatStore.getIncompleteStreamingMessages(projectId, chatSessionId);
+          if (incomplete.length > 0) {
+            this.send(ws, {
+              type: 'chat-session-recovery',
+              chatSessionId,
+              projectId,
+              incompleteMessages: incomplete.map(i => ({
+                messageId: i.message.id,
+                partialContent: i.partialContent,
+                chunkCount: i.chunks.length,
+              })),
+            });
+          }
+        }
+        break;
+      }
+
+      case 'recover-streaming-message': {
+        // Recover a streaming message that was interrupted
+        const { chatStore } = await import('./chatStore.js');
+        const { projectId, sessionId, messageId } = payload;
+
+        const recovered = chatStore.recoverStreamingMessage({ projectId, sessionId, messageId });
+        if (recovered) {
+          this.broadcastToChatSession(sessionId, {
+            type: 'chat-message-recovered',
+            projectId,
+            sessionId,
+            message: recovered,
+          });
+        } else {
+          this.send(ws, { type: 'error', error: 'Failed to recover message' });
+        }
+        break;
+      }
+
       case 'chat-send': {
         const { chatStore } = await import('./chatStore.js');
         const { agentGateway } = await import('./agentGateway.js');
@@ -361,6 +477,9 @@ class TerminalServer {
         // Ensure session exists
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
+
+        // Attach client to this chat session for isolated communication
+        this.attachToChatSession(ws, chatSessionId);
 
         // Persist user message
         const userMsg = chatStore.addMessage({
@@ -370,16 +489,27 @@ class TerminalServer {
           content: payload.content,
           metadata: { mode: payload.mode },
         });
+
+        // Broadcast to all clients attached to this chat session
+        this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: userMsg });
+
+        // Also broadcast globally for any listeners (backward compatibility)
         this.broadcast({ type: 'chat-message', message: userMsg });
 
         // Dispatch to agent gateway (async — runs in background)
+        // Use per-session broadcast for isolated response delivery
         agentGateway.handleTask({
           projectId: payload.projectId,
           sessionId: chatSessionId,
           content: payload.content,
           mode: payload.mode,
           tool: payload.tool || 'claude',
-          broadcastFn: (data) => this.broadcast(data),
+          broadcastFn: (data) => {
+            // Broadcast to chat session clients first (isolated)
+            this.broadcastToChatSession(chatSessionId, data);
+            // Also broadcast globally (backward compatibility)
+            this.broadcast(data);
+          },
         }).catch(err => {
           const errMsg = chatStore.addMessage({
             projectId: payload.projectId,
@@ -387,6 +517,7 @@ class TerminalServer {
             role: 'error',
             content: `Gateway error: ${err.message}`,
           });
+          this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: errMsg });
           this.broadcast({ type: 'chat-message', message: errMsg });
         });
         break;
@@ -824,6 +955,7 @@ class TerminalServer {
    */
   handleDisconnect(ws) {
     this.detachClient(ws);
+    this.detachFromChatSession(ws); // Clean up chat session tracking
     this.clients.delete(ws);
     console.log('WebSocket client disconnected');
   }

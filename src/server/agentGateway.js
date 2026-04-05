@@ -251,22 +251,84 @@ RULES:
    * - Event-driven completion from stream-json
    * - Live status reactions (thinking/reading/editing/running/done/error)
    * - Context recovery on "lost context" responses
+   * - STREAMING PERSISTENCE: Saves response chunks to disk as they arrive
    */
   async _sendToCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, mode = 'agent') {
     const MAX_ATTEMPTS = 3;
 
+    // Create a streaming message placeholder BEFORE starting
+    // This ensures the response is persisted even if connection drops mid-stream
+    const streamingMsg = chatStore.createStreamingMessage({
+      projectId,
+      sessionId: chatSessionId,
+      role: 'agent',
+      initialContent: `Waiting for ${tool}...`,
+      metadata: { tool, streaming: true },
+    });
+
+    // Notify client that streaming has started
+    broadcastFn({
+      type: 'chat-message-stream-start',
+      projectId,
+      sessionId: chatSessionId,
+      messageId: streamingMsg.id,
+    });
+
+    let chunkIndex = 0;
+    let accumulatedContent = '';
+
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
-      const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode);
+      const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode, {
+        // Callback to persist chunks as they arrive
+        onChunk: (chunk) => {
+          accumulatedContent += chunk;
+          chatStore.appendStreamChunk({
+            projectId,
+            sessionId: chatSessionId,
+            messageId: streamingMsg.id,
+            chunk,
+            chunkIndex: chunkIndex++,
+          });
+          // Broadcast chunk to client
+          broadcastFn({
+            type: 'chat-message-chunk',
+            projectId,
+            sessionId: chatSessionId,
+            messageId: streamingMsg.id,
+            chunk,
+          });
+        },
+      });
 
       if (result.success) {
-        // ── Success: format and deliver ──
+        // ── Success: format and finalize ──
         const finalContent = await this._cleanContent(result.displayOutput);
         const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
 
-        this._addAgentMessage(projectId, finalContent, broadcastFn, {
-          tool,
-          rawOutput: rawForDisplay.slice(-8000),
-          attempts: attempt,
+        // Finalize the streaming message with complete content
+        chatStore.finalizeStreamingMessage({
+          projectId,
+          sessionId: chatSessionId,
+          messageId: streamingMsg.id,
+          finalContent,
+          metadata: {
+            tool,
+            rawOutput: rawForDisplay.slice(-8000),
+            attempts: attempt,
+          },
+        });
+
+        // Broadcast completion
+        broadcastFn({
+          type: 'chat-message-stream-complete',
+          projectId,
+          sessionId: chatSessionId,
+          messageId: streamingMsg.id,
+          message: {
+            ...streamingMsg,
+            content: finalContent,
+            metadata: { tool, rawOutput: rawForDisplay.slice(-8000), attempts: attempt },
+          },
         });
 
         this._persistContext(projectId, chatSessionId, message, finalContent);
@@ -289,14 +351,30 @@ RULES:
         continue;
       }
 
-      // ── Final failure ──
-      if (result.error) {
-        this._addErrorMessage(projectId, `${tool} failed after ${attempt} attempt(s): ${result.error}`, broadcastFn);
-      } else {
-        this._addAgentMessage(projectId,
-          result.displayOutput || `No response from ${tool}. Check Internal Console.`,
-          broadcastFn, { tool });
-      }
+      // ── Final failure: still finalize with whatever we got ──
+      const failureContent = result.error
+        ? `Error: ${result.error}`
+        : result.displayOutput || `No response from ${tool}. Check Internal Console.`;
+
+      chatStore.finalizeStreamingMessage({
+        projectId,
+        sessionId: chatSessionId,
+        messageId: streamingMsg.id,
+        finalContent: failureContent,
+        metadata: { tool, error: true, attempts: attempt },
+      });
+
+      broadcastFn({
+        type: 'chat-message-stream-complete',
+        projectId,
+        sessionId: chatSessionId,
+        messageId: streamingMsg.id,
+        message: {
+          ...streamingMsg,
+          content: failureContent,
+          metadata: { tool, error: true },
+        },
+      });
       return;
     }
   }
@@ -304,8 +382,11 @@ RULES:
   /**
    * Single attempt to run a CLI tool command.
    * Returns: { success, displayOutput, cleanOutput, retry, retryReason, retryType, error }
+   * @param {Object} streamOpts - Optional streaming options
+   * @param {Function} streamOpts.onChunk - Callback for each output chunk (for persistence)
    */
-  async _attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode = 'agent') {
+  async _attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
+    const { onChunk } = streamOpts;
     // Get or create shell session
     let shellSessionId;
     try {
@@ -365,6 +446,11 @@ RULES:
       idleRounds = 0;
       lastOutputTime = now;
       totalOutput += chunk;
+
+      // Persist chunk if callback provided (streaming persistence)
+      if (onChunk) {
+        onChunk(chunk);
+      }
 
       const cleanChunk = this._stripAnsi(chunk);
       const cleanTotal = this._stripAnsi(totalOutput);

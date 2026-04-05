@@ -158,6 +158,183 @@ class ChatStore {
     return this.createSession(projectId);
   }
 
+  // ── Streaming message support ──
+  // These methods allow persisting responses as they stream in,
+  // so responses survive disconnections and restarts.
+
+  /**
+   * Create a streaming message placeholder that will be updated as chunks arrive.
+   * Returns the message ID for subsequent chunk appends.
+   */
+  createStreamingMessage({ projectId, sessionId, role, initialContent = '', metadata = {} }) {
+    if (!sessionId) {
+      sessionId = this.getActiveSession(projectId).id;
+    }
+    this._ensureProjectDir(projectId);
+
+    const msg = createMessage({
+      projectId,
+      role,
+      content: initialContent,
+      metadata: {
+        ...metadata,
+        streaming: true,
+        streamStartedAt: new Date().toISOString(),
+        chunks: [],
+      },
+    });
+    msg.sessionId = sessionId;
+
+    const line = serialize(msg) + '\n';
+    fs.appendFileSync(this._sessionFile(projectId, sessionId), line, 'utf-8');
+
+    // Update message count in index
+    const sessions = this._readIndex(projectId);
+    const session = sessions.find(s => s.id === sessionId);
+    if (session) {
+      session.messageCount = (session.messageCount || 0) + 1;
+      this._writeIndex(projectId, sessions);
+    }
+
+    return msg;
+  }
+
+  /**
+   * Append a chunk to a streaming message.
+   * The chunk is saved to a separate chunks file for durability.
+   */
+  appendStreamChunk({ projectId, sessionId, messageId, chunk, chunkIndex }) {
+    const chunksDir = path.join(this._projectDir(projectId), '_chunks');
+    if (!fs.existsSync(chunksDir)) {
+      fs.mkdirSync(chunksDir, { recursive: true, mode: 0o700 });
+    }
+
+    const chunkFile = path.join(chunksDir, `${messageId}.chunks`);
+    const chunkData = JSON.stringify({
+      index: chunkIndex,
+      content: redactSecrets(chunk),
+      timestamp: new Date().toISOString(),
+    }) + '\n';
+
+    fs.appendFileSync(chunkFile, chunkData, 'utf-8');
+  }
+
+  /**
+   * Finalize a streaming message by combining all chunks and updating the message.
+   * This replaces the placeholder with the complete content.
+   */
+  finalizeStreamingMessage({ projectId, sessionId, messageId, finalContent, metadata = {} }) {
+    const filePath = this._sessionFile(projectId, sessionId);
+    if (!fs.existsSync(filePath)) return null;
+
+    // Read all messages
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    const updatedLines = [];
+    let foundMessage = null;
+
+    for (const line of lines) {
+      if (!line.trim()) {
+        updatedLines.push(line);
+        continue;
+      }
+
+      const msg = deserialize(line);
+      if (msg && msg.id === messageId) {
+        // Update the message with final content
+        msg.content = redactSecrets(finalContent);
+        msg.metadata = {
+          ...msg.metadata,
+          ...metadata,
+          streaming: false,
+          streamCompletedAt: new Date().toISOString(),
+        };
+        delete msg.metadata.chunks; // Remove chunks array from metadata
+        foundMessage = msg;
+        updatedLines.push(serialize(msg));
+      } else {
+        updatedLines.push(line);
+      }
+    }
+
+    // Write back
+    fs.writeFileSync(filePath, updatedLines.join('\n'), 'utf-8');
+
+    // Clean up chunks file
+    const chunksDir = path.join(this._projectDir(projectId), '_chunks');
+    const chunkFile = path.join(chunksDir, `${messageId}.chunks`);
+    if (fs.existsSync(chunkFile)) {
+      fs.unlinkSync(chunkFile);
+    }
+
+    return foundMessage;
+  }
+
+  /**
+   * Get all chunks for a streaming message (for recovery).
+   */
+  getStreamChunks({ projectId, messageId }) {
+    const chunksDir = path.join(this._projectDir(projectId), '_chunks');
+    const chunkFile = path.join(chunksDir, `${messageId}.chunks`);
+
+    if (!fs.existsSync(chunkFile)) return [];
+
+    const lines = fs.readFileSync(chunkFile, 'utf-8').split('\n');
+    const chunks = [];
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        chunks.push(JSON.parse(line));
+      } catch {}
+    }
+
+    return chunks.sort((a, b) => a.index - b.index);
+  }
+
+  /**
+   * Recover a streaming message by combining saved chunks.
+   * Used when a connection drops mid-stream.
+   */
+  recoverStreamingMessage({ projectId, sessionId, messageId }) {
+    const chunks = this.getStreamChunks({ projectId, messageId });
+    if (chunks.length === 0) return null;
+
+    const combinedContent = chunks.map(c => c.content).join('');
+    return this.finalizeStreamingMessage({
+      projectId,
+      sessionId,
+      messageId,
+      finalContent: combinedContent,
+      metadata: { recovered: true, chunkCount: chunks.length },
+    });
+  }
+
+  /**
+   * Get any incomplete streaming messages for a session (for recovery on reconnect).
+   */
+  getIncompleteStreamingMessages(projectId, sessionId) {
+    const filePath = this._sessionFile(projectId, sessionId);
+    if (!fs.existsSync(filePath)) return [];
+
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    const incomplete = [];
+
+    for (const line of lines) {
+      const msg = deserialize(line);
+      if (msg && msg.metadata?.streaming === true) {
+        // Get any saved chunks
+        const chunks = this.getStreamChunks({ projectId, messageId: msg.id });
+        incomplete.push({
+          message: msg,
+          chunks,
+          partialContent: chunks.map(c => c.content).join(''),
+        });
+      }
+    }
+
+    return incomplete;
+  }
+
   // ── Message operations (now session-scoped) ──
 
   /**

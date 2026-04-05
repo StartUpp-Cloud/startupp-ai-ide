@@ -169,11 +169,18 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   const knownIdsRef = useRef(new Set());
   const busyClearRef = useRef(false);
 
+  // Streaming message state for real-time updates
+  const [streamingMessage, setStreamingMessage] = useState(null);
+  const streamingChunksRef = useRef('');
+
   useEffect(() => {
     if (!projectId || !activeSessionId) { setMessages([]); knownIdsRef.current.clear(); return; }
     setLoading(true);
     setSearchResults(null);
     setAgentBusy(false);
+    setStreamingMessage(null);
+    streamingChunksRef.current = '';
+
     fetch(`/api/projects/${projectId}/chat?limit=100&sessionId=${activeSessionId}`)
       .then(r => r.json())
       .then(data => {
@@ -184,6 +191,109 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       .catch(() => setMessages([]))
       .finally(() => setLoading(false));
   }, [projectId, activeSessionId]);
+
+  // Attach to chat session when it changes (for isolated per-session communication)
+  useEffect(() => {
+    if (!projectId || !activeSessionId || !wsRef?.current) return;
+
+    const attachToSession = () => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'attach-chat-session',
+          chatSessionId: activeSessionId,
+          projectId,
+        }));
+        console.log(`[ChatPanel] Attached to chat session ${activeSessionId}`);
+      }
+    };
+
+    // Attach immediately if connected
+    attachToSession();
+
+    // Re-attach when WebSocket reconnects
+    const handleOpen = () => attachToSession();
+    wsRef.current?.addEventListener('open', handleOpen);
+
+    return () => {
+      wsRef.current?.removeEventListener('open', handleOpen);
+    };
+  }, [projectId, activeSessionId, wsRef]);
+
+  // Handle streaming message events from WebSocket
+  useEffect(() => {
+    if (!wsRef?.current) return;
+
+    const handleMessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+
+      // Only handle messages for our active session
+      if (msg.sessionId && msg.sessionId !== activeSessionId) return;
+
+      switch (msg.type) {
+        case 'chat-message-stream-start':
+          // A new streaming message started
+          setStreamingMessage({
+            id: msg.messageId,
+            role: 'agent',
+            content: 'Thinking...',
+            createdAt: new Date().toISOString(),
+            streaming: true,
+          });
+          streamingChunksRef.current = '';
+          break;
+
+        case 'chat-message-chunk':
+          // Append chunk to streaming message
+          streamingChunksRef.current += msg.chunk || '';
+          // Update display (throttled - only update every 100ms worth of content)
+          setStreamingMessage(prev => prev ? {
+            ...prev,
+            content: streamingChunksRef.current.slice(-2000) || 'Processing...',
+          } : null);
+          break;
+
+        case 'chat-message-stream-complete':
+          // Streaming finished - add the final message
+          setStreamingMessage(null);
+          streamingChunksRef.current = '';
+          if (msg.message) {
+            knownIdsRef.current.add(msg.message.id);
+            setMessages(prev => [...prev.filter(m => m.id !== msg.messageId), msg.message]);
+            setAgentBusy(false);
+          }
+          break;
+
+        case 'chat-message-recovered':
+          // A previously incomplete message was recovered
+          if (msg.message) {
+            knownIdsRef.current.add(msg.message.id);
+            setMessages(prev => {
+              const filtered = prev.filter(m => m.id !== msg.message.id);
+              return [...filtered, msg.message];
+            });
+          }
+          break;
+
+        case 'chat-session-recovery':
+          // Server detected incomplete streaming messages - offer to recover
+          console.log('[ChatPanel] Session has incomplete messages:', msg.incompleteMessages);
+          // Auto-recover incomplete messages
+          for (const incomplete of msg.incompleteMessages || []) {
+            wsRef.current?.send(JSON.stringify({
+              type: 'recover-streaming-message',
+              projectId: msg.projectId,
+              sessionId: msg.chatSessionId,
+              messageId: incomplete.messageId,
+            }));
+          }
+          break;
+      }
+    };
+
+    wsRef.current.addEventListener('message', handleMessage);
+    return () => wsRef.current?.removeEventListener('message', handleMessage);
+  }, [wsRef, activeSessionId]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -463,8 +573,19 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           ))
         )}
 
+        {/* Streaming message preview - shows real-time response as it arrives */}
+        {streamingMessage && (
+          <ChatMessage
+            key={streamingMessage.id}
+            message={streamingMessage}
+            wsRef={wsRef}
+            projectId={projectId}
+            onSend={handleSend}
+          />
+        )}
+
         {/* Working indicator with timer and stop button */}
-        {agentBusy && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={activeSessionId} />}
+        {agentBusy && !streamingMessage && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={activeSessionId} />}
 
         <div ref={messagesEndRef} />
       </div>
