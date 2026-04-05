@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Send, Search, X } from 'lucide-react';
 
-export default function ChatInput({ mode, onSend, onSearch, disabled = false }) {
+export default function ChatInput({ mode, onSend, onSearch, disabled = false, busy = false }) {
   const [text, setText] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -32,9 +32,11 @@ export default function ChatInput({ mode, onSend, onSearch, disabled = false }) 
     onSearch?.(q);
   };
 
-  const placeholder = mode === 'plan'
-    ? 'Describe what you want to build... (Ctrl+Enter to send)'
-    : 'Tell the agent what to do... (Ctrl+Enter to send)';
+  const placeholder = busy
+    ? 'Type to queue a follow-up message... (Ctrl+Enter to send)'
+    : mode === 'plan'
+      ? 'Describe what you want to build... (Ctrl+Enter to send)'
+      : 'Tell the agent what to do... (Ctrl+Enter to send)';
 
   return (
     <div className="flex-shrink-0 border-t border-surface-700 bg-surface-850/80 px-3 py-2">

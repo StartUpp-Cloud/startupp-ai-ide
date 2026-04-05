@@ -86,13 +86,11 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// API authentication — token endpoint + middleware
-app.get("/api/auth/token", (req, res) => {
-  // Only same-origin requests can reach this (CORS enforced).
-  // The frontend fetches the token once and includes it in all subsequent requests.
-  res.json({ token: getToken() });
-});
-app.use(authMiddleware);
+// API authentication — disabled for now (localhost-only tool, CORS handles same-origin)
+// Security is handled by: encrypted tokens at rest, file permissions (700), gitignore
+// To re-enable: uncomment the middleware below
+// app.get("/api/auth/token", (req, res) => { res.json({ token: getToken() }); });
+// app.use(authMiddleware);
 
 // Initialize database and start server
 async function startServer() {

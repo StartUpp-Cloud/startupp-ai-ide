@@ -1,7 +1,53 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
-import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square } from 'lucide-react';
+
+/**
+ * Working indicator with live timer and stop button.
+ * Shows as a single message that counts up, not spammed progress messages.
+ */
+function WorkingIndicator({ wsRef, projectId, sessionId }) {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    setElapsed(0);
+    const interval = setInterval(() => setElapsed(s => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleStop = () => {
+    if (wsRef?.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'chat-stop', projectId, sessionId }));
+    }
+  };
+
+  const formatTime = (s) => {
+    if (s < 60) return `${s}s`;
+    return `${Math.floor(s / 60)}m ${s % 60}s`;
+  };
+
+  return (
+    <div className="flex justify-start mb-3 px-3">
+      <div className="flex items-center gap-3 rounded-lg border border-surface-700/30 bg-surface-800/40 px-3 py-2">
+        <Bot size={13} className="text-primary-400" />
+        <div className="flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-pulse" />
+          <span className="text-[11px] text-surface-300">AI assistant working...</span>
+          <span className="text-[11px] text-surface-500 tabular-nums ml-1">{formatTime(elapsed)}</span>
+        </div>
+        <button
+          onClick={handleStop}
+          className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-red-400 hover:bg-red-500/10 transition-colors"
+          title="Stop"
+        >
+          <Square size={9} />
+          Stop
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude' }) {
   const [messages, setMessages] = useState([]);
@@ -45,100 +91,99 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   }, [projectId]);
 
   // Load messages when active session changes
+  const knownIdsRef = useRef(new Set());
+  const busyClearRef = useRef(false);
+
   useEffect(() => {
-    if (!projectId || !activeSessionId) { setMessages([]); return; }
+    if (!projectId || !activeSessionId) { setMessages([]); knownIdsRef.current.clear(); return; }
     setLoading(true);
     setSearchResults(null);
     setAgentBusy(false);
     fetch(`/api/projects/${projectId}/chat?limit=100&sessionId=${activeSessionId}`)
       .then(r => r.json())
       .then(data => {
-        setMessages((data.messages || []).reverse());
+        const msgs = (data.messages || []).reverse();
+        knownIdsRef.current = new Set(msgs.map(m => m.id));
+        setMessages(msgs);
       })
       .catch(() => setMessages([]))
       .finally(() => setLoading(false));
   }, [projectId, activeSessionId]);
 
-  // Scroll to bottom on new messages or when busy state changes
+  // Scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, agentBusy]);
 
-  // Polling fallback: while agent is busy, poll API every 5s for new messages
-  // This catches responses even if the WebSocket disconnected
+  // ── SINGLE SOURCE OF TRUTH: Poll API every 2s for new messages ──
+  // No WebSocket for messages — polling is 100% reliable
   useEffect(() => {
-    if (!agentBusy || !projectId || !activeSessionId) return;
+    if (!projectId || !activeSessionId) return;
 
     const poll = setInterval(() => {
-      fetch(`/api/projects/${projectId}/chat?limit=5&sessionId=${activeSessionId}`)
+      fetch(`/api/projects/${projectId}/chat?limit=20&sessionId=${activeSessionId}`)
         .then(r => r.json())
         .then(data => {
-          const latest = (data.messages || []).reverse();
-          if (latest.length === 0) return;
+          const serverMsgs = (data.messages || []).reverse();
+          if (serverMsgs.length === 0) return;
 
-          // Check if there's a newer agent/error message we don't have
-          const lastKnownId = messages.length > 0 ? messages[messages.length - 1].id : null;
-          const newMsgs = latest.filter(m =>
-            m.role !== 'user' && m.role !== 'progress' &&
-            !messages.some(existing => existing.id === m.id)
-          );
+          setMessages(prev => {
+            const newMsgs = serverMsgs.filter(m => !knownIdsRef.current.has(m.id));
+            if (newMsgs.length === 0) return prev;
 
-          if (newMsgs.length > 0) {
-            setMessages(prev => {
-              const ids = new Set(prev.map(m => m.id));
-              const toAdd = newMsgs.filter(m => !ids.has(m.id));
-              return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+            // Track all new IDs
+            for (const m of newMsgs) knownIdsRef.current.add(m.id);
+
+            // Remove optimistic pending messages that now have real versions
+            let result = prev.filter(m => {
+              if (!m.id.startsWith('pending-')) return true;
+              return !serverMsgs.some(sm => sm.role === 'user' && sm.content === m.content);
             });
+
+            const lastUserIdx = result.findLastIndex(m => m.role === 'user');
+            const lastUserTime = lastUserIdx >= 0 ? result[lastUserIdx].createdAt : '';
+
+            // Split new messages
+            const newProgress = newMsgs.filter(m => m.role === 'progress');
+            const newFinal = newMsgs.filter(m => m.role === 'agent' || m.role === 'error');
+            const newOther = newMsgs.filter(m => m.role !== 'progress' && m.role !== 'agent' && m.role !== 'error');
+
+            // Only count final messages that are AFTER the last user message as truly new
+            const hasNewFinalAfterUser = newFinal.some(m => m.createdAt > lastUserTime);
+
+            // Progress: keep only the latest one after last user
+            if (newProgress.length > 0) {
+              result = result.filter((m, i) => !(m.role === 'progress' && i > lastUserIdx));
+              result.push(newProgress[newProgress.length - 1]);
+            }
+
+            // Final response: clear progress, clear busy
+            if (hasNewFinalAfterUser) {
+              result = result.filter(m => m.role !== 'progress' || result.indexOf(m) <= lastUserIdx);
+              // Clear busy OUTSIDE this updater via a ref
+              busyClearRef.current = true;
+            }
+
+            // Add final + other messages
+            result.push(...newFinal, ...newOther);
+
+            return result;
+          });
+
+          // Clear busy state outside the updater (side effects not allowed inside)
+          if (busyClearRef.current) {
+            busyClearRef.current = false;
             setAgentBusy(false);
           }
         })
         .catch(() => {});
-    }, 5000);
+    }, 2000);
 
     return () => clearInterval(poll);
-  }, [agentBusy, projectId, activeSessionId, messages]);
+  }, [projectId, activeSessionId]);
 
-  // Listen for real-time chat messages via WebSocket
-  useEffect(() => {
-    if (!wsRef?.current) return;
-
-    const handler = (event) => {
-      let msg;
-      try { msg = JSON.parse(event.data); } catch { return; }
-
-      if (msg.type === 'chat-message' && msg.message?.projectId === projectId) {
-        if (!msg.message.sessionId || msg.message.sessionId === activeSessionId) {
-          // Skip user messages — we already added them optimistically
-          if (msg.message.role === 'user') return;
-          setMessages(prev => [...prev, msg.message]);
-          if (msg.message.role === 'agent' || msg.message.role === 'error') {
-            setAgentBusy(false);
-          }
-        }
-      }
-      if (msg.type === 'chat-progress' && msg.projectId === projectId) {
-        if (!msg.message?.sessionId || msg.message.sessionId === activeSessionId) {
-          setMessages(prev => {
-            const copy = [...prev];
-            const lastProgressIdx = copy.findLastIndex(m => m.role === 'progress');
-            if (lastProgressIdx >= 0 && msg.message) {
-              copy[lastProgressIdx] = msg.message;
-            } else if (msg.message) {
-              copy.push(msg.message);
-            }
-            return copy;
-          });
-        }
-      }
-      if (msg.type === 'agent-status' && msg.projectId === projectId) {
-        setAgentBusy(msg.busy);
-      }
-    };
-
-    const ws = wsRef.current;
-    ws.addEventListener('message', handler);
-    return () => ws.removeEventListener('message', handler);
-  }, [wsRef, projectId, activeSessionId]);
+  // No WebSocket handlers — polling is the single source of truth for everything.
+  // agentBusy is set to true on send, cleared when polling finds agent/error response.
 
   // ── Session actions ──
 
@@ -203,7 +248,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         mode,
         tool,
       }));
-      setTimeout(() => setAgentBusy(prev => prev ? false : prev), 60000);
+      // No timeout — polling clears busy when response arrives
     } else {
       setAgentBusy(false);
       setMessages(prev => [...prev, {
@@ -332,20 +377,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           ))
         )}
 
-        {/* Thinking indicator — inline at the bottom of the chat stream */}
-        {agentBusy && (
-          <div className="flex justify-start mb-3 px-3">
-            <div className="flex items-center gap-2.5 rounded-lg border border-surface-700/30 bg-surface-800/40 px-3 py-2">
-              <Bot size={13} className="text-primary-400" />
-              <div className="flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-pulse" style={{ animationDelay: '0ms' }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-pulse" style={{ animationDelay: '200ms' }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-pulse" style={{ animationDelay: '400ms' }} />
-              </div>
-              <span className="text-[11px] text-surface-400">Thinking...</span>
-            </div>
-          </div>
-        )}
+        {/* Working indicator with timer and stop button */}
+        {agentBusy && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={activeSessionId} />}
 
         <div ref={messagesEndRef} />
       </div>
@@ -355,7 +388,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         mode={mode}
         onSend={handleSend}
         onSearch={handleSearch}
-        disabled={agentBusy}
+        busy={agentBusy}
       />
     </div>
   );

@@ -49,8 +49,9 @@ export function authMiddleware(req, res, next) {
   // Skip the token endpoint (frontend fetches token from here via same-origin)
   if (req.path === '/api/auth/token') return next();
 
-  // Skip health check
+  // Skip health check and setup status (needed before token is loaded)
   if (req.path === '/api/health') return next();
+  if (req.path === '/api/setup-status') return next();
 
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;

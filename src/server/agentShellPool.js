@@ -24,8 +24,10 @@ class AgentShellPool extends EventEmitter {
     if (existing) {
       const session = ptyManager.getSession(existing.sessionId);
       if (session && session.status === 'active') {
+        console.log(`[agentShellPool] Reusing session ${existing.sessionId} for ${key}`);
         return { sessionId: existing.sessionId, isNew: false };
       }
+      console.log(`[agentShellPool] Session ${existing.sessionId} is ${session?.status || 'gone'}, creating new for ${key}`);
       this.sessions.delete(key);
       this.outputBuffers.delete(existing.sessionId);
     }

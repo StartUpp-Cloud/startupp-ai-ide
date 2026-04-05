@@ -1,64 +1,43 @@
 /**
  * Authenticated fetch wrapper.
- *
- * Fetches the API token from /api/auth/token on first call (same-origin only),
- * then injects the Authorization header into all subsequent /api/ requests.
- *
- * Usage: import and call installAuthFetch() once at app startup.
- * All existing fetch() calls will automatically include the token.
+ * Fetches the API token once at startup, then injects it into all /api/ requests.
  */
 
 let _token = null;
-let _tokenPromise = null;
-
-async function ensureToken() {
-  if (_token) return _token;
-  if (_tokenPromise) return _tokenPromise;
-
-  _tokenPromise = fetch('/api/auth/token')
-    .then(r => r.json())
-    .then(data => {
-      _token = data.token;
-      _tokenPromise = null;
-      return _token;
-    })
-    .catch(() => {
-      _tokenPromise = null;
-      return null;
-    });
-
-  return _tokenPromise;
-}
+let _originalFetch = null;
 
 /**
- * Monkey-patches window.fetch to inject the auth token on /api/ requests.
- * Call once during app initialization (e.g., in main.jsx or App.jsx).
+ * Install the auth fetch wrapper. Call once at app startup.
  */
 export function installAuthFetch() {
-  const originalFetch = window.fetch.bind(window);
+  _originalFetch = window.fetch.bind(window);
 
-  window.fetch = async (input, init = {}) => {
+  // Fetch token immediately using the ORIGINAL fetch (not the patched one)
+  _originalFetch('/api/auth/token')
+    .then(r => r.json())
+    .then(data => { _token = data.token; })
+    .catch(() => {});
+
+  // Patch window.fetch
+  window.fetch = (input, init = {}) => {
     const url = typeof input === 'string' ? input : input?.url || '';
 
-    // Only add auth to our API calls
-    if (url.startsWith('/api/') && !url.startsWith('/api/auth/token')) {
-      const token = await ensureToken();
-      if (token) {
-        const headers = new Headers(init.headers || {});
-        if (!headers.has('Authorization')) {
-          headers.set('Authorization', `Bearer ${token}`);
-        }
-        init = { ...init, headers };
+    // Add auth header to /api/ calls (except the token endpoint itself)
+    if (_token && url.startsWith('/api/') && !url.startsWith('/api/auth/token')) {
+      const headers = new Headers(init.headers || {});
+      if (!headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${_token}`);
       }
+      init = { ...init, headers };
     }
 
-    return originalFetch(input, init);
+    return _originalFetch(input, init);
   };
 }
 
 /**
- * Get the current token (for WebSocket auth or manual use).
+ * Get the current token.
  */
-export async function getAuthToken() {
-  return ensureToken();
+export function getAuthToken() {
+  return _token;
 }

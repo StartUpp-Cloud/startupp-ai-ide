@@ -57,7 +57,7 @@ export default function InternalConsole({ projectId }) {
       ws.send(JSON.stringify({
         type: 'create-session',
         projectId,
-        role: 'agent',
+        role: 'utility',
         cliTool: null,
         cols: xterm.cols || 120,
         rows: xterm.rows || 12,

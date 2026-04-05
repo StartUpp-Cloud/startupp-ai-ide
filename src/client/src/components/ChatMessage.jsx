@@ -16,7 +16,24 @@ const ROLE_STYLES = {
 function renderMarkdown(text) {
   if (!text) return null;
 
-  const lines = text.split('\n');
+  // Convert common HTML tags to markdown before processing
+  let cleaned = text
+    .replace(/<b>([\s\S]*?)<\/b>/gi, '**$1**')
+    .replace(/<strong>([\s\S]*?)<\/strong>/gi, '**$1**')
+    .replace(/<i>([\s\S]*?)<\/i>/gi, '*$1*')
+    .replace(/<em>([\s\S]*?)<\/em>/gi, '*$1*')
+    .replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>\s*<p>/gi, '\n\n')
+    .replace(/<\/?p>/gi, '')
+    .replace(/<\/?div>/gi, '\n')
+    .replace(/<li>([\s\S]*?)<\/li>/gi, '- $1')
+    .replace(/<\/?[uo]l>/gi, '')
+    .replace(/<h([1-6])>([\s\S]*?)<\/h\1>/gi, (_, level, content) => '#'.repeat(parseInt(level)) + ' ' + content)
+    // Catch any remaining HTML tags
+    .replace(/<\/?[a-z][a-z0-9]*[^>]*>/gi, '');
+
+  const lines = cleaned.split('\n');
   const elements = [];
   let inCodeBlock = false;
   let codeLines = [];

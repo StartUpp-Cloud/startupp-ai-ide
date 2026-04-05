@@ -404,7 +404,8 @@ class TerminalServer {
 
       case 'chat-stop': {
         const { agentGateway } = await import('./agentGateway.js');
-        agentGateway._abort(payload.projectId);
+        // Abort by session ID (supports parallel sessions)
+        agentGateway.abort(payload.sessionId || payload.projectId);
         this.broadcast({ type: 'agent-status', projectId: payload.projectId, busy: false });
         break;
       }

@@ -105,6 +105,26 @@ class ChatStore {
   }
 
   /**
+   * Update arbitrary metadata on a session (e.g., cliSessionId for --resume).
+   */
+  updateSessionMeta(projectId, sessionId, meta) {
+    const sessions = this._readIndex(projectId);
+    const session = sessions.find(s => s.id === sessionId);
+    if (session) {
+      Object.assign(session, meta);
+      this._writeIndex(projectId, sessions);
+    }
+  }
+
+  /**
+   * Get a specific session by ID.
+   */
+  getSession(projectId, sessionId) {
+    const sessions = this._readIndex(projectId);
+    return sessions.find(s => s.id === sessionId) || null;
+  }
+
+  /**
    * Rename a session.
    */
   renameSession(projectId, sessionId, name) {

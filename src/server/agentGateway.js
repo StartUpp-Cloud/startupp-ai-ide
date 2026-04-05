@@ -1,15 +1,9 @@
 // src/server/agentGateway.js
 //
 // Architecture: Route EVERYTHING to the user's selected CLI tool (Claude, Copilot, etc.)
-// The tool is the brain — it handles questions, coding, research, everything.
-// Local LLM only: formats raw terminal output into chat-friendly messages.
-//
-// Context strategy:
-// - Claude: uses --continue to maintain conversation across messages in the same session
-//           uses --resume <id> to return to a previous session
-//           uses --output-format json to capture session_id for --resume
-// - CLAUDE.md: loaded automatically by Claude for persistent project context
-// - Other tools: context managed per their native mechanisms
+// Each chat session gets its own shell PTY — multiple sessions run in parallel.
+// Messages within the same session are queued (not aborted).
+// Local LLM: formats output + provides live "thinking trail" summaries.
 
 import { EventEmitter } from 'events';
 import { llmProvider } from './llmProvider.js';
@@ -20,24 +14,48 @@ import { getDB } from './db.js';
 class AgentGateway extends EventEmitter {
   constructor() {
     super();
+    // Track running tasks per chat session (not per project — allows parallel)
+    // Map<chatSessionId, { aborted, startedAt, queue: Promise }>
     this._running = new Map();
-    // Track CLI session IDs per chat session for --continue/--resume
+    // Track CLI session IDs for --continue/--resume
     // Map<chatSessionId, { cliSessionId, messageCount }>
     this._cliSessions = new Map();
   }
 
   /**
-   * Main entry point. Routes the user's message to their selected CLI tool.
+   * Main entry point. Queues the task if one is already running for this chat session.
    */
   async handleTask({ projectId, sessionId = null, content, mode, tool = 'claude', broadcastFn }) {
-    this._abort(projectId);
     this._sessionId = sessionId;
 
+    const existing = this._running.get(sessionId);
+    if (existing && existing.queue) {
+      // Queue behind the running task — don't abort it
+      existing.queue = existing.queue.then(() =>
+        this._executeTask({ projectId, sessionId, content, mode, tool, broadcastFn })
+      );
+      return existing.queue;
+    }
+
+    // No task running — execute immediately
+    const promise = this._executeTask({ projectId, sessionId, content, mode, tool, broadcastFn });
+    this._running.set(sessionId, { aborted: false, startedAt: Date.now(), queue: promise });
+    return promise;
+  }
+
+  async _executeTask({ projectId, sessionId, content, mode, tool, broadcastFn }) {
+    this._sessionId = sessionId;
     const ctx = { aborted: false, startedAt: Date.now() };
-    this._running.set(projectId, ctx);
+    this._running.set(sessionId, { ...ctx, queue: this._running.get(sessionId)?.queue });
 
     try {
       broadcastFn({ type: 'agent-status', projectId, busy: true });
+
+      // Immediate acknowledgment — let the local LLM craft a response
+      this._sendAcknowledgment(projectId, content, tool, broadcastFn);
+
+      // Auto-name the session after first message (async, don't wait)
+      this._autoNameSession(projectId, sessionId, content);
 
       if (mode === 'plan') {
         await this._sendToTool(projectId, sessionId, `Create a step-by-step plan for the following task. List numbered steps but do NOT execute yet:\n\n${content}`, tool, broadcastFn, ctx);
@@ -47,14 +65,52 @@ class AgentGateway extends EventEmitter {
     } catch (error) {
       this._addErrorMessage(projectId, `Error: ${error.message}`, broadcastFn);
     } finally {
-      this._finish(projectId, broadcastFn);
+      this._running.delete(sessionId);
+      broadcastFn({ type: 'agent-status', projectId, busy: false });
     }
   }
 
   /**
-   * Build the profile context string for the first message in a conversation.
-   * Loaded from db.json profile field.
+   * Auto-name the chat session based on the first user message.
+   * Uses the local LLM to generate a short name.
    */
+  async _autoNameSession(projectId, chatSessionId, userMessage) {
+    if (!chatSessionId) return;
+
+    // Only name on first message
+    const cliState = this._cliSessions.get(chatSessionId);
+    if (cliState?.messageCount > 0) return;
+
+    try {
+      const result = await llmProvider.generateResponse(
+        `Generate a short title (3-6 words) for a chat session that starts with this message. Just the title, no quotes or punctuation.\n\nMessage: "${userMessage.slice(0, 200)}"`,
+        { maxTokens: 20, temperature: 0.3 }
+      );
+      const name = result.response.trim().slice(0, 50);
+      if (name) {
+        chatStore.renameSession(projectId, chatSessionId, name);
+      }
+    } catch {}
+  }
+
+  /**
+   * Send an immediate acknowledgment so the user knows something is happening.
+   * Uses the local LLM for a natural response (async, doesn't block).
+   */
+  async _sendAcknowledgment(projectId, userMessage, tool, broadcastFn) {
+    try {
+      const result = await llmProvider.generateResponse(
+        `The user just asked an AI coding assistant (${tool}) to do something. Generate a brief, friendly 1-sentence acknowledgment that you're passing their request to ${tool}. Be specific about what they asked for. No quotes.\n\nUser said: "${userMessage.slice(0, 200)}"`,
+        { maxTokens: 40, temperature: 0.4 }
+      );
+      this._addProgressMessage(projectId, result.response.trim(), broadcastFn);
+    } catch {
+      this._addProgressMessage(projectId, `Sending your request to ${tool}...`, broadcastFn);
+    }
+  }
+
+  // ── Profile context ──
+
   _getProfileContext() {
     try {
       const db = getDB();
@@ -78,15 +134,22 @@ class AgentGateway extends EventEmitter {
     }
   }
 
-  /**
-   * Build the shell command to invoke a CLI tool in non-interactive/print mode.
-   * Handles conversation continuation and profile context injection.
-   */
-  _buildToolCommand(tool, message, chatSessionId) {
-    const cliState = this._cliSessions.get(chatSessionId);
+  // ── Command building ──
+
+  _buildToolCommand(tool, message, chatSessionId, projectId) {
+    let cliState = this._cliSessions.get(chatSessionId);
+
+    // Restore from disk if not in memory (survives PM2 restarts / page refreshes)
+    if (!cliState?.cliSessionId && chatSessionId && projectId) {
+      const stored = chatStore.getSession(projectId, chatSessionId);
+      if (stored?.cliSessionId) {
+        cliState = { cliSessionId: stored.cliSessionId, messageCount: stored.messageCount || 1 };
+        this._cliSessions.set(chatSessionId, cliState);
+        console.log(`[agentGateway] Restored CLI session_id from disk: ${stored.cliSessionId}`);
+      }
+    }
     const isFirstMessage = !cliState?.cliSessionId;
 
-    // Prepend profile context on first message only — tool remembers it for follow-ups
     const fullMessage = isFirstMessage
       ? this._getProfileContext() + message
       : message;
@@ -95,9 +158,6 @@ class AgentGateway extends EventEmitter {
 
     switch (tool) {
       case 'claude': {
-        // Claude: -p for print mode, --output-format json to capture session_id
-        // --dangerously-skip-permissions: safe in containers, allows file edits/commands
-        // --resume to continue a previous conversation with full context
         let cmd = `claude -p '${escaped}' --output-format json --dangerously-skip-permissions`;
         if (cliState?.cliSessionId) {
           cmd += ` --resume '${cliState.cliSessionId}'`;
@@ -106,8 +166,6 @@ class AgentGateway extends EventEmitter {
       }
 
       case 'copilot': {
-        // Copilot CLI: -p for print mode, --output-format json to capture session_id
-        // --resume to continue conversation
         let cmd = `copilot -p '${escaped}' --output-format json`;
         if (cliState?.cliSessionId) {
           cmd += ` --resume '${cliState.cliSessionId}'`;
@@ -116,11 +174,9 @@ class AgentGateway extends EventEmitter {
       }
 
       case 'aider':
-        // Aider: --message for non-interactive, --yes to auto-approve all edits
         return `aider --message '${escaped}' --yes`;
 
       case 'gemini':
-        // Gemini CLI: -p for print mode (if available)
         return `gemini -p '${escaped}'`;
 
       case 'shell':
@@ -129,13 +185,13 @@ class AgentGateway extends EventEmitter {
     }
   }
 
-  /**
-   * Send a message to the selected CLI tool and monitor the response.
-   */
+  // ── Main execution: send to tool and monitor output ──
+
   async _sendToTool(projectId, chatSessionId, message, tool, broadcastFn, ctx) {
+    // Each chat session gets its own shell PTY — enables parallel execution
     let shellSessionId;
     try {
-      const sess = await agentShellPool.getSession(projectId, 'shell');
+      const sess = await agentShellPool.getSession(projectId, chatSessionId || 'shell');
       shellSessionId = sess.sessionId;
 
       if (sess.isNew) {
@@ -147,24 +203,24 @@ class AgentGateway extends EventEmitter {
       return;
     }
 
-    const cmd = this._buildToolCommand(tool, message, chatSessionId);
     const cliState = this._cliSessions.get(chatSessionId);
+    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId);
     const isFollowUp = !!(cliState?.cliSessionId);
 
+    // Initial thinking trail message
     this._addProgressMessage(projectId,
-      `Running ${tool}${isFollowUp ? ' (continuing conversation)' : ''}...`,
+      isFollowUp ? `Continuing conversation with ${tool}...` : `Asking ${tool}...`,
       broadcastFn);
 
     // Send the command
     agentShellPool.write(shellSessionId, cmd + '\n');
 
-    // ── Collect output with live progress streaming ──
+    // ── Collect output until shell prompt returns ──
+    // Client shows its own timer — server just collects output silently
     let totalOutput = '';
     let idleRounds = 0;
-    const MAX_IDLE = 90;
+    const MAX_IDLE = 120; // 120 x 3s = 6 min max
     const POLL_MS = 3000;
-    let lastProgressUpdate = 0;
-    const PROGRESS_INTERVAL_MS = 8000; // Update progress every 8s of new output
 
     while (!ctx.aborted && idleRounds < MAX_IDLE) {
       const chunk = await this._waitForOutput(shellSessionId, ctx, POLL_MS);
@@ -172,21 +228,8 @@ class AgentGateway extends EventEmitter {
 
       if (chunk.length === 0) {
         idleRounds++;
-
-        // While idle, periodically show what we have so far
         if (idleRounds >= 2 && totalOutput.length > 0) {
-          const clean = this._stripAnsi(totalOutput);
-          if (this._shellPromptReturned(clean)) break;
-
-          // Show live progress if enough time passed
-          const now = Date.now();
-          if (now - lastProgressUpdate > PROGRESS_INTERVAL_MS) {
-            lastProgressUpdate = now;
-            const snippet = this._getOutputSnippet(clean);
-            if (snippet) {
-              this._updateLiveProgress(projectId, tool, snippet, broadcastFn);
-            }
-          }
+          if (this._shellPromptReturned(this._stripAnsi(totalOutput))) break;
         }
         continue;
       }
@@ -205,18 +248,6 @@ class AgentGateway extends EventEmitter {
       const promptResponse = this._fastPromptDetect(this._stripAnsi(chunk));
       if (promptResponse !== null) {
         agentShellPool.write(shellSessionId, promptResponse + '\n');
-        this._addProgressMessage(projectId, `Auto: "${promptResponse || '(enter)'}"`, broadcastFn);
-        continue;
-      }
-
-      // Live progress update — show what's happening as it happens
-      const now = Date.now();
-      if (now - lastProgressUpdate > PROGRESS_INTERVAL_MS) {
-        lastProgressUpdate = now;
-        const snippet = this._getOutputSnippet(clean);
-        if (snippet) {
-          this._updateLiveProgress(projectId, tool, snippet, broadcastFn);
-        }
       }
     }
 
@@ -228,62 +259,81 @@ class AgentGateway extends EventEmitter {
       return;
     }
 
-    // For tools with JSON output (Claude, Copilot): extract session_id and result
+    // Extract session_id and result for tools with JSON output
     let displayOutput = cleanOutput;
     if (tool === 'claude' || tool === 'copilot') {
       const parsed = this._parseJsonToolOutput(cleanOutput, cmd);
       displayOutput = parsed.text;
 
-      // Save CLI session ID for --resume on next message (conversation continuation)
       if (parsed.sessionId) {
-        this._cliSessions.set(chatSessionId, {
+        const newState = {
           cliSessionId: parsed.sessionId,
           messageCount: (cliState?.messageCount || 0) + 1,
-        });
+        };
+        this._cliSessions.set(chatSessionId, newState);
+        // Persist to disk so it survives restarts
+        chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
+        console.log(`[agentGateway] Captured & persisted CLI session_id: ${parsed.sessionId}`);
       }
     } else {
       displayOutput = this._extractToolResponse(cleanOutput, cmd);
     }
 
-    // Use LLM to format as markdown (format only, never rewrite)
-    try {
-      const result = await llmProvider.generateResponse(
-        `Format this terminal output as clean markdown. Keep the EXACT content — only clean up terminal artifacts and add markdown formatting (bold, code blocks, bullets). Never change the meaning.\n\nOutput:\n${displayOutput.slice(-3000)}`,
-        { maxTokens: 500, temperature: 0.1 }
-      );
-      this._addAgentMessage(projectId, result.response, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
-    } catch {
+    // Format with local LLM (or pass through if output is already clean)
+    // Skip formatting if the output is short enough and already looks clean
+    if (displayOutput.length < 2000 && !displayOutput.includes('\x1b')) {
       this._addAgentMessage(projectId, displayOutput, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+    } else {
+      try {
+        const result = await llmProvider.generateResponse(
+          `Clean up this terminal output for a chat UI. Rules:
+- Keep ALL the content — do NOT trim, summarize, or cut anything
+- Use markdown syntax: **bold**, \`code\`, - bullets, ## headers
+- NEVER use HTML tags like <b>, <i>, <code> — only markdown
+- Remove terminal artifacts and escape codes
+- Preserve the full meaning and all details
+
+Output:\n${displayOutput.slice(-5000)}`,
+          { maxTokens: 2000, temperature: 0.1 }
+        );
+        this._addAgentMessage(projectId, result.response, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+      } catch {
+        this._addAgentMessage(projectId, displayOutput, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+      }
     }
   }
 
-  /**
-   * Parse JSON output from CLI tools (Claude, Copilot) to extract session_id and result text.
-   * Expected format: {"type":"result","session_id":"...","result":"..."}
-   */
+  // (thinking trail removed — client handles its own timer)
+
+  // ── JSON output parsing ──
+
   _parseJsonToolOutput(cleanOutput, cmd) {
-    // The output contains the command echo, possibly multiple JSON lines, and a shell prompt
-    const lines = cleanOutput.split('\n');
     let text = '';
     let sessionId = null;
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
+    // Strategy 1: regex for session_id and result in JSON
+    const jsonMatch = cleanOutput.match(/\{"type"\s*:\s*"result"[^]*?"session_id"\s*:\s*"([^"]+)"[^]*?"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (jsonMatch) {
+      sessionId = jsonMatch[1];
+      text = jsonMatch[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
 
-      // Try to parse as JSON (Claude's output format)
-      if (trimmed.startsWith('{')) {
-        try {
-          const json = JSON.parse(trimmed);
-          if (json.session_id) sessionId = json.session_id;
-          if (json.result) text = json.result;
-          if (json.type === 'result' && json.result) text = json.result;
-          continue;
-        } catch {}
+    // Strategy 2: line-by-line JSON parsing
+    if (!sessionId) {
+      for (const line of cleanOutput.split('\n')) {
+        const trimmed = line.trim();
+        const jsonStart = trimmed.indexOf('{');
+        if (jsonStart >= 0) {
+          try {
+            const json = JSON.parse(trimmed.slice(jsonStart));
+            if (json.session_id) sessionId = json.session_id;
+            if (json.result) text = json.result;
+            break;
+          } catch {}
+        }
       }
     }
 
-    // If we couldn't parse JSON, fall back to extracting text
     if (!text) {
       text = this._extractToolResponse(cleanOutput, cmd);
     }
@@ -291,44 +341,7 @@ class AgentGateway extends EventEmitter {
     return { text, sessionId };
   }
 
-  // ── Live progress helpers ──
-
-  /**
-   * Extract a meaningful snippet from the output so far.
-   * Shows the last few non-empty lines (skipping command echo and prompts).
-   */
-  _getOutputSnippet(cleanOutput) {
-    const lines = cleanOutput.split('\n')
-      .map(l => l.trim())
-      .filter(l => l && !l.startsWith('claude ') && !l.startsWith('copilot ') && !/[$#>]\s*$/.test(l));
-
-    if (lines.length === 0) return null;
-
-    // Take last 6 meaningful lines
-    const recent = lines.slice(-6);
-    // Truncate each line to 120 chars
-    return recent.map(l => l.length > 120 ? l.slice(0, 117) + '...' : l).join('\n');
-  }
-
-  /**
-   * Broadcast a live progress update that replaces the previous progress message.
-   * Uses chat-progress type which the UI replaces in-place.
-   */
-  _updateLiveProgress(projectId, tool, snippet, broadcastFn) {
-    const elapsed = this._running.get(projectId)?.startedAt
-      ? Math.round((Date.now() - this._running.get(projectId).startedAt) / 1000)
-      : null;
-
-    const timeLabel = elapsed ? ` (${elapsed}s)` : '';
-    const content = `**${tool}** working${timeLabel}...\n\n\`\`\`\n${snippet}\n\`\`\``;
-
-    // Use progress message type — UI replaces the last one in-place
-    const sessionId = this._sessionId;
-    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { live: true } });
-    broadcastFn({ type: 'chat-progress', projectId, message: msg });
-  }
-
-  // ── Shell prompt detection ──
+  // ── Shell detection ──
 
   _shellPromptReturned(cleanText) {
     const lines = cleanText.split('\n').filter(l => l.trim());
@@ -371,53 +384,6 @@ class AgentGateway extends EventEmitter {
     return lines.join('\n').trim() || cleanOutput;
   }
 
-  // ── Plan execution ──
-
-  async executePlan({ projectId, sessionId = null, steps, tool = 'claude', broadcastFn }) {
-    this._abort(projectId);
-    this._sessionId = sessionId;
-    const ctx = { aborted: false };
-    this._running.set(projectId, ctx);
-
-    try {
-      broadcastFn({ type: 'agent-status', projectId, busy: true });
-
-      for (let i = 0; i < steps.length && !ctx.aborted; i++) {
-        const step = steps[i];
-        const tasks = steps.map((s, j) => ({
-          title: s.title,
-          status: j < i ? 'done' : j === i ? 'running' : 'pending',
-        }));
-        this._addProgressMessage(projectId, `Step ${i + 1}/${steps.length}: ${step.title}`, broadcastFn, tasks);
-
-        await this._sendToTool(projectId, sessionId, step.prompt, tool, broadcastFn, ctx);
-        if (ctx.aborted) break;
-      }
-
-      if (!ctx.aborted) {
-        const tasks = steps.map(s => ({ title: s.title, status: 'done' }));
-        this._addAgentMessage(projectId, 'Plan completed.', broadcastFn, { tasks });
-      }
-    } catch (error) {
-      this._addErrorMessage(projectId, `Plan failed: ${error.message}`, broadcastFn);
-    } finally {
-      this._finish(projectId, broadcastFn);
-    }
-  }
-
-  // ── Helpers ──
-
-  _abort(projectId) {
-    const ctx = this._running.get(projectId);
-    if (ctx) ctx.aborted = true;
-    this._running.delete(projectId);
-  }
-
-  _finish(projectId, broadcastFn) {
-    this._running.delete(projectId);
-    broadcastFn({ type: 'agent-status', projectId, busy: false });
-  }
-
   _waitForOutput(sessionId, ctx, quietMs = 3000) {
     return new Promise((resolve) => {
       let timeout;
@@ -448,6 +414,49 @@ class AgentGateway extends EventEmitter {
       .replace(/\r/g, '');
   }
 
+  // ── Plan execution ──
+
+  async executePlan({ projectId, sessionId = null, steps, tool = 'claude', broadcastFn }) {
+    this._sessionId = sessionId;
+    const ctx = { aborted: false, startedAt: Date.now() };
+    this._running.set(sessionId, { ...ctx, queue: null });
+
+    try {
+      broadcastFn({ type: 'agent-status', projectId, busy: true });
+
+      for (let i = 0; i < steps.length && !ctx.aborted; i++) {
+        const step = steps[i];
+        const tasks = steps.map((s, j) => ({
+          title: s.title,
+          status: j < i ? 'done' : j === i ? 'running' : 'pending',
+        }));
+        this._addProgressMessage(projectId, `Step ${i + 1}/${steps.length}: ${step.title}`, broadcastFn, tasks);
+
+        await this._sendToTool(projectId, sessionId, step.prompt, tool, broadcastFn, ctx);
+        if (ctx.aborted) break;
+      }
+
+      if (!ctx.aborted) {
+        const tasks = steps.map(s => ({ title: s.title, status: 'done' }));
+        this._addAgentMessage(projectId, 'Plan completed.', broadcastFn, { tasks });
+      }
+    } catch (error) {
+      this._addErrorMessage(projectId, `Plan failed: ${error.message}`, broadcastFn);
+    } finally {
+      this._running.delete(sessionId);
+      broadcastFn({ type: 'agent-status', projectId, busy: false });
+    }
+  }
+
+  // ── Abort ──
+
+  abort(sessionId) {
+    const entry = this._running.get(sessionId);
+    if (entry) entry.aborted = true;
+  }
+
+  // ── Message helpers ──
+
   _addAgentMessage(projectId, content, broadcastFn, metadata = null) {
     const sessionId = this._sessionId;
     const msg = chatStore.addMessage({ projectId, sessionId, role: 'agent', content, metadata });
@@ -456,7 +465,7 @@ class AgentGateway extends EventEmitter {
 
   _addProgressMessage(projectId, content, broadcastFn, tasks = null) {
     const sessionId = this._sessionId;
-    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks } });
+    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks, live: true } });
     broadcastFn({ type: 'chat-progress', projectId, message: msg });
   }
 
