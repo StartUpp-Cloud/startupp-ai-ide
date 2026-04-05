@@ -447,6 +447,7 @@ export default function IDE() {
                 wsRef={chatWsRef}
                 mode={agentMode}
                 tool={selectedTool}
+                isActive={projectId === selectedProjectId}
               />
             </div>
           ))}

@@ -162,7 +162,7 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
   );
 }
 
-export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude' }) {
+export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [agentBusy, setAgentBusy] = useState(false);
@@ -371,20 +371,22 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     prevMessageCountRef.current = currentCount;
   }, [messages]);
 
-  // Reset initial load flag when session or project changes
+  // Reset initial load flag when session changes
   useEffect(() => {
     isInitialLoadRef.current = true;
     prevMessageCountRef.current = 0;
-  }, [activeSessionId, projectId]);
+  }, [activeSessionId]);
 
-  // Instant scroll to bottom when project changes (for cached ChatPanels)
+  // Instant scroll to bottom when panel becomes active (visible)
   useEffect(() => {
-    // Small delay to ensure DOM is ready after visibility change
-    const timer = setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
-    }, 50);
-    return () => clearTimeout(timer);
-  }, [projectId]);
+    if (isActive) {
+      // Small delay to ensure DOM is ready after visibility change
+      const timer = setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isActive]);
 
   // ── SINGLE SOURCE OF TRUTH: Poll API every 2s for new messages ──
   // No WebSocket for messages — polling is 100% reliable
