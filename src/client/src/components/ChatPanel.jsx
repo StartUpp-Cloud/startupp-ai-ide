@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
-import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap } from 'lucide-react';
 
 /**
  * Working indicator with live timer and stop button.
@@ -420,13 +420,22 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           )}
         </div>
 
-        {/* Quick new session button (always visible) */}
+        {/* Quick new session button */}
         <button
           onClick={createNewSession}
           className="p-1 rounded text-surface-500 hover:text-primary-400 hover:bg-surface-700/50 transition-colors"
           title="New conversation"
         >
           <Plus size={14} />
+        </button>
+
+        {/* Skills quick access */}
+        <button
+          onClick={() => window.open('/skills', '_blank')}
+          className="p-1 rounded text-surface-500 hover:text-purple-400 hover:bg-surface-700/50 transition-colors"
+          title="Manage skills & plugins"
+        >
+          <Zap size={14} />
         </button>
 
         {/* Spacer */}

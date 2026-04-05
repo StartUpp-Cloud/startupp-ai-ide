@@ -57,13 +57,17 @@ class AgentGateway extends EventEmitter {
       const provider = llmProvider.getSettings().provider;
       const isCapable = provider !== 'ollama';
 
-      if (isCapable) {
-        // Smart routing: local LLM decides how to handle the request
+      if (mode === 'plan') {
+        // Plan mode: always send to tool with plan instructions, never auto-execute
+        this._addProgressMessage(projectId, `Asking ${tool} to create a plan...`, broadcastFn);
+        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, 'plan');
+      } else if (isCapable) {
+        // Agent mode + capable LLM: smart routing
         await this._smartRoute(projectId, sessionId, content, mode, tool, broadcastFn, ctx);
       } else {
-        // Dumb routing: everything goes to the CLI tool
+        // Agent mode + Ollama: everything goes to the CLI tool
         this._addProgressMessage(projectId, `Sending to ${tool}...`, broadcastFn);
-        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
+        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, 'agent');
       }
     } catch (error) {
       this._addErrorMessage(projectId, `Error: ${error.message}`, broadcastFn);
@@ -131,27 +135,25 @@ RULES:
           await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx);
         } else {
           this._addProgressMessage(projectId, `This needs ${tool} — delegating your request...`, broadcastFn);
-          await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
+          await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
         }
 
       } else if (firstLine.startsWith('DELEGATE')) {
         this._addProgressMessage(projectId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn);
-        // Always pass the user's original message — not the LLM's reformulation
-        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
+        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
 
       } else {
-        // Unrecognized format — delegate to tool if it looks like garbage/error
         const isGarbage = response.includes('NEEDS_USER') || response.includes('[') || response.length < 10;
         if (!isGarbage && response.length < 500 && !response.includes('```')) {
           this._addAgentMessage(projectId, response, broadcastFn, { tool: 'local' });
         } else {
           this._addProgressMessage(projectId, `Routing to ${tool}...`, broadcastFn);
-          await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
+          await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
         }
       }
     } catch (err) {
       this._addProgressMessage(projectId, `Routing to ${tool}...`, broadcastFn);
-      await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
+      await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
     }
   }
 
@@ -250,11 +252,11 @@ RULES:
    * - Live status reactions (thinking/reading/editing/running/done/error)
    * - Context recovery on "lost context" responses
    */
-  async _sendToCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx) {
+  async _sendToCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, mode = 'agent') {
     const MAX_ATTEMPTS = 3;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
-      const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt);
+      const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode);
 
       if (result.success) {
         // ── Success: format and deliver ──
@@ -303,7 +305,7 @@ RULES:
    * Single attempt to run a CLI tool command.
    * Returns: { success, displayOutput, cleanOutput, retry, retryReason, retryType, error }
    */
-  async _attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt) {
+  async _attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode = 'agent') {
     // Get or create shell session
     let shellSessionId;
     try {
@@ -315,7 +317,7 @@ RULES:
     }
 
     const cliState = this._cliSessions.get(chatSessionId);
-    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId);
+    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode);
     const isFollowUp = !!(cliState?.cliSessionId);
 
     this._addProgressMessage(projectId,
@@ -392,18 +394,21 @@ RULES:
         }
       }
 
-      // ── Auto-approve prompts ──
-      const fastResponse = this._fastPromptDetect(cleanChunk);
-      if (fastResponse !== null) {
-        agentShellPool.write(shellSessionId, fastResponse + '\n');
-        this._addProgressMessage(projectId, `✓ Auto-confirmed`, broadcastFn);
-      } else {
-        const provider = llmProvider.getSettings().provider;
-        if (provider !== 'ollama' && this._looksLikePrompt(cleanChunk)) {
-          const autoResponse = await this._smartAutoConfirm(cleanChunk, projectId, broadcastFn);
-          if (autoResponse !== null) {
-            agentShellPool.write(shellSessionId, autoResponse + '\n');
-            this._addProgressMessage(projectId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
+      // ── Auto-approve prompts (Agent mode only) ──
+      // In Plan mode, Claude should only analyze — no prompts expected
+      if (mode === 'agent') {
+        const fastResponse = this._fastPromptDetect(cleanChunk);
+        if (fastResponse !== null) {
+          agentShellPool.write(shellSessionId, fastResponse + '\n');
+          this._addProgressMessage(projectId, `✓ Auto-confirmed`, broadcastFn);
+        } else {
+          const provider = llmProvider.getSettings().provider;
+          if (provider !== 'ollama' && this._looksLikePrompt(cleanChunk)) {
+            const autoResponse = await this._smartAutoConfirm(cleanChunk, projectId, broadcastFn);
+            if (autoResponse !== null) {
+              agentShellPool.write(shellSessionId, autoResponse + '\n');
+              this._addProgressMessage(projectId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
+            }
           }
         }
       }
@@ -543,7 +548,7 @@ RULES:
     return parts.join('\n\n') || 'No prior context available.';
   }
 
-  // ── Profile context ──
+  // ── Context builders ──
 
   _getProfileContext() {
     try {
@@ -561,26 +566,96 @@ RULES:
     } catch { return ''; }
   }
 
+  /**
+   * Get project rules (from IDE's globalRules + project-specific rules).
+   * These are injected into the first message to ensure Claude/Copilot always follows them.
+   */
+  _getProjectRules(projectId) {
+    try {
+      const db = getDB();
+      const parts = [];
+
+      // Global rules
+      const globalRules = (db.data.globalRules || []).filter(r => r.enabled !== false);
+      if (globalRules.length > 0) {
+        parts.push('GLOBAL RULES (always follow):');
+        globalRules.forEach((r, i) => parts.push(`${i + 1}. ${r.text}`));
+      }
+
+      // Project-specific rules
+      const project = (db.data.projects || []).find(p => p.id === projectId);
+      if (project?.rules?.length > 0) {
+        const disabledIndices = new Set(project.promptSettings?.disabledRuleIndices || []);
+        const activeRules = project.rules.filter((_, i) => !disabledIndices.has(i));
+        if (activeRules.length > 0) {
+          parts.push('\nPROJECT RULES:');
+          activeRules.forEach((r, i) => parts.push(`${i + 1}. ${r}`));
+        }
+      }
+
+      return parts.join('\n');
+    } catch { return ''; }
+  }
+
+  /**
+   * Build the first-message preamble that includes:
+   * - CLAUDE.md instruction
+   * - Profile context
+   * - Project rules
+   * - Mode instruction (agent vs plan)
+   */
+  _buildFirstMessagePreamble(tool, projectId, mode) {
+    const parts = [];
+
+    // Tool-specific CLAUDE.md instruction
+    if (tool === 'claude') {
+      parts.push('IMPORTANT: Read CLAUDE.md and always follow all rules established there.');
+    } else if (tool === 'copilot') {
+      parts.push('IMPORTANT: Follow all project conventions and rules established in the repository.');
+    } else if (tool === 'aider') {
+      parts.push('Follow all project conventions.');
+    }
+
+    // Mode instruction
+    if (mode === 'plan') {
+      parts.push('\nMODE: PLAN — You are in planning mode. Do NOT make any changes to files or run any commands that modify the codebase. Instead:\n- Analyze the request thoroughly\n- Create a detailed step-by-step plan\n- List files that would need to change\n- Explain the approach and trade-offs\n- Wait for explicit approval before making any changes');
+    } else {
+      parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done');
+    }
+
+    // Profile
+    const profile = this._getProfileContext();
+    if (profile) parts.push(`\nABOUT THE USER:\n${profile}`);
+
+    // Project rules
+    const rules = this._getProjectRules(projectId);
+    if (rules) parts.push(`\n${rules}`);
+
+    return parts.join('\n');
+  }
+
   // ── Command building ──
 
-  _buildToolCommand(tool, message, chatSessionId, projectId) {
+  _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent') {
     let cliState = this._cliSessions.get(chatSessionId);
     if (!cliState?.cliSessionId && chatSessionId && projectId) {
       const stored = chatStore.getSession(projectId, chatSessionId);
       if (stored?.cliSessionId) {
         cliState = { cliSessionId: stored.cliSessionId, messageCount: stored.messageCount || 1 };
         this._cliSessions.set(chatSessionId, cliState);
-        console.log(`[agentGateway] Restored CLI session from disk: ${stored.cliSessionId} for chat ${chatSessionId}`);
-      } else {
-        console.log(`[agentGateway] No CLI session found for chat ${chatSessionId} (project: ${projectId})`);
+        console.log(`[agentGateway] Restored CLI session from disk: ${stored.cliSessionId}`);
       }
-    } else if (cliState?.cliSessionId) {
-      console.log(`[agentGateway] Using cached CLI session: ${cliState.cliSessionId} for chat ${chatSessionId}`);
     }
 
     const isFirstMessage = !cliState?.cliSessionId;
-    const profilePrefix = isFirstMessage ? (this._getProfileContext() + '\n\n') : '';
-    const escaped = (profilePrefix + message).replace(/'/g, "'\\''");
+    let fullMessage;
+    if (isFirstMessage) {
+      const preamble = this._buildFirstMessagePreamble(tool, projectId, mode);
+      fullMessage = preamble + '\n\n---\n\n' + message;
+    } else {
+      fullMessage = message;
+    }
+    const escaped = fullMessage.replace(/'/g, "'\\''");
 
     switch (tool) {
       case 'claude': {
