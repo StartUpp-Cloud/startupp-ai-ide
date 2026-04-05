@@ -740,8 +740,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           />
         )}
 
-        {/* Working indicator with timer and stop button */}
-        {agentBusy && !streamingMessage && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={activeSessionId} />}
+        {/* Working indicator with timer and stop button - show during active work */}
+        {(agentBusy || streamingMessage) && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={activeSessionId} />}
 
         <div ref={messagesEndRef} />
       </div>
