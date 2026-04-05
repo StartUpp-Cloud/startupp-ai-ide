@@ -228,6 +228,9 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         const msgs = (data.messages || []).reverse();
         knownIdsRef.current = new Set(msgs.map(m => m.id));
         setMessages(msgs);
+        // Mark session as read when loading messages
+        fetch(`/api/projects/${projectId}/chat/sessions/${activeSessionId}/read`, { method: 'POST' }).catch(() => {});
+        setSessions(prev => prev.map(s => s.id === activeSessionId ? { ...s, hasUnread: false } : s));
       })
       .catch(() => setMessages([]))
       .finally(() => setLoading(false));
@@ -339,6 +342,15 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               content: formatJobProgress(msg.progress),
               progress: msg.progress,
             } : null);
+          }
+          break;
+
+        case 'session-unread':
+          // Update session unread state
+          if (msg.projectId === projectId) {
+            setSessions(prev => prev.map(s =>
+              s.id === msg.sessionId ? { ...s, hasUnread: msg.hasUnread } : s
+            ));
           }
           break;
       }
@@ -501,10 +513,23 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     } catch {}
   }, [projectId, activeSessionId, openTabs, createNewSession]);
 
+  // Mark session as read (API call + local state)
+  const markSessionRead = useCallback((sessionId) => {
+    if (!projectId || !sessionId) return;
+    // Update local state immediately
+    setSessions(prev => prev.map(s =>
+      s.id === sessionId ? { ...s, hasUnread: false } : s
+    ));
+    // Fire-and-forget API call
+    fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' })
+      .catch(() => {});
+  }, [projectId]);
+
   // Switch to a session tab (doesn't open from dropdown, just switches active)
   const switchToTab = useCallback((sessionId) => {
     setActiveSessionId(sessionId);
-  }, []);
+    markSessionRead(sessionId);
+  }, [markSessionRead]);
 
   // Open a session from the dropdown (adds to tabs and makes active)
   const openSession = useCallback((sessionId) => {
@@ -513,7 +538,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     }
     setActiveSessionId(sessionId);
     setShowSessionList(false);
-  }, [openTabs]);
+    markSessionRead(sessionId);
+  }, [openTabs, markSessionRead]);
 
   // Close a tab (removes from tabs but keeps session in history)
   const closeTab = useCallback((sessionId, e) => {
@@ -626,6 +652,10 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             >
               <MessageCircle size={11} className={s.id === activeSessionId ? 'text-primary-400 flex-shrink-0' : 'text-surface-600 flex-shrink-0'} />
               <span className="truncate text-[11px]">{s.name || 'Chat'}</span>
+              {/* Unread badge */}
+              {s.hasUnread && s.id !== activeSessionId && (
+                <span className="flex-shrink-0 w-1.5 h-1.5 rounded-full bg-primary-500 animate-pulse" />
+              )}
               {/* Close tab button */}
               <button
                 onClick={(e) => closeTab(s.id, e)}

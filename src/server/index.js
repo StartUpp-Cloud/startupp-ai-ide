@@ -159,6 +159,17 @@ async function startServer() {
       });
     });
 
+    // Global unread counts (for all projects)
+    app.get("/api/unread-counts", async (req, res) => {
+      try {
+        const { chatStore } = await import("./chatStore.js");
+        const counts = chatStore.getAllUnreadCounts();
+        res.json({ unread: counts });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     // System health — lightweight, uses only Node built-in os module
     app.get("/api/system-health", (req, res) => {
       const totalMem = os.totalmem();

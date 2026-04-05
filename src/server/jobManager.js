@@ -86,9 +86,21 @@ class JobManager extends EventEmitter {
     console.log(`[JobManager] Found ${interruptedJobs.length} interrupted job(s)`);
 
     for (const job of interruptedJobs) {
+      // Try to extract CLI session ID from output for resume capability
+      const recoveredSessionId = this._extractCliSessionFromOutput(job.id);
+      if (recoveredSessionId) {
+        job.cliSessionId = recoveredSessionId;
+        console.log(`[JobManager] Recovered CLI session ${recoveredSessionId} for job ${job.id}`);
+
+        // Also update chat session metadata so --resume works
+        this._updateChatSessionWithCliSession(job.projectId, job.sessionId, recoveredSessionId);
+      }
+
       // Mark as failed/interrupted - can't resume process after restart
       job.status = 'failed';
-      job.error = 'Server restarted while job was running. The operation may have completed - check the project for changes.';
+      job.error = recoveredSessionId
+        ? 'Server restarted while job was running. The conversation can be resumed - Claude will remember context.'
+        : 'Server restarted while job was running. The operation may have completed - check the project for changes.';
       job.completedAt = new Date().toISOString();
       this._saveJob(job);
 
@@ -412,6 +424,43 @@ class JobManager extends EventEmitter {
     }
 
     return interrupted;
+  }
+
+  /**
+   * Extract CLI session ID from job output file.
+   * Scans backwards for the last session_id to enable --resume.
+   */
+  _extractCliSessionFromOutput(jobId) {
+    const outputPath = this._getOutputPath(jobId);
+    if (!fs.existsSync(outputPath)) return null;
+
+    try {
+      const content = fs.readFileSync(outputPath, 'utf-8');
+      // Find all session_id occurrences and use the last one
+      const matches = content.match(/"session_id"\s*:\s*"([^"]+)"/g);
+      if (matches && matches.length > 0) {
+        const lastMatch = matches[matches.length - 1];
+        const sessionId = lastMatch.match(/"session_id"\s*:\s*"([^"]+)"/)?.[1];
+        return sessionId || null;
+      }
+    } catch (err) {
+      console.warn(`[JobManager] Error extracting CLI session from output: ${err.message}`);
+    }
+
+    return null;
+  }
+
+  /**
+   * Update chat session metadata with CLI session ID for --resume support.
+   */
+  async _updateChatSessionWithCliSession(projectId, sessionId, cliSessionId) {
+    try {
+      const { chatStore } = await import('./chatStore.js');
+      chatStore.updateSessionMeta(projectId, sessionId, { cliSessionId });
+      console.log(`[JobManager] Updated chat session ${sessionId} with CLI session ${cliSessionId}`);
+    } catch (err) {
+      console.warn(`[JobManager] Error updating chat session: ${err.message}`);
+    }
   }
 
   _setupActivityTimeout(jobId) {

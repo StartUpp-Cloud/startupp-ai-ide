@@ -100,4 +100,17 @@ router.post('/:projectId/chat', (req, res) => {
   }
 });
 
+// POST /api/projects/:projectId/chat/sessions/:sessionId/read — Mark session as read
+router.post('/:projectId/chat/sessions/:sessionId/read', (req, res) => {
+  try {
+    const { projectId, sessionId } = req.params;
+    const changed = chatStore.markSessionRead(projectId, sessionId);
+    res.json({ marked: changed });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Note: Global unread endpoint is at /api/unread-counts (see index.js)
+
 export default router;

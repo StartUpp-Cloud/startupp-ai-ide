@@ -86,6 +86,9 @@ export default function IDE() {
   // Container repos state
   const [containerRepos, setContainerRepos] = useState([]);
 
+  // Unread session counts per project: { projectId: count }
+  const [unreadCounts, setUnreadCounts] = useState({});
+
   // Plan execution state (shared with TopBar)
   const [executionId, setExecutionId] = useState(null);
   const [planRunning, setPlanRunning] = useState(false);
@@ -205,6 +208,49 @@ export default function IDE() {
     const interval = setInterval(fetchInfo, 15000);
     return () => clearInterval(interval);
   }, [selectedProject?.containerName, selectedProject?.folderPath]);
+
+  // ── Unread counts fetching ──
+
+  useEffect(() => {
+    const fetchUnreadCounts = () => {
+      fetch('/api/unread-counts')
+        .then(r => r.ok ? r.json() : { unread: {} })
+        .then(data => setUnreadCounts(data.unread || {}))
+        .catch(() => {});
+    };
+    fetchUnreadCounts();
+    const interval = setInterval(fetchUnreadCounts, 30000); // Refresh every 30s
+    return () => clearInterval(interval);
+  }, []);
+
+  // Handle unread WebSocket events
+  useEffect(() => {
+    const ws = chatWsRef.current;
+    if (!ws) return;
+
+    const handleMessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'session-unread') {
+          setUnreadCounts(prev => ({
+            ...prev,
+            [data.projectId]: (prev[data.projectId] || 0) + (data.hasUnread ? 1 : -1),
+          }));
+        }
+      } catch {}
+    };
+
+    ws.addEventListener('message', handleMessage);
+    return () => ws.removeEventListener('message', handleMessage);
+  }, [chatWsRef.current]);
+
+  // Clear unread count when viewing a project's session
+  const markProjectRead = useCallback((projectId) => {
+    setUnreadCounts(prev => {
+      const { [projectId]: _, ...rest } = prev;
+      return rest;
+    });
+  }, []);
 
   // ── Notification helpers ──
 
@@ -336,10 +382,14 @@ export default function IDE() {
               <div className="flex-1 min-h-0 overflow-auto">
                 <ProjectManagerPanel
                   selectedProjectId={selectedProjectId}
-                  onSelectProject={(id) => setSelectedProjectId(id)}
+                  onSelectProject={(id) => {
+                    setSelectedProjectId(id);
+                    if (id) markProjectRead(id);
+                  }}
                   onProjectChanged={() => {
                     if (selectedProjectId) loadProject(selectedProjectId);
                   }}
+                  unreadCounts={unreadCounts}
                 />
               </div>
 

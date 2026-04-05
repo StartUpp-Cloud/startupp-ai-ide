@@ -362,6 +362,17 @@ RULES:
             },
           });
 
+          // Mark session as unread and broadcast
+          const changed = chatStore.markSessionUnread(projectId, chatSessionId);
+          if (changed) {
+            broadcastFn({
+              type: 'session-unread',
+              projectId,
+              sessionId: chatSessionId,
+              hasUnread: true,
+            });
+          }
+
           this._persistContext(projectId, chatSessionId, message, finalContent);
           return;
         }
@@ -410,6 +421,17 @@ RULES:
             metadata: { tool, jobId: job.id, error: true },
           },
         });
+
+        // Mark session as unread even for failures (user needs to see error)
+        const changed = chatStore.markSessionUnread(projectId, chatSessionId);
+        if (changed) {
+          broadcastFn({
+            type: 'session-unread',
+            projectId,
+            sessionId: chatSessionId,
+            hasUnread: true,
+          });
+        }
         return;
       }
     } finally {
@@ -1212,6 +1234,17 @@ NEEDS_USER`,
 
     const msg = chatStore.addMessage({ projectId, sessionId, role: 'agent', content, metadata });
     broadcastFn({ type: 'chat-message', message: msg });
+
+    // Mark session as unread and broadcast
+    const changed = chatStore.markSessionUnread(projectId, sessionId);
+    if (changed) {
+      broadcastFn({
+        type: 'session-unread',
+        projectId,
+        sessionId,
+        hasUnread: true,
+      });
+    }
   }
 
   async _generateSuggestions(agentResponse) {

@@ -117,6 +117,68 @@ class ChatStore {
   }
 
   /**
+   * Mark a session as having unread messages.
+   * Called when an agent response is received.
+   */
+  markSessionUnread(projectId, sessionId) {
+    const sessions = this._readIndex(projectId);
+    const session = sessions.find(s => s.id === sessionId);
+    if (session && !session.hasUnread) {
+      session.hasUnread = true;
+      session.unreadSince = new Date().toISOString();
+      this._writeIndex(projectId, sessions);
+      return true; // State changed
+    }
+    return false; // Already unread or not found
+  }
+
+  /**
+   * Mark a session as read.
+   * Called when user views the session.
+   */
+  markSessionRead(projectId, sessionId) {
+    const sessions = this._readIndex(projectId);
+    const session = sessions.find(s => s.id === sessionId);
+    if (session && session.hasUnread) {
+      session.hasUnread = false;
+      delete session.unreadSince;
+      this._writeIndex(projectId, sessions);
+      return true; // State changed
+    }
+    return false; // Already read or not found
+  }
+
+  /**
+   * Get all unread sessions for a project.
+   */
+  getUnreadSessions(projectId) {
+    const sessions = this._readIndex(projectId);
+    return sessions.filter(s => s.hasUnread === true);
+  }
+
+  /**
+   * Get unread counts for all projects.
+   * Returns { projectId: unreadCount, ... }
+   */
+  getAllUnreadCounts() {
+    const counts = {};
+    const projectDirs = fs.readdirSync(CHAT_DIR).filter(f => {
+      const stat = fs.statSync(path.join(CHAT_DIR, f));
+      return stat.isDirectory();
+    });
+
+    for (const projectId of projectDirs) {
+      const sessions = this._readIndex(projectId);
+      const unreadCount = sessions.filter(s => s.hasUnread === true).length;
+      if (unreadCount > 0) {
+        counts[projectId] = unreadCount;
+      }
+    }
+
+    return counts;
+  }
+
+  /**
    * Get a specific session by ID.
    */
   getSession(projectId, sessionId) {
@@ -289,6 +351,35 @@ class ChatStore {
     }
 
     return chunks.sort((a, b) => a.index - b.index);
+  }
+
+  /**
+   * Get the timestamp of the last chunk for a streaming message.
+   * Used to determine if streaming is still active.
+   */
+  getLastChunkTimestamp({ projectId, messageId }) {
+    const chunksDir = path.join(this._projectDir(projectId), '_chunks');
+    const chunkFile = path.join(chunksDir, `${messageId}.chunks`);
+
+    if (!fs.existsSync(chunkFile)) return null;
+
+    // Read last few lines efficiently
+    const content = fs.readFileSync(chunkFile, 'utf-8');
+    const lines = content.trim().split('\n');
+
+    // Work backwards to find the last valid chunk with a timestamp
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      try {
+        const chunk = JSON.parse(line);
+        if (chunk.timestamp) {
+          return new Date(chunk.timestamp).getTime();
+        }
+      } catch {}
+    }
+
+    return null;
   }
 
   /**
@@ -589,17 +680,21 @@ class ChatStore {
       if (msg) {
         // Handle incomplete streaming messages
         if (msg.metadata?.streaming === true) {
+          // Check the LAST CHUNK timestamp, not when streaming started.
+          // Claude can work for 30+ minutes - we need to know if it's STILL active.
+          const lastChunkTime = this.getLastChunkTimestamp({ projectId, messageId: msg.id });
           const streamStarted = msg.metadata?.streamStartedAt
             ? new Date(msg.metadata.streamStartedAt).getTime()
             : new Date(msg.createdAt).getTime();
 
-          // Only try recovery if the message is OLD (> 2 minutes)
-          // Active streaming messages should be handled by WebSocket, not polling
-          const ageMs = now - streamStarted;
-          const isOldMessage = ageMs > 2 * 60 * 1000; // 2 minutes
+          // Use last chunk time if available, otherwise fall back to stream start
+          // Consider "stale" if no activity for 5 minutes (Claude pauses can be long)
+          const lastActivityTime = lastChunkTime || streamStarted;
+          const silenceMs = now - lastActivityTime;
+          const isStale = silenceMs > 5 * 60 * 1000; // 5 minutes of silence
 
-          if (isOldMessage) {
-            // Try to auto-recover this old incomplete message
+          if (isStale) {
+            // Try to auto-recover this stale incomplete message
             const recovered = this.recoverStreamingMessage({
               projectId,
               sessionId,
@@ -611,9 +706,9 @@ class ChatStore {
             }
           }
 
-          // Skip streaming messages entirely (both active and unrecoverable old ones)
+          // Skip streaming messages entirely (both active and unrecoverable stale ones)
           // Active ones will be shown via WebSocket streaming
-          // Old unrecoverable ones would just show garbage
+          // Stale unrecoverable ones would just show garbage
           continue;
         }
         messages.push(msg);
