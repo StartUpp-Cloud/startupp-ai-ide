@@ -294,19 +294,94 @@ class ChatStore {
   /**
    * Recover a streaming message by combining saved chunks.
    * Used when a connection drops mid-stream.
+   * Parses raw terminal output to extract the actual response text.
    */
   recoverStreamingMessage({ projectId, sessionId, messageId }) {
     const chunks = this.getStreamChunks({ projectId, messageId });
     if (chunks.length === 0) return null;
 
-    const combinedContent = chunks.map(c => c.content).join('');
+    const rawContent = chunks.map(c => c.content).join('');
+
+    // Parse the raw terminal output to extract the actual response
+    // The chunks contain JSON events from stream-json format, ANSI codes, etc.
+    const cleanedContent = this._parseRawChunksToContent(rawContent);
+
+    if (!cleanedContent || cleanedContent.length < 10) {
+      // Not enough content to recover - just mark as failed
+      return this.finalizeStreamingMessage({
+        projectId,
+        sessionId,
+        messageId,
+        finalContent: '⚠️ Response was interrupted and could not be recovered.',
+        metadata: { recovered: true, recoveryFailed: true, chunkCount: chunks.length },
+      });
+    }
+
     return this.finalizeStreamingMessage({
       projectId,
       sessionId,
       messageId,
-      finalContent: combinedContent,
+      finalContent: cleanedContent,
       metadata: { recovered: true, chunkCount: chunks.length },
     });
+  }
+
+  /**
+   * Parse raw terminal output (with JSON events, ANSI codes) to extract clean response text.
+   * Handles Claude's stream-json format.
+   */
+  _parseRawChunksToContent(rawContent) {
+    // Strip ANSI codes
+    let clean = rawContent
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+      .replace(/\x1b\][^\x07]*\x07/g, '')
+      .replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '')
+      .replace(/\x1b[()][A-Z0-9]/g, '')
+      .replace(/\r/g, '');
+
+    // Try to extract text from stream-json result event
+    let resultText = '';
+
+    // Look for the final result JSON
+    for (const line of clean.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) continue;
+
+      try {
+        const json = JSON.parse(trimmed);
+        // The result event has the final response text
+        if (json.type === 'result' && json.result) {
+          resultText = json.result;
+        }
+        // Also capture session_id for any result-like object
+        if (json.result && typeof json.result === 'string') {
+          resultText = json.result;
+        }
+      } catch {}
+    }
+
+    // If we found result text, clean it up
+    if (resultText) {
+      return resultText
+        .replace(/\\n/g, '\n')
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\')
+        .trim();
+    }
+
+    // Fallback: filter out JSON lines and command echoes, keep meaningful text
+    const meaningfulLines = clean.split('\n').filter(line => {
+      const t = line.trim();
+      if (!t) return false;
+      if (t.startsWith('{') && t.includes('"type"')) return false; // JSON event
+      if (t.startsWith('claude -p')) return false; // Command echo
+      if (t.startsWith('copilot -p')) return false;
+      if (t.startsWith('aider ')) return false;
+      if (/^[>#$]\s*$/.test(t)) return false; // Shell prompts
+      return true;
+    });
+
+    return meaningfulLines.join('\n').trim();
   }
 
   /**
@@ -382,16 +457,66 @@ class ChatStore {
     const messages = [];
     for (const line of lines) {
       const msg = deserialize(line);
-      if (msg) messages.push(msg);
+      if (msg) {
+        // Handle incomplete streaming messages
+        if (msg.metadata?.streaming === true) {
+          // Try to auto-recover this message
+          const recovered = this.recoverStreamingMessage({
+            projectId,
+            sessionId,
+            messageId: msg.id,
+          });
+          if (recovered) {
+            messages.push(recovered);
+            continue;
+          }
+          // If recovery failed and no chunks exist, skip this message entirely
+          // (it was likely a placeholder that never received content)
+          const chunks = this.getStreamChunks({ projectId, messageId: msg.id });
+          if (chunks.length === 0) {
+            continue; // Skip this incomplete message
+          }
+        }
+        messages.push(msg);
+      }
+    }
+
+    // Clean up orphaned progress messages (progress messages at the end with no following agent/error response)
+    // These are stale from previous interrupted sessions
+    let cleanedMessages = messages;
+    while (cleanedMessages.length > 0) {
+      const last = cleanedMessages[cleanedMessages.length - 1];
+      if (last.role === 'progress') {
+        cleanedMessages = cleanedMessages.slice(0, -1);
+      } else {
+        break;
+      }
+    }
+
+    // Also remove progress messages that appear after the last user message if there's no agent response after them
+    // Find the last user message index
+    const lastUserIdx = cleanedMessages.findLastIndex(m => m.role === 'user');
+    if (lastUserIdx >= 0) {
+      // Check if there's an agent/error response after the last user message
+      const hasResponseAfterUser = cleanedMessages.slice(lastUserIdx + 1).some(m =>
+        m.role === 'agent' || m.role === 'error'
+      );
+      if (!hasResponseAfterUser) {
+        // Remove all progress messages after the last user (they're orphaned)
+        cleanedMessages = [
+          ...cleanedMessages.slice(0, lastUserIdx + 1),
+          ...cleanedMessages.slice(lastUserIdx + 1).filter(m => m.role !== 'progress')
+        ];
+      }
     }
 
     if (before) {
-      const idx = messages.findIndex(m => m.id === before);
-      if (idx > 0) return messages.slice(Math.max(0, idx - limit), idx).reverse();
+      const idx = cleanedMessages.findIndex(m => m.id === before);
+      if (idx > 0) return cleanedMessages.slice(Math.max(0, idx - limit), idx).reverse();
       return [];
     }
 
-    return messages.slice(-limit).reverse();
+    return cleanedMessages.slice(-limit).reverse();
   }
 
   search(projectId, query, { sessionId = null, limit = 20 } = {}) {
