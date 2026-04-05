@@ -47,6 +47,31 @@ export default function IDE() {
   });
   const [selectedProject, setSelectedProject] = useState(null);
 
+  // Project cache - keeps recently visited projects' ChatPanels mounted for instant switching
+  // Limit to 5 projects to avoid excessive memory usage
+  const MAX_CACHED_PROJECTS = 5;
+  const [cachedProjectIds, setCachedProjectIds] = useState(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.SELECTED_PROJECT);
+    return saved ? [saved] : [];
+  });
+
+  // Update cached projects when selection changes
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    setCachedProjectIds(prev => {
+      // If already cached, move to end (most recent)
+      if (prev.includes(selectedProjectId)) {
+        return [...prev.filter(id => id !== selectedProjectId), selectedProjectId];
+      }
+      // Add to cache, remove oldest if at limit
+      const updated = [...prev, selectedProjectId];
+      if (updated.length > MAX_CACHED_PROJECTS) {
+        return updated.slice(-MAX_CACHED_PROJECTS);
+      }
+      return updated;
+    });
+  }, [selectedProjectId]);
+
   // Notifications state
   const [notifications, setNotifications] = useState([]);
 
@@ -403,13 +428,36 @@ export default function IDE() {
         )}
 
         {/* ── Center: Chat ── */}
-        <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, maxHeight: '100%' }}>
-          <ChatPanel
-            projectId={selectedProjectId}
-            wsRef={chatWsRef}
-            mode={agentMode}
-            tool={selectedTool}
-          />
+        {/* Render cached ChatPanels - keeps them mounted for instant switching */}
+        <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, maxHeight: '100%', position: 'relative' }}>
+          {cachedProjectIds.map(projectId => (
+            <div
+              key={projectId}
+              style={{
+                display: projectId === selectedProjectId ? 'flex' : 'none',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                minHeight: 0,
+                maxHeight: '100%',
+                flex: 1,
+              }}
+            >
+              <ChatPanel
+                projectId={projectId}
+                wsRef={chatWsRef}
+                mode={agentMode}
+                tool={selectedTool}
+              />
+            </div>
+          ))}
+          {/* Show empty state if no project selected */}
+          {!selectedProjectId && (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div className="text-surface-500 text-center">
+                <p className="text-sm">Select a project to start chatting</p>
+              </div>
+            </div>
+          )}
           <InternalConsole projectId={selectedProjectId} wsRef={chatWsRef} />
         </div>
 
