@@ -473,27 +473,39 @@ class ChatStore {
 
     const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
     const messages = [];
+    const now = Date.now();
+
     for (const line of lines) {
       const msg = deserialize(line);
       if (msg) {
         // Handle incomplete streaming messages
         if (msg.metadata?.streaming === true) {
-          // Try to auto-recover this message
-          const recovered = this.recoverStreamingMessage({
-            projectId,
-            sessionId,
-            messageId: msg.id,
-          });
-          if (recovered) {
-            messages.push(recovered);
-            continue;
+          const streamStarted = msg.metadata?.streamStartedAt
+            ? new Date(msg.metadata.streamStartedAt).getTime()
+            : new Date(msg.createdAt).getTime();
+
+          // Only try recovery if the message is OLD (> 2 minutes)
+          // Active streaming messages should be handled by WebSocket, not polling
+          const ageMs = now - streamStarted;
+          const isOldMessage = ageMs > 2 * 60 * 1000; // 2 minutes
+
+          if (isOldMessage) {
+            // Try to auto-recover this old incomplete message
+            const recovered = this.recoverStreamingMessage({
+              projectId,
+              sessionId,
+              messageId: msg.id,
+            });
+            if (recovered) {
+              messages.push(recovered);
+              continue;
+            }
           }
-          // If recovery failed and no chunks exist, skip this message entirely
-          // (it was likely a placeholder that never received content)
-          const chunks = this.getStreamChunks({ projectId, messageId: msg.id });
-          if (chunks.length === 0) {
-            continue; // Skip this incomplete message
-          }
+
+          // Skip streaming messages entirely (both active and unrecoverable old ones)
+          // Active ones will be shown via WebSocket streaming
+          // Old unrecoverable ones would just show garbage
+          continue;
         }
         messages.push(msg);
       }
