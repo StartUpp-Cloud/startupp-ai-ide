@@ -7,6 +7,7 @@ import QuickActionsPanel from '../components/QuickActionsPanel';
 import TopBar from '../components/TopBar';
 import RightPanel from '../components/RightPanel';
 import NotificationCenter, { sendDesktopNotification } from '../components/NotificationCenter';
+import { useWebSocket, WS_STATUS } from '../hooks/useWebSocket';
 import {
   PanelLeftClose,
   PanelLeftOpen,
@@ -70,36 +71,21 @@ export default function IDE() {
   // Resizer state
   const [isResizing, setIsResizing] = useState(null);
 
-  // Chat WebSocket connection
-  const chatWsRef = useRef(null);
-
-  useEffect(() => {
-    let mounted = true;
-    let reconnectTimer = null;
-
-    const connect = () => {
-      if (!mounted) return;
-      const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/terminal`;
-      const ws = new WebSocket(wsUrl);
-      ws.onopen = () => { if (mounted) chatWsRef.current = ws; };
-      ws.onclose = () => {
-        if (mounted) {
-          chatWsRef.current = null;
-          // Auto-reconnect after 2 seconds
-          reconnectTimer = setTimeout(connect, 2000);
-        }
-      };
-      ws.onerror = () => {}; // onclose will fire after this
-    };
-
-    connect();
-
-    return () => {
-      mounted = false;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (chatWsRef.current) chatWsRef.current.close();
-    };
-  }, []);
+  // Chat WebSocket connection with robust reconnection
+  const { wsRef: chatWsRef, status: wsStatus, isConnected: wsConnected, forceReconnect } = useWebSocket('/ws/terminal', {
+    reconnectOnVisible: true,  // Reconnect when tab becomes visible
+    checkOnFocus: true,        // Check connection when window gains focus
+    heartbeatInterval: 25000,  // Ping every 25 seconds
+    heartbeatTimeout: 60000,   // Reconnect if no activity for 60 seconds
+    onStatusChange: (status) => {
+      // Log status changes for debugging
+      if (status === WS_STATUS.RECONNECTING) {
+        console.log('[IDE] WebSocket reconnecting...');
+      } else if (status === WS_STATUS.CONNECTED) {
+        console.log('[IDE] WebSocket connected');
+      }
+    },
+  });
 
   // ── Persist state ──
 

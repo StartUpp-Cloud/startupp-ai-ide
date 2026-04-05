@@ -4,18 +4,30 @@ import { FitAddon } from '@xterm/addon-fit';
 import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 
+// WebSocket reconnection configuration
+const WS_CONFIG = {
+  reconnectMinDelay: 1000,
+  reconnectMaxDelay: 30000,
+  reconnectBackoffMultiplier: 1.5,
+  heartbeatInterval: 25000,
+  heartbeatTimeout: 60000,
+};
+
 /**
  * InternalConsole — a real interactive shell terminal for the selected project.
  * Opens its own WebSocket + PTY session independently from the chat system.
+ * Includes visibility-aware reconnection for stability.
  */
 export default function InternalConsole({ projectId }) {
   const [open, setOpen] = useState(false);
+  const [connected, setConnected] = useState(false);
   const termRef = useRef(null);
   const xtermRef = useRef(null);
   const fitRef = useRef(null);
   const wsRef = useRef(null);
   const sessionIdRef = useRef(null);
   const prevProjectIdRef = useRef(null);
+  const mountedRef = useRef(true);
 
   // Create xterm + WS + session when opened
   useEffect(() => {
@@ -31,6 +43,7 @@ export default function InternalConsole({ projectId }) {
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     sessionIdRef.current = null;
     prevProjectIdRef.current = projectId;
+    mountedRef.current = true;
 
     // Create xterm
     const xterm = new XTerm({
@@ -47,48 +60,148 @@ export default function InternalConsole({ projectId }) {
     xtermRef.current = xterm;
     fitRef.current = fit;
 
+    // WebSocket connection state
+    let reconnectTimer = null;
+    let heartbeatInterval = null;
+    let lastPong = Date.now();
+    let reconnectDelay = WS_CONFIG.reconnectMinDelay;
+    let wasConnected = false;
+
     // Connect WebSocket
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/terminal`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
 
-    ws.onopen = () => {
-      // Create a session for this project
-      ws.send(JSON.stringify({
-        type: 'create-session',
-        projectId,
-        role: 'utility',
-        cliTool: null,
-        cols: xterm.cols || 120,
-        rows: xterm.rows || 12,
-      }));
+    const connect = () => {
+      if (!mountedRef.current) return;
+
+      // Don't connect if already connected or connecting
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+      if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) return;
+
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (!mountedRef.current) { ws.close(); return; }
+
+        setConnected(true);
+        wasConnected = true;
+        lastPong = Date.now();
+        reconnectDelay = WS_CONFIG.reconnectMinDelay;
+
+        // Create a session for this project
+        ws.send(JSON.stringify({
+          type: 'create-session',
+          projectId,
+          role: 'utility',
+          cliTool: null,
+          cols: xterm.cols || 120,
+          rows: xterm.rows || 12,
+        }));
+
+        // Start heartbeat
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        heartbeatInterval = setInterval(() => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+          if (Date.now() - lastPong > WS_CONFIG.heartbeatTimeout) {
+            console.warn('[InternalConsole] WebSocket heartbeat timeout — reconnecting');
+            ws.close(4000, 'Heartbeat timeout');
+            return;
+          }
+
+          try { ws.send(JSON.stringify({ type: 'ping' })); } catch {}
+        }, WS_CONFIG.heartbeatInterval);
+      };
+
+      ws.onmessage = (event) => {
+        if (!mountedRef.current) return;
+        lastPong = Date.now();
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === 'session-created' && !sessionIdRef.current) {
+          sessionIdRef.current = msg.sessionId;
+          // Attach
+          ws.send(JSON.stringify({ type: 'attach', sessionId: msg.sessionId }));
+        }
+
+        if (msg.type === 'output' && msg.sessionId === sessionIdRef.current) {
+          xterm.write(msg.data);
+        }
+      };
+
+      ws.onclose = (event) => {
+        if (!mountedRef.current) return;
+        setConnected(false);
+        wsRef.current = null;
+        if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
+
+        // Auto-reconnect if we were previously connected
+        if (wasConnected) {
+          console.log(`[InternalConsole] WebSocket closed (code: ${event.code}) - reconnecting in ${reconnectDelay}ms`);
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            reconnectDelay = Math.min(reconnectDelay * WS_CONFIG.reconnectBackoffMultiplier, WS_CONFIG.reconnectMaxDelay);
+            connect();
+          }, reconnectDelay);
+        }
+      };
+
+      ws.onerror = () => {
+        setConnected(false);
+      };
     };
 
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+    // Check connection health
+    const checkConnection = () => {
+      if (!mountedRef.current) return;
 
-      if (msg.type === 'session-created' && !sessionIdRef.current) {
-        sessionIdRef.current = msg.sessionId;
-        // Attach
-        ws.send(JSON.stringify({ type: 'attach', sessionId: msg.sessionId }));
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.log('[InternalConsole] Connection check failed - reconnecting');
+        reconnectDelay = WS_CONFIG.reconnectMinDelay;
+        connect();
+        return;
       }
 
-      if (msg.type === 'output' && msg.sessionId === sessionIdRef.current) {
-        xterm.write(msg.data);
+      // Check if connection is stale
+      const timeSinceActivity = Date.now() - lastPong;
+      if (timeSinceActivity > WS_CONFIG.heartbeatTimeout) {
+        console.log('[InternalConsole] Connection stale - reconnecting');
+        ws.close(4000, 'Stale connection');
       }
     };
+
+    // Visibility change handler
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('[InternalConsole] Tab became visible - checking connection');
+        setTimeout(checkConnection, 100);
+      }
+    };
+
+    // Window focus handler
+    const handleFocus = () => {
+      console.log('[InternalConsole] Window focused - checking connection');
+      setTimeout(checkConnection, 200);
+    };
+
+    // Add visibility and focus listeners
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+
+    connect();
 
     // Forward keyboard input
     xterm.onData((data) => {
-      if (sessionIdRef.current && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data }));
+      if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data }));
       }
     });
 
     // Forward resize
     xterm.onResize(({ cols, rows }) => {
-      if (sessionIdRef.current && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', sessionId: sessionIdRef.current, cols, rows }));
+      if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'resize', sessionId: sessionIdRef.current, cols, rows }));
       }
     });
 
@@ -97,10 +210,15 @@ export default function InternalConsole({ projectId }) {
     window.addEventListener('resize', resizeHandler);
 
     return () => {
+      mountedRef.current = false;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
       window.removeEventListener('resize', resizeHandler);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       xterm.dispose();
       xtermRef.current = null;
-      if (ws.readyState === WebSocket.OPEN) ws.close();
+      if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.close();
       wsRef.current = null;
       sessionIdRef.current = null;
     };
@@ -114,6 +232,13 @@ export default function InternalConsole({ projectId }) {
       >
         <TerminalIcon size={12} />
         Internal Console
+        {open && (
+          <div
+            className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}
+            title={connected ? 'Connected' : 'Connecting...'}
+          />
+        )}
+        <span className="flex-1" />
         {open ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
       </button>
       {open && (

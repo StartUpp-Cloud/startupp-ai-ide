@@ -6,6 +6,15 @@ import { Zap, X, MessageSquare, Bot, Brain, Sparkles, Cpu, Settings, Shield, Ale
 import LLMSettingsPanel from './LLMSettingsPanel';
 import '@xterm/xterm/css/xterm.css';
 
+// WebSocket reconnection configuration
+const WS_CONFIG = {
+  reconnectMinDelay: 1000,
+  reconnectMaxDelay: 30000,
+  reconnectBackoffMultiplier: 1.5,
+  heartbeatInterval: 25000,
+  heartbeatTimeout: 60000,
+};
+
 const CLI_TOOLS = [
   { id: 'shell', name: 'Shell', icon: '>' },
   { id: 'claude', name: 'Claude Code', icon: '\u{1F916}' },
@@ -179,7 +188,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     };
   }, []);
 
-  // Connect to WebSocket with heartbeat and auto-recovery
+  // Connect to WebSocket with heartbeat, auto-recovery, and visibility-aware reconnection
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
@@ -187,9 +196,16 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     let reconnectTimer = null;
     let heartbeatInterval = null;
     let lastPong = Date.now();
+    let reconnectDelay = WS_CONFIG.reconnectMinDelay;
+    let wasConnected = false;
 
     const connect = () => {
       if (!mounted) return;
+
+      // Don't connect if already connected or connecting
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+      if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) return;
+
       setStatus('connecting');
       const ws = new WebSocket(wsUrl);
 
@@ -199,6 +215,10 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setStatus('connected');
         wsRef.current = ws;
         lastPong = Date.now();
+        wasConnected = true;
+
+        // Reset reconnect delay on successful connection
+        reconnectDelay = WS_CONFIG.reconnectMinDelay;
 
         // Request session list (for SessionManager in the sidebar)
         ws.send(JSON.stringify({ type: 'list-sessions' }));
@@ -208,21 +228,21 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         // Do NOT send get-project-sessions here — let the effect be the single sender.
         prevProjectIdRef.current = null;
 
-        // Start heartbeat — ping every 30s, check for dead connection
+        // Start heartbeat — ping every 25s, check for dead connection
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         heartbeatInterval = setInterval(() => {
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
           // If no message received in 60s, connection is probably dead
-          if (Date.now() - lastPong > 60000) {
-            console.warn('WebSocket heartbeat timeout — reconnecting');
-            ws.close();
+          if (Date.now() - lastPong > WS_CONFIG.heartbeatTimeout) {
+            console.warn('[Terminal] WebSocket heartbeat timeout — reconnecting');
+            ws.close(4000, 'Heartbeat timeout');
             return;
           }
 
           // Send a ping (server ignores unknown message types gracefully)
           try { ws.send(JSON.stringify({ type: 'ping' })); } catch {}
-        }, 30000);
+        }, WS_CONFIG.heartbeatInterval);
       };
 
       ws.onmessage = (event) => {
@@ -232,15 +252,23 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         handleWebSocketMessage(msg);
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (!mounted) return;
         setConnected(false);
         setStatus('disconnected');
         wsRef.current = null;
         if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
 
-        // Reconnect after delay
-        reconnectTimer = setTimeout(connect, 3000);
+        // Only auto-reconnect if we were previously connected
+        if (wasConnected) {
+          console.log(`[Terminal] WebSocket closed (code: ${event.code}) - reconnecting in ${reconnectDelay}ms`);
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            // Increase delay for next attempt (exponential backoff)
+            reconnectDelay = Math.min(reconnectDelay * WS_CONFIG.reconnectBackoffMultiplier, WS_CONFIG.reconnectMaxDelay);
+            connect();
+          }, reconnectDelay);
+        }
       };
 
       ws.onerror = () => {
@@ -248,10 +276,51 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       };
     };
 
+    // Check connection health and reconnect if needed
+    const checkConnection = () => {
+      if (!mounted) return;
+
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.log('[Terminal] Connection check failed - reconnecting');
+        // Reset delay for user-triggered reconnect
+        reconnectDelay = WS_CONFIG.reconnectMinDelay;
+        connect();
+        return;
+      }
+
+      // Check if connection is stale
+      const timeSinceActivity = Date.now() - lastPong;
+      if (timeSinceActivity > WS_CONFIG.heartbeatTimeout) {
+        console.log('[Terminal] Connection stale - reconnecting');
+        ws.close(4000, 'Stale connection');
+      }
+    };
+
+    // Visibility change handler - reconnect when tab becomes visible
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('[Terminal] Tab became visible - checking connection');
+        setTimeout(checkConnection, 100);
+      }
+    };
+
+    // Window focus handler - check connection when window gains focus
+    const handleFocus = () => {
+      console.log('[Terminal] Window focused - checking connection');
+      setTimeout(checkConnection, 200);
+    };
+
+    // Add visibility and focus listeners
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+
     connect();
 
     return () => {
       mounted = false;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
