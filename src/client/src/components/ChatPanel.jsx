@@ -371,11 +371,20 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     prevMessageCountRef.current = currentCount;
   }, [messages]);
 
-  // Reset initial load flag when session changes
+  // Reset initial load flag when session or project changes
   useEffect(() => {
     isInitialLoadRef.current = true;
     prevMessageCountRef.current = 0;
-  }, [activeSessionId]);
+  }, [activeSessionId, projectId]);
+
+  // Instant scroll to bottom when project changes (for cached ChatPanels)
+  useEffect(() => {
+    // Small delay to ensure DOM is ready after visibility change
+    const timer = setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [projectId]);
 
   // ── SINGLE SOURCE OF TRUTH: Poll API every 2s for new messages ──
   // No WebSocket for messages — polling is 100% reliable
