@@ -366,6 +366,16 @@ class Orchestrator extends EventEmitter {
   }
 
   /**
+   * Check if a session has an active (running) orchestrator execution.
+   *
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  isSessionActive(sessionId) {
+    return !!this._getExecutionBySession(sessionId);
+  }
+
+  /**
    * Get execution for a session (if any).
    *
    * @param {string} sessionId

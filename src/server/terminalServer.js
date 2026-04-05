@@ -191,6 +191,9 @@ class TerminalServer {
    * Handle async LLM request
    */
   async handleLLMRequest(sessionId, text, cliTool, smartEngineResult) {
+    // Don't auto-respond when orchestrator owns the session
+    if (orchestrator.isSessionActive(sessionId)) return;
+
     try {
       const result = await autoResponder.processLLMRequest(text, sessionId, cliTool, smartEngineResult);
 
@@ -818,6 +821,11 @@ class TerminalServer {
     // (prompts are short — if we just received a big chunk, it's probably output not a prompt)
     if (cleanData.length > 300) return;
 
+    // Skip prompt detection when the orchestrator is actively driving this session.
+    // The orchestrator has its own completion detector; firing the auto-responder
+    // mid-execution can cause the LLM to inject stray "y"/"n" into the terminal.
+    if (orchestrator.isSessionActive(sessionId)) return;
+
     // Check for prompts after a long idle delay
     // CLI tools stream output with small pauses — we need to wait for TRUE idle
     const existingTimer = this.autoResponseTimers.get(sessionId);
@@ -864,6 +872,9 @@ class TerminalServer {
    * Check for prompts in recent output
    */
   checkForPrompts(sessionId) {
+    // Orchestrator owns prompt handling for its sessions
+    if (orchestrator.isSessionActive(sessionId)) return;
+
     const recent = this.recentOutput.get(sessionId);
     if (!recent) return;
 
