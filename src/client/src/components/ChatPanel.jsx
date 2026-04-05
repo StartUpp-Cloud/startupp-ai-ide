@@ -9,12 +9,48 @@ import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, S
  */
 function WorkingIndicator({ wsRef, projectId, sessionId }) {
   const [elapsed, setElapsed] = useState(0);
+  const [liveOutput, setLiveOutput] = useState('');
+  const [showLive, setShowLive] = useState(true);
+  const outputRef = useRef(null);
 
   useEffect(() => {
     setElapsed(0);
+    setLiveOutput('');
     const interval = setInterval(() => setElapsed(s => s + 1), 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // Listen for agent shell output to show live stream
+  useEffect(() => {
+    if (!wsRef?.current) return;
+    const handler = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.type === 'agent-shell-output') {
+        // Strip ANSI codes and clean up for display
+        const clean = msg.data
+          .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+          .replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '')
+          .replace(/\x1b\][^\x07]*\x07/g, '')
+          .replace(/\r/g, '');
+        setLiveOutput(prev => {
+          const combined = prev + clean;
+          // Keep last 3000 chars
+          return combined.length > 3000 ? combined.slice(-3000) : combined;
+        });
+      }
+    };
+    const ws = wsRef.current;
+    ws.addEventListener('message', handler);
+    return () => ws.removeEventListener('message', handler);
+  }, [wsRef]);
+
+  // Auto-scroll the live output
+  useEffect(() => {
+    if (outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [liveOutput]);
 
   const handleStop = () => {
     if (wsRef?.current?.readyState === WebSocket.OPEN) {
@@ -27,23 +63,62 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
     return `${Math.floor(s / 60)}m ${s % 60}s`;
   };
 
+  // Extract meaningful lines from the output (skip JSON, show actions)
+  const getDisplayLines = () => {
+    if (!liveOutput) return [];
+    return liveOutput.split('\n')
+      .filter(l => {
+        const t = l.trim();
+        if (!t) return false;
+        if (t.startsWith('{') && t.includes('"type"')) return false; // Skip JSON events
+        if (t.startsWith('claude -p')) return false; // Skip command echo
+        return true;
+      })
+      .slice(-8);
+  };
+
+  const displayLines = getDisplayLines();
+
   return (
     <div className="flex justify-start mb-3 px-3">
-      <div className="flex items-center gap-3 rounded-lg border border-surface-700/30 bg-surface-800/40 px-3 py-2">
-        <Bot size={13} className="text-primary-400" />
-        <div className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-pulse" />
-          <span className="text-[11px] text-surface-300">AI assistant working...</span>
-          <span className="text-[11px] text-surface-500 tabular-nums ml-1">{formatTime(elapsed)}</span>
+      <div className="w-full max-w-[85%] rounded-lg border border-surface-700/30 bg-surface-800/40">
+        {/* Header */}
+        <div className="flex items-center gap-3 px-3 py-2">
+          <Bot size={13} className="text-primary-400" />
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-pulse" />
+            <span className="text-[11px] text-surface-300">AI assistant working...</span>
+            <span className="text-[11px] text-surface-500 tabular-nums ml-1">{formatTime(elapsed)}</span>
+          </div>
+          <div className="flex-1" />
+          <button
+            onClick={() => setShowLive(!showLive)}
+            className="text-[10px] text-surface-500 hover:text-surface-300 transition-colors"
+          >
+            {showLive ? 'Hide' : 'Show'} live
+          </button>
+          <button
+            onClick={handleStop}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-red-400 hover:bg-red-500/10 transition-colors"
+          >
+            <Square size={9} />
+            Stop
+          </button>
         </div>
-        <button
-          onClick={handleStop}
-          className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-red-400 hover:bg-red-500/10 transition-colors"
-          title="Stop"
-        >
-          <Square size={9} />
-          Stop
-        </button>
+
+        {/* Live output stream */}
+        {showLive && displayLines.length > 0 && (
+          <div
+            ref={outputRef}
+            className="px-3 pb-2 max-h-32 overflow-y-auto"
+          >
+            <div className="font-mono text-[10px] text-surface-500 space-y-0.5">
+              {displayLines.map((line, i) => (
+                <div key={i} className="truncate">{line}</div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -134,10 +209,12 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             // Track all new IDs
             for (const m of newMsgs) knownIdsRef.current.add(m.id);
 
-            // Remove optimistic pending messages that now have real versions
+            // Remove optimistic pending messages ONLY when the real version exists on the server
             let result = prev.filter(m => {
               if (!m.id.startsWith('pending-')) return true;
-              return !serverMsgs.some(sm => sm.role === 'user' && sm.content === m.content);
+              // Only remove if we found the real message in THIS poll batch
+              const hasReal = newMsgs.some(sm => sm.role === 'user' && sm.content === m.content);
+              return !hasReal;
             });
 
             const lastUserIdx = result.findLastIndex(m => m.role === 'user');

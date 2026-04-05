@@ -136,10 +136,13 @@ RULES:
 
       } else if (firstLine.startsWith('DELEGATE')) {
         this._addProgressMessage(projectId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn);
-        await this._sendToCliTool(projectId, sessionId, body || content, tool, broadcastFn, ctx);
+        // Always pass the user's original message — not the LLM's reformulation
+        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
 
       } else {
-        if (response.length < 500 && !response.includes('```')) {
+        // Unrecognized format — delegate to tool if it looks like garbage/error
+        const isGarbage = response.includes('NEEDS_USER') || response.includes('[') || response.length < 10;
+        if (!isGarbage && response.length < 500 && !response.includes('```')) {
           this._addAgentMessage(projectId, response, broadcastFn, { tool: 'local' });
         } else {
           this._addProgressMessage(projectId, `Routing to ${tool}...`, broadcastFn);
@@ -467,7 +470,7 @@ RULES:
 
     switch (tool) {
       case 'claude': {
-        let cmd = `claude -p '${escaped}' --output-format stream-json --dangerously-skip-permissions`;
+        let cmd = `claude -p '${escaped}' --output-format stream-json --verbose --dangerously-skip-permissions`;
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
         return cmd;
       }
@@ -565,8 +568,13 @@ RULES:
     const lines = cleanText.split('\n').filter(l => l.trim());
     if (lines.length === 0) return false;
     const lastLine = lines[lines.length - 1].trim();
+    // Standard shell prompt
     if (/[$#]\s*$/.test(lastLine) && lastLine.length > 1) return true;
     if (/>\s*$/.test(lastLine) && lastLine.includes(':')) return true;
+    // stream-json: final result event marks completion
+    if (lastLine.startsWith('{') && lastLine.includes('"type"') && lastLine.includes('"result"')) {
+      try { const j = JSON.parse(lastLine); if (j.type === 'result') return true; } catch {}
+    }
     return false;
   }
 
@@ -688,7 +696,8 @@ NEEDS_USER`,
       sessionId = jsonMatch[1];
       text = jsonMatch[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
     }
-    if (!sessionId) {
+    // Strategy 2: scan ALL JSON lines (stream-json produces many — result is last)
+    if (!sessionId || !text) {
       for (const line of cleanOutput.split('\n')) {
         const idx = line.indexOf('{');
         if (idx >= 0) {
@@ -696,12 +705,29 @@ NEEDS_USER`,
             const json = JSON.parse(line.slice(idx));
             if (json.session_id) sessionId = json.session_id;
             if (json.result) text = json.result;
-            break;
+            if (json.type === 'result' && json.result) text = json.result;
+            // Don't break — keep scanning for later events that have the final result
           } catch {}
         }
       }
     }
     if (!text) text = this._extractToolResponse(cleanOutput, cmd);
+
+    // Convert HTML tags to markdown (Claude sometimes outputs HTML)
+    if (text) {
+      text = text
+        .replace(/<b>([\s\S]*?)<\/b>/gi, '**$1**')
+        .replace(/<strong>([\s\S]*?)<\/strong>/gi, '**$1**')
+        .replace(/<i>([\s\S]*?)<\/i>/gi, '*$1*')
+        .replace(/<em>([\s\S]*?)<\/em>/gi, '*$1*')
+        .replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<li>([\s\S]*?)<\/li>/gi, '- $1')
+        .replace(/<\/?[uo]l>/gi, '')
+        .replace(/<\/?p>/gi, '\n')
+        .replace(/<h([1-6])>([\s\S]*?)<\/h\1>/gi, (_, l, c) => '#'.repeat(parseInt(l)) + ' ' + c);
+    }
+
     return { text, sessionId };
   }
 
