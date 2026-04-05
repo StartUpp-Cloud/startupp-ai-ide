@@ -295,25 +295,58 @@ class ChatStore {
    * Recover a streaming message by combining saved chunks.
    * Used when a connection drops mid-stream.
    * Parses raw terminal output to extract the actual response text.
+   * Also extracts CLI session ID so conversation can be resumed.
    */
   recoverStreamingMessage({ projectId, sessionId, messageId }) {
     const chunks = this.getStreamChunks({ projectId, messageId });
-    if (chunks.length === 0) return null;
 
-    const rawContent = chunks.map(c => c.content).join('');
+    // Also try to get job output if available
+    let rawContent = chunks.map(c => c.content).join('');
 
-    // Parse the raw terminal output to extract the actual response
-    // The chunks contain JSON events from stream-json format, ANSI codes, etc.
-    const cleanedContent = this._parseRawChunksToContent(rawContent);
+    // Try to get more data from job output file
+    try {
+      const msg = this._getMessage(projectId, sessionId, messageId);
+      if (msg?.metadata?.jobId) {
+        const fs = require('fs');
+        const path = require('path');
+        const jobOutputPath = path.join(__dirname, '../../data/jobs', `${msg.metadata.jobId}.output`);
+        if (fs.existsSync(jobOutputPath)) {
+          const jobOutput = fs.readFileSync(jobOutputPath, 'utf-8');
+          if (jobOutput.length > rawContent.length) {
+            rawContent = jobOutput; // Use job output if it has more data
+          }
+        }
+      }
+    } catch {}
+
+    if (!rawContent || rawContent.length < 50) return null;
+
+    // Parse the raw terminal output to extract the actual response AND session ID
+    const { content: cleanedContent, cliSessionId } = this._parseRawChunksWithSessionId(rawContent);
+
+    // If we found a CLI session ID, save it so conversation can be resumed
+    if (cliSessionId) {
+      this.updateSessionMeta(projectId, sessionId, { cliSessionId });
+      console.log(`[chatStore] Recovered CLI session ID: ${cliSessionId}`);
+    }
 
     if (!cleanedContent || cleanedContent.length < 10) {
-      // Not enough content to recover - just mark as failed
+      // Not enough content to recover - but we might have the session ID
+      const failureMsg = cliSessionId
+        ? '⚠️ Response was interrupted. The conversation can be continued - Claude will remember the context.'
+        : '⚠️ Response was interrupted and could not be recovered.';
+
       return this.finalizeStreamingMessage({
         projectId,
         sessionId,
         messageId,
-        finalContent: '⚠️ Response was interrupted and could not be recovered.',
-        metadata: { recovered: true, recoveryFailed: true, chunkCount: chunks.length },
+        finalContent: failureMsg,
+        metadata: {
+          recovered: true,
+          recoveryFailed: true,
+          chunkCount: chunks.length,
+          cliSessionId: cliSessionId || null,
+        },
       });
     }
 
@@ -322,15 +355,34 @@ class ChatStore {
       sessionId,
       messageId,
       finalContent: cleanedContent,
-      metadata: { recovered: true, chunkCount: chunks.length },
+      metadata: {
+        recovered: true,
+        chunkCount: chunks.length,
+        cliSessionId: cliSessionId || null,
+      },
     });
   }
 
   /**
-   * Parse raw terminal output (with JSON events, ANSI codes) to extract clean response text.
-   * Handles Claude's stream-json format.
+   * Get a single message by ID (for recovery purposes)
    */
-  _parseRawChunksToContent(rawContent) {
+  _getMessage(projectId, sessionId, messageId) {
+    const filePath = this._sessionFile(projectId, sessionId);
+    if (!fs.existsSync(filePath)) return null;
+
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    for (const line of lines) {
+      const msg = deserialize(line);
+      if (msg?.id === messageId) return msg;
+    }
+    return null;
+  }
+
+  /**
+   * Parse raw terminal output to extract BOTH content AND CLI session ID.
+   * Returns { content, cliSessionId }
+   */
+  _parseRawChunksWithSessionId(rawContent) {
     // Strip ANSI codes
     let clean = rawContent
       .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
@@ -339,35 +391,92 @@ class ChatStore {
       .replace(/\x1b[()][A-Z0-9]/g, '')
       .replace(/\r/g, '');
 
-    // Try to extract text from stream-json result event
     let resultText = '';
+    let cliSessionId = null;
+    let partialTextBlocks = [];
 
-    // Look for the final result JSON
+    // Scan ALL JSON events - extract session_id, result, and partial content
     for (const line of clean.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed.startsWith('{')) continue;
 
       try {
         const json = JSON.parse(trimmed);
+
+        // Extract session_id from any event that has it
+        if (json.session_id) {
+          cliSessionId = json.session_id;
+        }
+
         // The result event has the final response text
         if (json.type === 'result' && json.result) {
           resultText = json.result;
         }
-        // Also capture session_id for any result-like object
-        if (json.result && typeof json.result === 'string') {
-          resultText = json.result;
+
+        // Capture text blocks from streaming content (partial responses)
+        if (json.type === 'content_block_delta' && json.delta?.text) {
+          partialTextBlocks.push(json.delta.text);
+        }
+        if (json.type === 'content' && json.text) {
+          partialTextBlocks.push(json.text);
+        }
+
+        // Assistant message content blocks
+        if (json.type === 'assistant' && json.message?.content) {
+          const content = json.message.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'text' && block.text) {
+                partialTextBlocks.push(block.text);
+              }
+            }
+          }
         }
       } catch {}
     }
 
-    // If we found result text, clean it up
+    // If we found a complete result, use it
     if (resultText) {
-      return resultText
-        .replace(/\\n/g, '\n')
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, '\\')
-        .trim();
+      return {
+        content: resultText
+          .replace(/\\n/g, '\n')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\')
+          .trim(),
+        cliSessionId,
+      };
     }
+
+    // If we have partial text blocks, combine them (partial response recovery)
+    if (partialTextBlocks.length > 0) {
+      const partialContent = partialTextBlocks.join('').trim();
+      if (partialContent.length > 20) {
+        return {
+          content: partialContent + '\n\n⚠️ *Response was interrupted - above content may be incomplete*',
+          cliSessionId,
+        };
+      }
+    }
+
+    // Fallback to filtering meaningful lines
+    return {
+      content: this._filterMeaningfulLines(clean),
+      cliSessionId,
+    };
+  }
+
+  /**
+   * Parse raw terminal output (with JSON events, ANSI codes) to extract clean response text.
+   * Handles Claude's stream-json format.
+   */
+  _parseRawChunksToContent(rawContent) {
+    return this._parseRawChunksWithSessionId(rawContent).content;
+  }
+
+  /**
+   * Filter meaningful lines from cleaned output (fallback when JSON parsing fails)
+   */
+  _filterMeaningfulLines(clean) {
 
     // Find where JSON output starts (skip command echo)
     const lines = clean.split('\n');
