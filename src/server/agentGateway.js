@@ -104,47 +104,50 @@ DELEGATE:
 
 RULES:
 - ANSWER directly if you can answer from context (project info, conversation history, general knowledge)
-- COMMAND if they want to run/check/install something
-- DELEGATE to ${tool} for anything that needs to read/write code files or deeply analyze the codebase
-- When in doubt, DELEGATE — ${tool} has full codebase access, you don't
+- COMMAND only for simple info-gathering commands: git status, ls, cat, grep, df, ps, pwd, which, node -v
+- DELEGATE to ${tool} for EVERYTHING else: deployments, builds, tests, code changes, installs, fixes, debugging, architecture, planning, npm/pnpm scripts, any multi-step task
+- When in doubt, ALWAYS DELEGATE — ${tool} has full codebase access and can execute complex tasks safely
+- NEVER use COMMAND for destructive or complex operations (deploy, build, rm, install)
+- NEVER return [NEEDS_USER_CONFIRMATION] — either ANSWER, COMMAND, or DELEGATE
 - For ANSWER, use markdown formatting
-- For COMMAND, give the exact command to run
-- For DELEGATE, rephrase the user's request clearly for ${tool}`,
+- For COMMAND, give the exact simple command to run
+- For DELEGATE, pass the user's request as-is to ${tool}`,
         { maxTokens: 1500, temperature: 0.2 }
       );
 
       const response = result.response.trim();
       const firstLine = response.split('\n')[0].trim().toUpperCase();
+      const body = response.slice(response.indexOf('\n') + 1).trim();
 
       if (firstLine.startsWith('ANSWER')) {
-        // Local LLM answers directly
-        const answer = response.slice(response.indexOf('\n') + 1).trim();
-        this._addAgentMessage(projectId, answer || response, broadcastFn, { tool: 'local' });
+        this._addProgressMessage(projectId, `Analyzing your question — I can answer this directly.`, broadcastFn);
+        this._addAgentMessage(projectId, body || response, broadcastFn, { tool: 'local' });
 
       } else if (firstLine.startsWith('COMMAND')) {
-        // Run a shell command
-        const cmd = response.slice(response.indexOf('\n') + 1).trim();
-        this._addProgressMessage(projectId, `Running: \`${cmd}\``, broadcastFn);
-        await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx);
+        const cmd = body;
+        const looksValid = cmd && !cmd.includes('[') && !cmd.includes('NEEDS') && cmd.length < 200;
+        if (looksValid) {
+          this._addProgressMessage(projectId, `Running shell command: \`${cmd}\``, broadcastFn);
+          await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx);
+        } else {
+          this._addProgressMessage(projectId, `This needs ${tool} — delegating your request...`, broadcastFn);
+          await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
+        }
 
       } else if (firstLine.startsWith('DELEGATE')) {
-        // Route to Claude/Copilot
-        const delegateMsg = response.slice(response.indexOf('\n') + 1).trim() || content;
-        this._addProgressMessage(projectId, `Delegating to ${tool}...`, broadcastFn);
-        await this._sendToCliTool(projectId, sessionId, delegateMsg, tool, broadcastFn, ctx);
+        this._addProgressMessage(projectId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn);
+        await this._sendToCliTool(projectId, sessionId, body || content, tool, broadcastFn, ctx);
 
       } else {
-        // Can't parse — treat as direct answer if short, else delegate
         if (response.length < 500 && !response.includes('```')) {
           this._addAgentMessage(projectId, response, broadcastFn, { tool: 'local' });
         } else {
-          this._addProgressMessage(projectId, `Delegating to ${tool}...`, broadcastFn);
+          this._addProgressMessage(projectId, `Routing to ${tool}...`, broadcastFn);
           await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
         }
       }
     } catch (err) {
-      // Local LLM failed — fall back to delegating everything
-      this._addProgressMessage(projectId, `Sending to ${tool}...`, broadcastFn);
+      this._addProgressMessage(projectId, `Routing to ${tool}...`, broadcastFn);
       await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx);
     }
   }
@@ -260,10 +263,11 @@ RULES:
 
     agentShellPool.write(shellSessionId, cmd + '\n');
 
-    // Collect output
+    // Collect output with live event parsing for stream-json
     let totalOutput = '';
     let idleRounds = 0;
     const MAX_IDLE = 120;
+    let lastProgressTime = 0;
 
     while (!ctx.aborted && idleRounds < MAX_IDLE) {
       const chunk = await this._waitForOutput(shellSessionId, ctx, 3000);
@@ -281,19 +285,31 @@ RULES:
         if (trailing) totalOutput += trailing;
         break;
       }
-      // Auto-approve prompts
+
+      // Parse stream-json events for live progress (Claude)
       const cleanChunk = this._stripAnsi(chunk);
+      const now = Date.now();
+      if (now - lastProgressTime > 2000) {
+        const event = this._parseStreamEvent(cleanChunk);
+        if (event) {
+          lastProgressTime = now;
+          this._addProgressMessage(projectId, event, broadcastFn);
+        }
+      }
+
+      // Auto-approve prompts
       const fastResponse = this._fastPromptDetect(cleanChunk);
       if (fastResponse !== null) {
+        const lastQ = cleanChunk.split('\n').filter(l => l.trim()).pop()?.trim() || '';
         agentShellPool.write(shellSessionId, fastResponse + '\n');
-        this._addProgressMessage(projectId, `Auto-confirmed: ${fastResponse || '(enter)'}`, broadcastFn);
+        this._addProgressMessage(projectId, `Confirmed "${fastResponse || 'enter'}" → ${lastQ.slice(0, 80)}`, broadcastFn);
       } else {
-        // For capable LLMs: use smart auto-confirm for ambiguous prompts
         const provider = llmProvider.getSettings().provider;
         if (provider !== 'ollama' && this._looksLikePrompt(cleanChunk)) {
           const autoResponse = await this._smartAutoConfirm(cleanChunk, projectId, broadcastFn);
           if (autoResponse !== null) {
             agentShellPool.write(shellSessionId, autoResponse + '\n');
+            this._addProgressMessage(projectId, `Auto-confirmed: "${autoResponse}"`, broadcastFn);
           }
         }
       }
@@ -319,20 +335,100 @@ RULES:
       displayOutput = this._extractToolResponse(cleanOutput, cmd);
     }
 
+    // Check if Claude lost context — if so, retry with context injection
+    const lostContext = /don't have context|no context|start of.*conversation|what.*retry|clarify what/i.test(displayOutput);
+    if (lostContext && !ctx._retried) {
+      ctx._retried = true;
+      this._addProgressMessage(projectId, `${tool} lost context — resending with conversation history...`, broadcastFn);
+      const contextSummary = await this._getContextSummary(projectId, chatSessionId);
+      const enrichedMsg = `Here's the conversation context you need:\n\n${contextSummary}\n\nNow, the user's latest request: ${message}`;
+      // Reset CLI session so we don't use stale --resume
+      this._cliSessions.delete(chatSessionId);
+      await this._sendToCliTool(projectId, chatSessionId, enrichedMsg, tool, broadcastFn, ctx);
+      return;
+    }
+
     // Format output
+    let finalContent;
     if (displayOutput.length < 2000 && !displayOutput.includes('\x1b')) {
-      this._addAgentMessage(projectId, displayOutput, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+      finalContent = displayOutput;
     } else {
       try {
         const result = await llmProvider.generateResponse(
           `Clean up this terminal output for a chat UI. Rules:\n- Keep ALL content, do NOT trim or summarize\n- Use markdown: **bold**, \`code\`, bullets, headers\n- NEVER use HTML tags\n- Remove terminal artifacts\n\nOutput:\n${displayOutput.slice(-5000)}`,
           { maxTokens: 2000, temperature: 0.1 }
         );
-        this._addAgentMessage(projectId, result.response, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+        finalContent = result.response;
       } catch {
-        this._addAgentMessage(projectId, displayOutput, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+        finalContent = displayOutput;
       }
     }
+
+    this._addAgentMessage(projectId, finalContent, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+
+    // Persist context summary for recovery (async, don't block)
+    this._persistContext(projectId, chatSessionId, message, finalContent);
+  }
+
+  /**
+   * Save a running context summary for the session.
+   * Used to recover if Claude loses context on --resume.
+   */
+  async _persistContext(projectId, chatSessionId, userMessage, agentResponse) {
+    const provider = llmProvider.getSettings().provider;
+    if (provider === 'ollama') return; // Skip for weak models
+
+    try {
+      const result = await llmProvider.generateResponse(
+        `Summarize this exchange in 2-3 bullet points for future context recovery. Include: what was asked, what was done, key files/decisions.\n\nUser: ${userMessage.slice(0, 300)}\nAssistant: ${agentResponse.slice(0, 500)}`,
+        { maxTokens: 150, temperature: 0.1 }
+      );
+      chatStore.updateSessionMeta(projectId, chatSessionId, {
+        lastContext: result.response.trim(),
+        lastContextAt: new Date().toISOString(),
+      });
+    } catch {}
+  }
+
+  /**
+   * Build a context summary from the session's chat history.
+   * Used when Claude loses context and we need to re-inject it.
+   */
+  async _getContextSummary(projectId, chatSessionId) {
+    const parts = [];
+
+    // Profile
+    const profile = this._getProfileContext();
+    if (profile) parts.push(`User profile:\n${profile}`);
+
+    // Saved context summary
+    try {
+      const session = chatStore.getSession(projectId, chatSessionId);
+      if (session?.lastContext) {
+        parts.push(`Previous context:\n${session.lastContext}`);
+      }
+    } catch {}
+
+    // Recent messages
+    try {
+      const recent = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 15 }).reverse();
+      const history = recent
+        .filter(m => m.role === 'user' || m.role === 'agent')
+        .map(m => `[${m.role}]: ${m.content.slice(0, 200)}`)
+        .join('\n');
+      if (history) parts.push(`Conversation history:\n${history}`);
+    } catch {}
+
+    // Project info
+    try {
+      const db = getDB();
+      const project = (db.data.projects || []).find(p => p.id === projectId);
+      if (project) {
+        parts.push(`Project: ${project.name}${project.containerName ? ` (container: ${project.containerName})` : ''}`);
+      }
+    } catch {}
+
+    return parts.join('\n\n') || 'No prior context available.';
   }
 
   // ── Profile context ──
@@ -371,7 +467,7 @@ RULES:
 
     switch (tool) {
       case 'claude': {
-        let cmd = `claude -p '${escaped}' --output-format json --dangerously-skip-permissions`;
+        let cmd = `claude -p '${escaped}' --output-format stream-json --dangerously-skip-permissions`;
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
         return cmd;
       }
@@ -532,6 +628,56 @@ NEEDS_USER`,
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Parse stream-json events from Claude to extract meaningful progress updates.
+   * stream-json format: one JSON object per line with type field.
+   */
+  _parseStreamEvent(chunk) {
+    const lines = chunk.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) continue;
+      try {
+        const event = JSON.parse(trimmed);
+
+        // Tool use events — Claude is taking an action
+        if (event.type === 'tool_use' || event.tool) {
+          const toolName = event.tool || event.name || '';
+          const input = typeof event.input === 'string' ? event.input : JSON.stringify(event.input || '');
+          if (toolName.toLowerCase().includes('bash') || toolName.toLowerCase().includes('shell')) {
+            return `Running: \`${input.slice(0, 80)}\``;
+          }
+          if (toolName.toLowerCase().includes('read') || toolName.toLowerCase().includes('file')) {
+            const path = input.match(/["']?([^\s"']+\.\w+)["']?/)?.[1] || input.slice(0, 60);
+            return `Reading: \`${path}\``;
+          }
+          if (toolName.toLowerCase().includes('write') || toolName.toLowerCase().includes('edit')) {
+            const path = input.match(/["']?([^\s"']+\.\w+)["']?/)?.[1] || input.slice(0, 60);
+            return `Editing: \`${path}\``;
+          }
+          if (toolName.toLowerCase().includes('glob') || toolName.toLowerCase().includes('grep') || toolName.toLowerCase().includes('search')) {
+            return `Searching: ${input.slice(0, 60)}`;
+          }
+          return `Using ${toolName}: ${input.slice(0, 60)}`;
+        }
+
+        // Assistant message start — Claude is thinking
+        if (event.type === 'assistant' && event.message) {
+          const snippet = (typeof event.message === 'string' ? event.message : event.message.content || '').slice(0, 80);
+          if (snippet) return `Thinking: "${snippet}${snippet.length >= 80 ? '...' : ''}"`;
+        }
+
+        // Content block — partial response
+        if (event.type === 'content_block_delta' || event.type === 'content') {
+          const text = event.delta?.text || event.text || '';
+          if (text.length > 20) return `Writing response...`;
+        }
+
+      } catch {}
+    }
+    return null;
   }
 
   _parseJsonToolOutput(cleanOutput, cmd) {
