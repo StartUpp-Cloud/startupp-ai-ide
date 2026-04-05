@@ -198,7 +198,7 @@ async function startServer() {
           llmAvailable: health.available === true,
           llmProvider: settings.provider,
           hasProjects: projects.length > 0,
-          setupComplete: settings.enabled === true && health.available === true && projects.length > 0,
+          setupComplete: settings.enabled === true && projects.length > 0,
           serverOS: osModule.platform(),
         });
       } catch (error) {
