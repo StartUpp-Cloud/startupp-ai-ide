@@ -242,18 +242,76 @@ RULES:
 
   // ── Send to CLI tool (Claude/Copilot/Aider) ──
 
+  /**
+   * Send to CLI tool with autonomous agent loop:
+   * - Auto-retry on failure (up to 3 attempts with compaction)
+   * - Stall detection (soft 25s, hard 60s)
+   * - Event-driven completion from stream-json
+   * - Live status reactions (thinking/reading/editing/running/done/error)
+   * - Context recovery on "lost context" responses
+   */
   async _sendToCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx) {
+    const MAX_ATTEMPTS = 3;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
+      const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt);
+
+      if (result.success) {
+        // ── Success: format and deliver ──
+        const finalContent = await this._cleanContent(result.displayOutput);
+        const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
+
+        this._addAgentMessage(projectId, finalContent, broadcastFn, {
+          tool,
+          rawOutput: rawForDisplay.slice(-8000),
+          attempts: attempt,
+        });
+
+        this._persistContext(projectId, chatSessionId, message, finalContent);
+        return;
+      }
+
+      if (result.retry && attempt < MAX_ATTEMPTS) {
+        // ── Retry: compaction or context recovery ──
+        this._addProgressMessage(projectId,
+          `⚠ ${result.retryReason} — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})...`,
+          broadcastFn);
+
+        if (result.retryType === 'context-lost') {
+          this._cliSessions.delete(chatSessionId);
+          const contextSummary = await this._getContextSummary(projectId, chatSessionId);
+          message = `Context from our conversation:\n${contextSummary}\n\nUser's request: ${message}`;
+        }
+
+        await new Promise(r => setTimeout(r, 2000)); // Brief pause before retry
+        continue;
+      }
+
+      // ── Final failure ──
+      if (result.error) {
+        this._addErrorMessage(projectId, `${tool} failed after ${attempt} attempt(s): ${result.error}`, broadcastFn);
+      } else {
+        this._addAgentMessage(projectId,
+          result.displayOutput || `No response from ${tool}. Check Internal Console.`,
+          broadcastFn, { tool });
+      }
+      return;
+    }
+  }
+
+  /**
+   * Single attempt to run a CLI tool command.
+   * Returns: { success, displayOutput, cleanOutput, retry, retryReason, retryType, error }
+   */
+  async _attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt) {
+    // Get or create shell session
     let shellSessionId;
     try {
       const sess = await agentShellPool.getSession(projectId, chatSessionId || 'shell');
       shellSessionId = sess.sessionId;
-      if (sess.isNew) {
-        this._addProgressMessage(projectId, `Starting shell...`, broadcastFn);
-        await new Promise(r => setTimeout(r, 1000));
-      }
+      if (sess.isNew) await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
-      this._addErrorMessage(projectId, `Failed to start shell: ${err.message}`, broadcastFn);
-      return;
+      return { success: false, error: `Failed to start shell: ${err.message}` };
     }
 
     const cliState = this._cliSessions.get(chatSessionId);
@@ -261,37 +319,71 @@ RULES:
     const isFollowUp = !!(cliState?.cliSessionId);
 
     this._addProgressMessage(projectId,
-      isFollowUp ? `Continuing conversation with ${tool}...` : `Asking ${tool}...`,
+      isFollowUp ? `↻ Continuing conversation with ${tool}...` : `→ Asking ${tool}...`,
       broadcastFn);
 
     agentShellPool.write(shellSessionId, cmd + '\n');
 
-    // Collect output with live event parsing for stream-json
+    // ── Collect output with stall detection and live status ──
     let totalOutput = '';
     let idleRounds = 0;
-    const MAX_IDLE = 120;
+    let lastOutputTime = Date.now();
     let lastProgressTime = 0;
+    let resultEventSeen = false;
+    const MAX_IDLE = 180; // 180 x 2s = 6 min max
+    const STALL_SOFT_MS = 25000;
+    const STALL_HARD_MS = 90000;
 
     while (!ctx.aborted && idleRounds < MAX_IDLE) {
-      const chunk = await this._waitForOutput(shellSessionId, ctx, 3000);
-      if (ctx.aborted) return;
+      const chunk = await this._waitForOutput(shellSessionId, ctx, 2000);
+      if (ctx.aborted) return { success: false, error: 'Aborted' };
+
+      const now = Date.now();
+
       if (chunk.length === 0) {
         idleRounds++;
-        if (idleRounds >= 2 && totalOutput.length > 0 && this._shellPromptReturned(this._stripAnsi(totalOutput))) break;
+        const silenceMs = now - lastOutputTime;
+
+        // Stall detection
+        if (silenceMs > STALL_HARD_MS && totalOutput.length > 0) {
+          this._addProgressMessage(projectId, `⚠ ${tool} has been silent for ${Math.round(silenceMs / 1000)}s — may be stalled`, broadcastFn);
+        } else if (silenceMs > STALL_SOFT_MS && totalOutput.length > 0 && now - lastProgressTime > 10000) {
+          lastProgressTime = now;
+          this._addProgressMessage(projectId, `⏳ ${tool} is still working... (${Math.round(silenceMs / 1000)}s)`, broadcastFn);
+        }
+
+        // Check for completion via shell prompt or result event
+        if (idleRounds >= 2 && totalOutput.length > 0) {
+          const clean = this._stripAnsi(totalOutput);
+          if (resultEventSeen || this._shellPromptReturned(clean)) break;
+        }
         continue;
       }
+
       idleRounds = 0;
+      lastOutputTime = now;
       totalOutput += chunk;
-      const clean = this._stripAnsi(totalOutput);
-      if (this._shellPromptReturned(clean)) {
+
+      const cleanChunk = this._stripAnsi(chunk);
+      const cleanTotal = this._stripAnsi(totalOutput);
+
+      // ── Event-driven completion: look for {"type":"result"} ──
+      if (cleanChunk.includes('"type":"result"') || cleanChunk.includes('"type": "result"')) {
+        resultEventSeen = true;
+        // Wait briefly for trailing output (shell prompt)
+        const trailing = await this._waitForOutput(shellSessionId, ctx, 1500);
+        if (trailing) totalOutput += trailing;
+        break;
+      }
+
+      // Shell prompt fallback
+      if (this._shellPromptReturned(cleanTotal)) {
         const trailing = await this._waitForOutput(shellSessionId, ctx, 1000);
         if (trailing) totalOutput += trailing;
         break;
       }
 
-      // Parse stream-json events for live progress (Claude)
-      const cleanChunk = this._stripAnsi(chunk);
-      const now = Date.now();
+      // ── Live status reactions (throttled to every 2s) ──
       if (now - lastProgressTime > 2000) {
         const event = this._parseStreamEvent(cleanChunk);
         if (event) {
@@ -300,31 +392,30 @@ RULES:
         }
       }
 
-      // Auto-approve prompts
+      // ── Auto-approve prompts ──
       const fastResponse = this._fastPromptDetect(cleanChunk);
       if (fastResponse !== null) {
-        const lastQ = cleanChunk.split('\n').filter(l => l.trim()).pop()?.trim() || '';
         agentShellPool.write(shellSessionId, fastResponse + '\n');
-        this._addProgressMessage(projectId, `Confirmed "${fastResponse || 'enter'}" → ${lastQ.slice(0, 80)}`, broadcastFn);
+        this._addProgressMessage(projectId, `✓ Auto-confirmed`, broadcastFn);
       } else {
         const provider = llmProvider.getSettings().provider;
         if (provider !== 'ollama' && this._looksLikePrompt(cleanChunk)) {
           const autoResponse = await this._smartAutoConfirm(cleanChunk, projectId, broadcastFn);
           if (autoResponse !== null) {
             agentShellPool.write(shellSessionId, autoResponse + '\n');
-            this._addProgressMessage(projectId, `Auto-confirmed: "${autoResponse}"`, broadcastFn);
+            this._addProgressMessage(projectId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
           }
         }
       }
     }
 
+    // ── Process output ──
     const cleanOutput = this._stripAnsi(totalOutput).trim();
     if (!cleanOutput) {
-      this._addAgentMessage(projectId, `No response from ${tool}. Check Internal Console.`, broadcastFn, { tool });
-      return;
+      return { success: false, retry: true, retryReason: 'No output received', retryType: 'timeout' };
     }
 
-    // Extract session_id for --resume
+    // Extract result and session_id
     let displayOutput = cleanOutput;
     if (tool === 'claude' || tool === 'copilot') {
       const parsed = this._parseJsonToolOutput(cleanOutput, cmd);
@@ -334,61 +425,61 @@ RULES:
         this._cliSessions.set(chatSessionId, newState);
         chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
       }
+      // Check for error in the result
+      if (parsed.isError) {
+        const isOverflow = /context.*overflow|token.*limit|too many tokens/i.test(displayOutput);
+        if (isOverflow) {
+          return { success: false, retry: true, retryReason: 'Context overflow', retryType: 'compaction' };
+        }
+        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+      }
     } else {
       displayOutput = this._extractToolResponse(cleanOutput, cmd);
     }
 
-    // Check if Claude lost context — if so, retry with context injection
-    const lostContext = /don't have context|no context|start of.*conversation|what.*retry|clarify what/i.test(displayOutput);
-    if (lostContext && !ctx._retried) {
-      ctx._retried = true;
-      this._addProgressMessage(projectId, `${tool} lost context — resending with conversation history...`, broadcastFn);
-      const contextSummary = await this._getContextSummary(projectId, chatSessionId);
-      const enrichedMsg = `Here's the conversation context you need:\n\n${contextSummary}\n\nNow, the user's latest request: ${message}`;
-      // Reset CLI session so we don't use stale --resume
-      this._cliSessions.delete(chatSessionId);
-      await this._sendToCliTool(projectId, chatSessionId, enrichedMsg, tool, broadcastFn, ctx);
-      return;
+    // Check for lost context
+    if (/don't have context|no context|start of.*conversation|clarify what/i.test(displayOutput)) {
+      return { success: false, retry: true, retryReason: `${tool} lost context`, retryType: 'context-lost' };
     }
 
-    // Format output
-    let finalContent;
+    return { success: true, displayOutput, cleanOutput };
+  }
+
+  // ── Output cleaning helpers ──
+
+  async _cleanContent(displayOutput) {
+    let content;
     if (displayOutput.length < 2000 && !displayOutput.includes('\x1b')) {
-      finalContent = displayOutput;
+      content = displayOutput;
     } else {
       try {
         const result = await llmProvider.generateResponse(
-          `Clean up this terminal output for a chat UI. Rules:\n- Keep ALL content, do NOT trim or summarize\n- Use markdown: **bold**, \`code\`, bullets, headers\n- NEVER use HTML tags\n- Remove terminal artifacts\n\nOutput:\n${displayOutput.slice(-5000)}`,
+          `Clean up this terminal output for a chat UI. Keep ALL content. Use markdown. NEVER use HTML tags.\n\nOutput:\n${displayOutput.slice(-5000)}`,
           { maxTokens: 2000, temperature: 0.1 }
         );
-        finalContent = result.response;
+        content = result.response;
       } catch {
-        finalContent = displayOutput;
+        content = displayOutput;
       }
     }
-
-    // Final safety: convert any remaining HTML to markdown
-    finalContent = finalContent
+    // HTML safety net
+    return content
       .replace(/<b>([\s\S]*?)<\/b>/gi, '**$1**')
       .replace(/<strong>([\s\S]*?)<\/strong>/gi, '**$1**')
       .replace(/<i>([\s\S]*?)<\/i>/gi, '*$1*')
       .replace(/<em>([\s\S]*?)<\/em>/gi, '*$1*')
       .replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`');
+  }
 
-    // Clean raw output: filter out stream-json events, keep only meaningful text
-    const rawForDisplay = cleanOutput.split('\n')
+  _cleanRawOutput(cleanOutput) {
+    return cleanOutput.split('\n')
       .filter(l => {
         const t = l.trim();
-        if (t.startsWith('{"type"')) return false; // Skip JSON events
-        if (t.startsWith('claude -p')) return false; // Skip command echo
+        if (t.startsWith('{"type"')) return false;
+        if (t.startsWith('claude -p')) return false;
         return t.length > 0;
       })
       .join('\n').trim() || cleanOutput.slice(-3000);
-
-    this._addAgentMessage(projectId, finalContent, broadcastFn, { tool, rawOutput: rawForDisplay.slice(-8000) });
-
-    // Persist context summary for recovery (async, don't block)
-    this._persistContext(projectId, chatSessionId, message, finalContent);
   }
 
   /**
@@ -763,7 +854,20 @@ NEEDS_USER`,
         .replace(/<h([1-6])>([\s\S]*?)<\/h\1>/gi, (_, l, c) => '#'.repeat(parseInt(l)) + ' ' + c);
     }
 
-    return { text, sessionId };
+    // Detect error results
+    let isError = false;
+    // Check stream-json result event for is_error flag
+    for (const line of cleanOutput.split('\n')) {
+      if (line.includes('"type":"result"') || line.includes('"type": "result"')) {
+        try {
+          const idx = line.indexOf('{');
+          const json = JSON.parse(line.slice(idx));
+          if (json.is_error) isError = true;
+        } catch {}
+      }
+    }
+
+    return { text, sessionId, isError };
   }
 
   _extractToolResponse(cleanOutput, cmd) {
