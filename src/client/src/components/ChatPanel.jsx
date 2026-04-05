@@ -298,10 +298,34 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     return () => wsRef.current?.removeEventListener('message', handleMessage);
   }, [wsRef, activeSessionId]);
 
-  // Scroll to bottom on new messages
+  // Scroll to bottom only when NEW messages are added (not on project switch)
+  const prevMessageCountRef = useRef(0);
+  const isInitialLoadRef = useRef(true);
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, agentBusy]);
+    const currentCount = messages.length;
+    const prevCount = prevMessageCountRef.current;
+
+    // Only scroll if:
+    // 1. Initial load of this session (scroll instant to bottom)
+    // 2. New message was added (user sent or agent responded)
+    if (isInitialLoadRef.current && currentCount > 0) {
+      // Initial load - instant scroll to bottom
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      isInitialLoadRef.current = false;
+    } else if (currentCount > prevCount && prevCount > 0) {
+      // New message added - instant scroll to bottom
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+    }
+
+    prevMessageCountRef.current = currentCount;
+  }, [messages]);
+
+  // Reset initial load flag when session changes
+  useEffect(() => {
+    isInitialLoadRef.current = true;
+    prevMessageCountRef.current = 0;
+  }, [activeSessionId]);
 
   // ── SINGLE SOURCE OF TRUTH: Poll API every 2s for new messages ──
   // No WebSocket for messages — polling is 100% reliable
