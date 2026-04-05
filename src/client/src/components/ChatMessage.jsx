@@ -189,7 +189,7 @@ function renderMarkdown(text) {
   return elements;
 }
 
-export default function ChatMessage({ message, wsRef, projectId }) {
+export default function ChatMessage({ message, wsRef, projectId, onSend }) {
   const [showRaw, setShowRaw] = useState(false);
   const style = ROLE_STYLES[message.role] || ROLE_STYLES.agent;
   const Icon = style.icon;
@@ -199,6 +199,24 @@ export default function ChatMessage({ message, wsRef, projectId }) {
   const tool = message.metadata?.tool;
   const rawOutput = message.metadata?.rawOutput;
   const plan = message.metadata?.plan;
+  const suggestions = message.metadata?.suggestions;
+
+  // Suggestion buttons: render as a row of clickable chips
+  if (suggestions && message.metadata?.hidden) {
+    return (
+      <div className="flex flex-wrap gap-1.5 mb-3 px-3">
+        {suggestions.map((s, i) => (
+          <button
+            key={i}
+            onClick={() => onSend?.(s)}
+            className="px-3 py-1 text-[11px] rounded-full border border-primary-500/30 bg-primary-500/10 text-primary-300 hover:bg-primary-500/20 hover:border-primary-500/50 transition-colors"
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+    );
+  }
 
   // Memoize markdown rendering
   const renderedContent = useMemo(() => renderMarkdown(message.content), [message.content]);

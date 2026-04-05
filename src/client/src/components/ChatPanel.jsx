@@ -373,7 +373,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           </div>
         ) : (
           displayMessages.map(msg => (
-            <ChatMessage key={msg.id} message={msg} wsRef={wsRef} projectId={projectId} />
+            <ChatMessage key={msg.id} message={msg} wsRef={wsRef} projectId={projectId} onSend={handleSend} />
           ))
         )}
 

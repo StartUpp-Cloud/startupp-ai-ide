@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ChevronDown, ChevronUp, Terminal as TerminalIcon } from 'lucide-react';
+import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 
 /**
@@ -117,8 +117,84 @@ export default function InternalConsole({ projectId }) {
         {open ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
       </button>
       {open && (
-        <div ref={termRef} style={{ height: 200 }} className="bg-[#0d1117]" />
+        <>
+          <div ref={termRef} style={{ height: 180 }} className="bg-[#0d1117]" />
+          <CommandBuilder
+            onRun={(cmd) => {
+              if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: cmd + '\n' }));
+              }
+            }}
+          />
+        </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Natural language → shell command builder.
+ * Uses the local LLM to generate commands from descriptions.
+ */
+function CommandBuilder({ onRun }) {
+  const [query, setQuery] = useState('');
+  const [generating, setGenerating] = useState(false);
+  const [suggestion, setSuggestion] = useState(null);
+
+  const handleGenerate = async () => {
+    if (!query.trim() || generating) return;
+    setGenerating(true);
+    setSuggestion(null);
+    try {
+      const res = await fetch('/api/llm/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: `Generate a single shell command for: "${query.trim()}". Return ONLY the command, nothing else. No explanation, no markdown, no backticks.`,
+          context: { maxTokens: 100, temperature: 0.1 },
+        }),
+      });
+      const data = await res.json();
+      if (data.response) {
+        setSuggestion(data.response.trim().replace(/^`+|`+$/g, ''));
+      }
+    } catch {}
+    setGenerating(false);
+  };
+
+  const handleRun = () => {
+    if (suggestion) {
+      onRun(suggestion);
+      setSuggestion(null);
+      setQuery('');
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1 px-2 py-1 bg-surface-850 border-t border-surface-700/50">
+      <Sparkles size={12} className="text-primary-400 flex-shrink-0" />
+      <input
+        type="text"
+        value={query}
+        onChange={e => { setQuery(e.target.value); setSuggestion(null); }}
+        onKeyDown={e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            if (suggestion) handleRun();
+            else handleGenerate();
+          }
+        }}
+        placeholder="Describe a command... (Enter to generate)"
+        className="flex-1 bg-transparent text-[11px] text-surface-300 outline-none placeholder:text-surface-600"
+      />
+      {suggestion && (
+        <div className="flex items-center gap-1">
+          <code className="text-[10px] text-primary-300 bg-surface-800 px-1.5 py-0.5 rounded font-mono max-w-[200px] truncate">{suggestion}</code>
+          <button onClick={handleRun} className="text-[10px] text-green-400 hover:text-green-300 px-1">Run</button>
+          <button onClick={() => setSuggestion(null)} className="text-[10px] text-surface-500 hover:text-surface-300 px-1">✕</button>
+        </div>
+      )}
+      {generating && <Loader size={10} className="animate-spin text-primary-400" />}
     </div>
   );
 }
