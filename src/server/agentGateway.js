@@ -564,6 +564,25 @@ RULES:
         const t = l.trim();
         if (t.startsWith('{"type"')) return false;
         if (t.startsWith('claude -p')) return false;
+        if (t.startsWith('copilot -p')) return false;
+        if (t.startsWith('aider ')) return false;
+        // Filter out preamble content that gets echoed
+        if (t.startsWith('> MODE:')) return false;
+        if (t.startsWith('> ABOUT THE USER:')) return false;
+        if (t.startsWith('> PROJECT RULES:')) return false;
+        if (t.startsWith('> GLOBAL RULES')) return false;
+        if (t.startsWith('> IMPORTANT:')) return false;
+        if (t.startsWith('> ---')) return false;
+        if (/^>\s*(Name|Role|Languages|Code style|Preferred tone|Preferences):/.test(t)) return false;
+        if (/^>\s*\d+\./.test(t)) return false; // Numbered rules
+        // Filter out command-line arguments that get echoed
+        if (t.includes('--output-format stream-json')) return false;
+        if (t.includes('--dangerously-skip-permissions')) return false;
+        if (t.includes('--verbose')) return false;
+        if (t.includes("--resume '")) return false;
+        // Filter out shell prompts
+        if (/^[>#$]\s*$/.test(t)) return false;
+        if (/^\w+@[\w.-]+:.*[$#]\s*$/.test(t)) return false; // user@host:path$
         return t.length > 0;
       })
       .join('\n').trim() || cleanOutput.slice(-3000);
@@ -1032,12 +1051,36 @@ NEEDS_USER`,
     const cmdBase = cmd.split("'")[0].trim();
     const startIdx = lines.findIndex(l => l.includes(cmdBase));
     if (startIdx >= 0) lines = lines.slice(startIdx + 1);
+
+    // Remove trailing shell prompts
     while (lines.length > 0) {
       const last = lines[lines.length - 1].trim();
       if (/[$#>]\s*$/.test(last) && last.length > 1) lines.pop();
       else if (!last) lines.pop();
       else break;
     }
+
+    // Filter out preamble content that might be in the echoed output
+    lines = lines.filter(l => {
+      const t = l.trim();
+      // Skip JSON events
+      if (t.startsWith('{"type"')) return false;
+      // Skip preamble markers
+      if (t.startsWith('> MODE:')) return false;
+      if (t.startsWith('> ABOUT THE USER:')) return false;
+      if (t.startsWith('> PROJECT RULES:')) return false;
+      if (t.startsWith('> GLOBAL RULES')) return false;
+      if (t.startsWith('> IMPORTANT:')) return false;
+      if (t.startsWith('> ---')) return false;
+      if (/^>\s*(Name|Role|Languages|Code style|Preferred tone|Preferences):/.test(t)) return false;
+      if (/^>\s*\d+\./.test(t)) return false;
+      // Skip command args
+      if (t.includes('--output-format stream-json')) return false;
+      if (t.includes('--dangerously-skip-permissions')) return false;
+      if (/'\s*--output-format/.test(t)) return false;
+      return true;
+    });
+
     return lines.join('\n').trim() || cleanOutput;
   }
 

@@ -369,7 +369,7 @@ class ChatStore {
         .trim();
     }
 
-    // Fallback: filter out JSON lines and command echoes, keep meaningful text
+    // Fallback: filter out JSON lines, command echoes, and preamble content
     const meaningfulLines = clean.split('\n').filter(line => {
       const t = line.trim();
       if (!t) return false;
@@ -378,6 +378,21 @@ class ChatStore {
       if (t.startsWith('copilot -p')) return false;
       if (t.startsWith('aider ')) return false;
       if (/^[>#$]\s*$/.test(t)) return false; // Shell prompts
+      if (/^\w+@[\w.-]+:.*[$#]\s*$/.test(t)) return false; // user@host:path$
+      // Filter out preamble content
+      if (t.startsWith('> MODE:')) return false;
+      if (t.startsWith('> ABOUT THE USER:')) return false;
+      if (t.startsWith('> PROJECT RULES:')) return false;
+      if (t.startsWith('> GLOBAL RULES')) return false;
+      if (t.startsWith('> IMPORTANT:')) return false;
+      if (t.startsWith('> ---')) return false;
+      if (/^>\s*(Name|Role|Languages|Code style|Preferred tone|Preferences):/.test(t)) return false;
+      if (/^>\s*\d+\./.test(t)) return false;
+      // Filter out command-line arguments
+      if (t.includes('--output-format stream-json')) return false;
+      if (t.includes('--dangerously-skip-permissions')) return false;
+      if (t.includes('--verbose')) return false;
+      if (t.includes("--resume '")) return false;
       return true;
     });
 
