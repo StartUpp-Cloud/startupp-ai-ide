@@ -279,7 +279,9 @@ RULES:
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
       const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode, {
-        // Callback to persist chunks as they arrive
+        // Callback to persist chunks as they arrive (for recovery)
+        // NOTE: Raw chunks are saved to disk but NOT broadcast to client
+        // Client only sees progress messages and the final cleaned response
         onChunk: (chunk) => {
           accumulatedContent += chunk;
           chatStore.appendStreamChunk({
@@ -289,14 +291,8 @@ RULES:
             chunk,
             chunkIndex: chunkIndex++,
           });
-          // Broadcast chunk to client
-          broadcastFn({
-            type: 'chat-message-chunk',
-            projectId,
-            sessionId: chatSessionId,
-            messageId: streamingMsg.id,
-            chunk,
-          });
+          // Don't broadcast raw chunks - they contain JSON/ANSI that shouldn't be displayed
+          // Progress updates are sent separately via _parseStreamEvent()
         },
       });
 
