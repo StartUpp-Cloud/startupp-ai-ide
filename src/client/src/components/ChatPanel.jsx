@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
-import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal } from 'lucide-react';
 
 /**
  * Working indicator with live timer and stop button.
@@ -134,6 +134,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   // Session state
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
+  const [openTabs, setOpenTabs] = useState([]); // Session IDs that are visible as tabs
   const [showSessionList, setShowSessionList] = useState(false);
   const sessionListRef = useRef(null);
 
@@ -150,19 +151,21 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
 
   // Load sessions when project changes
   useEffect(() => {
-    if (!projectId) { setSessions([]); setActiveSessionId(null); return; }
+    if (!projectId) { setSessions([]); setActiveSessionId(null); setOpenTabs([]); return; }
     fetch(`/api/projects/${projectId}/chat/sessions`)
       .then(r => r.json())
       .then(data => {
         const list = data.sessions || [];
         setSessions(list);
         if (list.length > 0) {
+          // Open the most recent session as a tab
+          setOpenTabs([list[0].id]);
           setActiveSessionId(list[0].id);
         } else {
           createNewSession();
         }
       })
-      .catch(() => { setSessions([]); setActiveSessionId(null); });
+      .catch(() => { setSessions([]); setActiveSessionId(null); setOpenTabs([]); });
   }, [projectId]);
 
   // Load messages when active session changes
@@ -380,6 +383,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       const r = await fetch(`/api/projects/${projectId}/chat/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       const session = await r.json();
       setSessions(prev => [session, ...prev]);
+      // Add to open tabs and make active
+      setOpenTabs(prev => [...prev, session.id]);
       setActiveSessionId(session.id);
       setMessages([]);
       setShowSessionList(false);
@@ -390,10 +395,17 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     if (!projectId) return;
     try {
       await fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, { method: 'DELETE' });
+      // Remove from open tabs
+      setOpenTabs(prev => prev.filter(id => id !== sessionId));
       setSessions(prev => {
         const filtered = prev.filter(s => s.id !== sessionId);
         if (sessionId === activeSessionId) {
-          if (filtered.length > 0) {
+          // Switch to another open tab or create new
+          const remainingTabs = openTabs.filter(id => id !== sessionId);
+          if (remainingTabs.length > 0) {
+            setActiveSessionId(remainingTabs[remainingTabs.length - 1]);
+          } else if (filtered.length > 0) {
+            setOpenTabs([filtered[0].id]);
             setActiveSessionId(filtered[0].id);
           } else {
             createNewSession();
@@ -402,12 +414,47 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         return filtered;
       });
     } catch {}
-  }, [projectId, activeSessionId, createNewSession]);
+  }, [projectId, activeSessionId, openTabs, createNewSession]);
 
-  const switchSession = useCallback((sessionId) => {
+  // Switch to a session tab (doesn't open from dropdown, just switches active)
+  const switchToTab = useCallback((sessionId) => {
+    setActiveSessionId(sessionId);
+  }, []);
+
+  // Open a session from the dropdown (adds to tabs and makes active)
+  const openSession = useCallback((sessionId) => {
+    if (!openTabs.includes(sessionId)) {
+      setOpenTabs(prev => [...prev, sessionId]);
+    }
     setActiveSessionId(sessionId);
     setShowSessionList(false);
-  }, []);
+  }, [openTabs]);
+
+  // Close a tab (removes from tabs but keeps session in history)
+  const closeTab = useCallback((sessionId, e) => {
+    e?.stopPropagation();
+    setOpenTabs(prev => {
+      const filtered = prev.filter(id => id !== sessionId);
+      // If closing active tab, switch to another
+      if (sessionId === activeSessionId) {
+        if (filtered.length > 0) {
+          setActiveSessionId(filtered[filtered.length - 1]);
+        } else {
+          // No tabs left, create a new one
+          createNewSession();
+        }
+      }
+      return filtered;
+    });
+  }, [activeSessionId, createNewSession]);
+
+  // Legacy switchSession for backward compatibility
+  const switchSession = useCallback((sessionId) => {
+    openSession(sessionId);
+  }, [openSession]);
+
+  // Sessions not currently open as tabs (for dropdown)
+  const closedSessions = sessions.filter(s => !openTabs.includes(s.id));
 
   // ── Send ──
 
@@ -473,89 +520,124 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     );
   }
 
+  // Get session data for tabs
+  const openTabSessions = openTabs.map(id => sessions.find(s => s.id === id)).filter(Boolean);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
-      {/* Session bar */}
-      <div className="flex items-center gap-1 px-2 py-1 border-b border-surface-700/50 bg-surface-850/60" style={{ flexShrink: 0 }}>
-        {/* Session selector dropdown */}
-        <div className="relative" ref={sessionListRef}>
-          <button
-            onClick={() => setShowSessionList(!showSessionList)}
-            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] text-surface-300 hover:text-surface-100 hover:bg-surface-700/50 transition-colors"
-          >
-            <MessageCircle size={11} className="text-surface-500" />
-            <span className="truncate max-w-[200px]">{activeSession?.name || 'Chat'}</span>
-            <ChevronDown size={10} className="text-surface-500" />
-          </button>
-
-          {showSessionList && (
-            <div className="absolute top-full left-0 mt-1 w-72 bg-surface-800 border border-surface-700 rounded-lg shadow-modal z-50 overflow-hidden animate-scale-in">
-              {/* New session button inside dropdown */}
+      {/* Session tabs bar */}
+      <div className="flex items-center border-b border-surface-700/50 bg-surface-850/60" style={{ flexShrink: 0 }}>
+        {/* Tab strip - horizontally scrollable */}
+        <div className="flex-1 flex items-center overflow-x-auto scrollbar-none min-w-0">
+          {openTabSessions.map((s, idx) => (
+            <div
+              key={s.id}
+              onClick={() => switchToTab(s.id)}
+              className={`group flex items-center gap-1.5 px-3 py-1.5 cursor-pointer border-r border-surface-700/30 min-w-0 max-w-[180px] transition-colors ${
+                s.id === activeSessionId
+                  ? 'bg-surface-800 text-surface-100'
+                  : 'bg-surface-850/80 text-surface-400 hover:bg-surface-800/50 hover:text-surface-200'
+              }`}
+            >
+              <MessageCircle size={11} className={s.id === activeSessionId ? 'text-primary-400 flex-shrink-0' : 'text-surface-600 flex-shrink-0'} />
+              <span className="truncate text-[11px]">{s.name || 'Chat'}</span>
+              {/* Close tab button */}
               <button
-                onClick={createNewSession}
-                className="flex items-center gap-2 w-full px-3 py-2 text-[11px] text-primary-400 hover:bg-surface-750 border-b border-surface-700/50 transition-colors"
+                onClick={(e) => closeTab(s.id, e)}
+                className={`p-0.5 rounded flex-shrink-0 transition-all ${
+                  s.id === activeSessionId
+                    ? 'text-surface-500 hover:text-surface-200 hover:bg-surface-700'
+                    : 'text-surface-600 hover:text-surface-300 hover:bg-surface-700 opacity-0 group-hover:opacity-100'
+                }`}
+                title="Close tab"
               >
-                <Plus size={13} />
-                New conversation
+                <X size={10} />
               </button>
-
-              <div className="max-h-56 overflow-y-auto">
-                {sessions.map(s => (
-                  <div
-                    key={s.id}
-                    onClick={() => switchSession(s.id)}
-                    className={`flex items-center gap-2 px-3 py-2 text-[11px] cursor-pointer transition-colors group ${
-                      s.id === activeSessionId
-                        ? 'bg-primary-500/10 text-primary-300'
-                        : 'text-surface-300 hover:bg-surface-750'
-                    }`}
-                  >
-                    <MessageCircle size={11} className={s.id === activeSessionId ? 'text-primary-400' : 'text-surface-600'} />
-                    <span className="flex-1 truncate">{s.name}</span>
-                    <span className="text-[9px] text-surface-600 flex-shrink-0 tabular-nums">
-                      {s.messageCount || 0} msg
-                    </span>
-                    {sessions.length > 1 && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                        className="p-0.5 text-surface-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
-                      >
-                        <Trash2 size={10} />
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
             </div>
-          )}
+          ))}
+
+          {/* New tab button */}
+          <button
+            onClick={createNewSession}
+            className="p-1.5 text-surface-500 hover:text-primary-400 hover:bg-surface-700/50 transition-colors flex-shrink-0"
+            title="New conversation"
+          >
+            <Plus size={14} />
+          </button>
         </div>
 
-        {/* Quick new session button */}
-        <button
-          onClick={createNewSession}
-          className="p-1 rounded text-surface-500 hover:text-primary-400 hover:bg-surface-700/50 transition-colors"
-          title="New conversation"
-        >
-          <Plus size={14} />
-        </button>
+        {/* Right side controls */}
+        <div className="flex items-center gap-0.5 px-1 border-l border-surface-700/30 flex-shrink-0">
+          {/* History dropdown - shows closed sessions */}
+          <div className="relative" ref={sessionListRef}>
+            <button
+              onClick={() => setShowSessionList(!showSessionList)}
+              className={`p-1.5 rounded transition-colors ${
+                closedSessions.length > 0
+                  ? 'text-surface-400 hover:text-surface-200 hover:bg-surface-700/50'
+                  : 'text-surface-600 hover:text-surface-400 hover:bg-surface-700/30'
+              }`}
+              title={closedSessions.length > 0 ? `${closedSessions.length} closed session(s)` : 'No closed sessions'}
+            >
+              <MoreHorizontal size={14} />
+            </button>
 
-        {/* Skills quick access */}
-        <button
-          onClick={() => window.open('/skills', '_blank')}
-          className="p-1 rounded text-surface-500 hover:text-purple-400 hover:bg-surface-700/50 transition-colors"
-          title="Manage skills & plugins"
-        >
-          <Zap size={14} />
-        </button>
+            {showSessionList && (
+              <div className="absolute top-full right-0 mt-1 w-72 bg-surface-800 border border-surface-700 rounded-lg shadow-modal z-50 overflow-hidden animate-scale-in">
+                {/* Header */}
+                <div className="px-3 py-2 text-[10px] text-surface-500 uppercase tracking-wider border-b border-surface-700/50 bg-surface-850/50">
+                  {closedSessions.length > 0 ? 'Closed Sessions' : 'All Sessions Open'}
+                </div>
 
-        {/* Spacer */}
-        <div className="flex-1" />
+                {closedSessions.length > 0 ? (
+                  <div className="max-h-56 overflow-y-auto">
+                    {closedSessions.map(s => (
+                      <div
+                        key={s.id}
+                        onClick={() => openSession(s.id)}
+                        className="flex items-center gap-2 px-3 py-2 text-[11px] cursor-pointer transition-colors group text-surface-300 hover:bg-surface-750"
+                      >
+                        <MessageCircle size={11} className="text-surface-600" />
+                        <span className="flex-1 truncate">{s.name}</span>
+                        <span className="text-[9px] text-surface-600 flex-shrink-0 tabular-nums">
+                          {s.messageCount || 0} msg
+                        </span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                          className="p-0.5 text-surface-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
+                          title="Delete permanently"
+                        >
+                          <Trash2 size={10} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-3 py-4 text-[11px] text-surface-500 text-center">
+                    Close tabs to see them here
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
-        {/* Search result count */}
-        {searchResults && (
-          <span className="text-[10px] text-surface-500">{searchResults.length} result{searchResults.length !== 1 ? 's' : ''}</span>
-        )}
+          {/* Skills quick access */}
+          <button
+            onClick={() => window.open('/skills', '_blank')}
+            className="p-1.5 rounded text-surface-500 hover:text-purple-400 hover:bg-surface-700/50 transition-colors"
+            title="Manage skills & plugins"
+          >
+            <Zap size={14} />
+          </button>
+        </div>
       </div>
+
+      {/* Search result indicator */}
+      {searchResults && (
+        <div className="px-3 py-1 text-[10px] text-surface-500 bg-surface-850/30 border-b border-surface-700/30">
+          {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} found
+        </div>
+      )}
 
       {/* Messages */}
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }} className="px-1 py-4">
