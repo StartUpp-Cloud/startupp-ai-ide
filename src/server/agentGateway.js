@@ -1013,7 +1013,19 @@ NEEDS_USER`,
         }
       }
     }
-    if (!text) text = this._extractToolResponse(cleanOutput, cmd);
+    if (!text) {
+      text = this._extractToolResponse(cleanOutput, cmd);
+    }
+
+    // If extraction failed (got command echo or nothing), provide helpful message
+    if (!text || text.length < 10) {
+      // Check if there was at least a session_id (Claude responded but parsing failed)
+      if (sessionId) {
+        text = '⚠️ Response received but could not be parsed. Claude may still be processing or there was an issue with the output format.';
+      } else {
+        text = '⚠️ No response received. Please try again.';
+      }
+    }
 
     // Convert HTML tags to markdown (Claude sometimes outputs HTML)
     if (text) {
@@ -1048,40 +1060,57 @@ NEEDS_USER`,
 
   _extractToolResponse(cleanOutput, cmd) {
     let lines = cleanOutput.split('\n');
-    const cmdBase = cmd.split("'")[0].trim();
-    const startIdx = lines.findIndex(l => l.includes(cmdBase));
-    if (startIdx >= 0) lines = lines.slice(startIdx + 1);
+
+    // Strategy 1: Find where JSON output starts (skip command echo entirely)
+    // The command echo ends when we see the first JSON event from stream-json
+    const firstJsonIdx = lines.findIndex(l => {
+      const t = l.trim();
+      return t.startsWith('{') && (t.includes('"type"') || t.includes('"session_id"'));
+    });
+
+    if (firstJsonIdx > 0) {
+      // Everything before first JSON is command echo - skip it
+      lines = lines.slice(firstJsonIdx);
+    } else if (firstJsonIdx === -1) {
+      // No JSON found - try old method as fallback
+      const cmdBase = cmd.split("'")[0].trim();
+      const startIdx = lines.findIndex(l => l.includes(cmdBase));
+      if (startIdx >= 0) lines = lines.slice(startIdx + 1);
+    }
 
     // Remove trailing shell prompts
     while (lines.length > 0) {
       const last = lines[lines.length - 1].trim();
       if (/[$#>]\s*$/.test(last) && last.length > 1) lines.pop();
       else if (!last) lines.pop();
+      else if (/^\w+@[\w.-]+:.*[$#]/.test(last)) lines.pop(); // user@host:path$
       else break;
     }
 
-    // Filter out preamble content that might be in the echoed output
+    // Filter out JSON events (we want the text response, not events)
+    // Also filter any remaining echoed content
     lines = lines.filter(l => {
       const t = l.trim();
-      // Skip JSON events
       if (t.startsWith('{"type"')) return false;
-      // Skip preamble markers
-      if (t.startsWith('> MODE:')) return false;
-      if (t.startsWith('> ABOUT THE USER:')) return false;
-      if (t.startsWith('> PROJECT RULES:')) return false;
-      if (t.startsWith('> GLOBAL RULES')) return false;
-      if (t.startsWith('> IMPORTANT:')) return false;
-      if (t.startsWith('> ---')) return false;
-      if (/^>\s*(Name|Role|Languages|Code style|Preferred tone|Preferences):/.test(t)) return false;
-      if (/^>\s*\d+\./.test(t)) return false;
-      // Skip command args
-      if (t.includes('--output-format stream-json')) return false;
+      if (t.startsWith('{') && t.includes('"session_id"')) return false;
+      // Skip lines that look like command echo (start with > or contain command args)
+      if (t.startsWith('> ')) return false; // All echoed preamble lines start with >
+      if (t.includes('--output-format')) return false;
       if (t.includes('--dangerously-skip-permissions')) return false;
-      if (/'\s*--output-format/.test(t)) return false;
+      if (t.includes("claude -p '")) return false;
+      if (t.includes("copilot -p '")) return false;
       return true;
     });
 
-    return lines.join('\n').trim() || cleanOutput;
+    const result = lines.join('\n').trim();
+
+    // If we filtered out everything and have nothing useful, return empty
+    // (caller should handle this as a failed extraction)
+    if (!result || result.length < 5) {
+      return '';
+    }
+
+    return result;
   }
 
   _stripAnsi(text) {
