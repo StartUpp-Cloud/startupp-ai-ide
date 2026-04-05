@@ -12,6 +12,7 @@ import { autoResponder } from './autoResponder.js';
 import { sessionContext } from './sessionContext.js';
 import { orchestrator } from './orchestrator.js';
 import { activityFeed } from './activityFeed.js';
+import { agentShellPool } from './agentShellPool.js';
 
 class TerminalServer {
   constructor() {
@@ -32,6 +33,11 @@ class TerminalServer {
     this.wss = new WebSocketServer({
       server,
       path: '/ws/terminal',
+    });
+
+    // Broadcast agent shell output to all clients for live stream viewer
+    agentShellPool.on('output', ({ sessionId, data }) => {
+      this.broadcast({ type: 'agent-shell-output', sessionId, data });
     });
 
     this.wss.on('connection', (ws) => {

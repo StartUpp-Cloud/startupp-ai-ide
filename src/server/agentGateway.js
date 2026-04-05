@@ -367,7 +367,25 @@ RULES:
       }
     }
 
-    this._addAgentMessage(projectId, finalContent, broadcastFn, { tool, rawOutput: cleanOutput.slice(-8000) });
+    // Final safety: convert any remaining HTML to markdown
+    finalContent = finalContent
+      .replace(/<b>([\s\S]*?)<\/b>/gi, '**$1**')
+      .replace(/<strong>([\s\S]*?)<\/strong>/gi, '**$1**')
+      .replace(/<i>([\s\S]*?)<\/i>/gi, '*$1*')
+      .replace(/<em>([\s\S]*?)<\/em>/gi, '*$1*')
+      .replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`');
+
+    // Clean raw output: filter out stream-json events, keep only meaningful text
+    const rawForDisplay = cleanOutput.split('\n')
+      .filter(l => {
+        const t = l.trim();
+        if (t.startsWith('{"type"')) return false; // Skip JSON events
+        if (t.startsWith('claude -p')) return false; // Skip command echo
+        return t.length > 0;
+      })
+      .join('\n').trim() || cleanOutput.slice(-3000);
+
+    this._addAgentMessage(projectId, finalContent, broadcastFn, { tool, rawOutput: rawForDisplay.slice(-8000) });
 
     // Persist context summary for recovery (async, don't block)
     this._persistContext(projectId, chatSessionId, message, finalContent);
@@ -461,7 +479,12 @@ RULES:
       if (stored?.cliSessionId) {
         cliState = { cliSessionId: stored.cliSessionId, messageCount: stored.messageCount || 1 };
         this._cliSessions.set(chatSessionId, cliState);
+        console.log(`[agentGateway] Restored CLI session from disk: ${stored.cliSessionId} for chat ${chatSessionId}`);
+      } else {
+        console.log(`[agentGateway] No CLI session found for chat ${chatSessionId} (project: ${projectId})`);
       }
+    } else if (cliState?.cliSessionId) {
+      console.log(`[agentGateway] Using cached CLI session: ${cliState.cliSessionId} for chat ${chatSessionId}`);
     }
 
     const isFirstMessage = !cliState?.cliSessionId;
@@ -671,10 +694,22 @@ NEEDS_USER`,
           return `Using ${toolName}: ${input.slice(0, 60)}`;
         }
 
-        // Assistant message start — Claude is thinking
+        // Assistant message — extract thinking or text content
         if (event.type === 'assistant' && event.message) {
-          const snippet = (typeof event.message === 'string' ? event.message : event.message.content || '').slice(0, 80);
-          if (snippet) return `Thinking: "${snippet}${snippet.length >= 80 ? '...' : ''}"`;
+          const content = event.message.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'thinking' && block.thinking) {
+                const t = block.thinking.slice(0, 80);
+                return `Thinking: "${t}${t.length >= 80 ? '...' : ''}"`;
+              }
+              if (block.type === 'text' && block.text) {
+                return `Writing response...`;
+              }
+            }
+          } else if (typeof content === 'string' && content) {
+            return `Thinking: "${content.slice(0, 80)}"`;
+          }
         }
 
         // Content block — partial response
