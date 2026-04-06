@@ -65,10 +65,11 @@ const __dirname = path.dirname(__filename);
 // Security middleware
 app.use(helmet());
 
-// Rate limiting — relaxed for local/LAN IDE usage
+// Rate limiting — essentially disabled for local IDE usage
+// This is a localhost-only dev tool with many polling endpoints across multiple projects/sessions
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // 1000 requests per 15 min — IDE makes frequent LLM + polling calls
+  windowMs: 60 * 1000, // 1 minute window
+  max: 10000, // 10000 requests per minute — practically unlimited for local use
   message: "Too many requests from this IP, please try again later.",
 });
 app.use("/api/", limiter);
