@@ -569,16 +569,23 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
 
   // ── Send ──
 
-  const handleSend = useCallback((content) => {
+  const handleSend = useCallback((content, attachments = []) => {
     if (!projectId || !activeSessionId) return;
+
+    // Build display content with attachment info
+    let displayContent = content;
+    if (attachments.length > 0) {
+      const attachmentList = attachments.map(a => `📎 ${a.name}`).join('\n');
+      displayContent = content ? `${content}\n\n${attachmentList}` : attachmentList;
+    }
 
     const optimistic = {
       id: 'pending-' + Date.now(),
       projectId,
       sessionId: activeSessionId,
       role: 'user',
-      content,
-      metadata: { mode },
+      content: displayContent,
+      metadata: { mode, attachments },
       createdAt: new Date().toISOString(),
     };
     setMessages(prev => [...prev, optimistic]);
@@ -590,6 +597,14 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         projectId,
         sessionId: activeSessionId,
         content,
+        attachments: attachments.map(a => ({
+          id: a.id,
+          name: a.name,
+          type: a.type,
+          size: a.size,
+          path: a.path,
+          url: a.url,
+        })),
         mode,
         tool,
       }));
@@ -804,6 +819,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       {/* Input */}
       <ChatInput
         mode={mode}
+        projectId={projectId}
         onSend={handleSend}
         onSearch={handleSearch}
         busy={agentBusy}

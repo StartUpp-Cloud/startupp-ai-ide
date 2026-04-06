@@ -12,6 +12,7 @@ import Profile from "./pages/Profile";
 import BranchReview from "./pages/BranchReview";
 import DebugElement from "./pages/DebugElement";
 import Onboarding from "./pages/Onboarding";
+import Skills from "./pages/Skills";
 import { ProjectProvider } from "./contexts/ProjectContext";
 import NotificationToast from "./components/NotificationToast";
 
@@ -88,6 +89,7 @@ function App() {
           <Route path="/branch-review" element={<BranchReview />} />
           <Route path="/debug" element={<DebugElement />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="/skills" element={<Skills />} />
         </Routes>
       </SetupGate>
       <NotificationToast />

@@ -481,13 +481,21 @@ class TerminalServer {
         // Attach client to this chat session for isolated communication
         this.attachToChatSession(ws, chatSessionId);
 
+        // Build display content with attachment info
+        let displayContent = payload.content || '';
+        const attachments = payload.attachments || [];
+        if (attachments.length > 0) {
+          const attachmentList = attachments.map(a => `📎 ${a.name}`).join('\n');
+          displayContent = displayContent ? `${displayContent}\n\n${attachmentList}` : attachmentList;
+        }
+
         // Persist user message
         const userMsg = chatStore.addMessage({
           projectId: payload.projectId,
           sessionId: chatSessionId,
           role: 'user',
-          content: payload.content,
-          metadata: { mode: payload.mode },
+          content: displayContent,
+          metadata: { mode: payload.mode, attachments },
         });
 
         // Broadcast to all clients attached to this chat session
@@ -502,6 +510,7 @@ class TerminalServer {
           projectId: payload.projectId,
           sessionId: chatSessionId,
           content: payload.content,
+          attachments,
           mode: payload.mode,
           tool: payload.tool || 'claude',
           broadcastFn: (data) => {

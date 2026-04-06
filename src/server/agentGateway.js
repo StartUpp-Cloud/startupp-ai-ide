@@ -28,23 +28,23 @@ class AgentGateway extends EventEmitter {
 
   // ── Entry point ──
 
-  async handleTask({ projectId, sessionId = null, content, mode, tool = 'claude', broadcastFn }) {
+  async handleTask({ projectId, sessionId = null, content, attachments = [], mode, tool = 'claude', broadcastFn }) {
     this._sessionId = sessionId;
 
     const existing = this._running.get(sessionId);
     if (existing && existing.queue) {
       existing.queue = existing.queue.then(() =>
-        this._executeTask({ projectId, sessionId, content, mode, tool, broadcastFn })
+        this._executeTask({ projectId, sessionId, content, attachments, mode, tool, broadcastFn })
       );
       return existing.queue;
     }
 
-    const promise = this._executeTask({ projectId, sessionId, content, mode, tool, broadcastFn });
+    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, broadcastFn });
     this._running.set(sessionId, { aborted: false, startedAt: Date.now(), queue: promise });
     return promise;
   }
 
-  async _executeTask({ projectId, sessionId, content, mode, tool, broadcastFn }) {
+  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, broadcastFn }) {
     this._sessionId = sessionId;
     const ctx = { aborted: false, startedAt: Date.now() };
     this._running.set(sessionId, { ...ctx, queue: this._running.get(sessionId)?.queue });
@@ -55,20 +55,23 @@ class AgentGateway extends EventEmitter {
       // Auto-name session on first message (async, don't wait)
       this._autoNameSession(projectId, sessionId, content);
 
+      // Build content with attachments context
+      const fullContent = this._buildContentWithAttachments(content, attachments);
+
       const provider = llmProvider.getSettings().provider;
       const isCapable = provider !== 'ollama';
 
       if (mode === 'plan') {
         // Plan mode: always send to tool with plan instructions, never auto-execute
         this._addProgressMessage(projectId, `Asking ${tool} to create a plan...`, broadcastFn);
-        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, 'plan');
+        await this._sendToCliTool(projectId, sessionId, fullContent, tool, broadcastFn, ctx, 'plan');
       } else if (isCapable) {
         // Agent mode + capable LLM: smart routing
-        await this._smartRoute(projectId, sessionId, content, mode, tool, broadcastFn, ctx);
+        await this._smartRoute(projectId, sessionId, fullContent, mode, tool, broadcastFn, ctx);
       } else {
         // Agent mode + Ollama: everything goes to the CLI tool
         this._addProgressMessage(projectId, `Sending to ${tool}...`, broadcastFn);
-        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, 'agent');
+        await this._sendToCliTool(projectId, sessionId, fullContent, tool, broadcastFn, ctx, 'agent');
       }
     } catch (error) {
       this._addErrorMessage(projectId, `Error: ${error.message}`, broadcastFn);
@@ -76,6 +79,59 @@ class AgentGateway extends EventEmitter {
       this._running.delete(sessionId);
       broadcastFn({ type: 'agent-status', projectId, busy: false });
     }
+  }
+
+  /**
+   * Build content string with attachments context
+   */
+  _buildContentWithAttachments(content, attachments) {
+    if (!attachments || attachments.length === 0) return content;
+
+    const fs = require('fs');
+    const parts = [content];
+
+    // Categorize attachments
+    const imageAttachments = attachments.filter(a => a.type?.startsWith('image/'));
+    const textAttachments = attachments.filter(a =>
+      a.type?.startsWith('text/') ||
+      a.type === 'application/json' ||
+      ['txt', 'md', 'csv', 'json', 'js', 'ts', 'html', 'css', 'xml'].includes(a.name?.split('.').pop()?.toLowerCase())
+    );
+    const pdfAttachments = attachments.filter(a => a.type === 'application/pdf');
+    const otherAttachments = attachments.filter(a =>
+      !imageAttachments.includes(a) && !textAttachments.includes(a) && !pdfAttachments.includes(a)
+    );
+
+    // For images, note they are attached (Claude Code will handle them via file path)
+    if (imageAttachments.length > 0) {
+      parts.push('\n\n[Attached images: ' + imageAttachments.map(a => a.path).join(', ') + ']');
+    }
+
+    // For text files, include content inline if small enough
+    for (const att of textAttachments) {
+      if (att.size < 50000 && att.path) {
+        try {
+          const fileContent = fs.readFileSync(att.path, 'utf-8');
+          parts.push(`\n\n--- Content of ${att.name} ---\n${fileContent}\n--- End of ${att.name} ---`);
+        } catch {
+          parts.push(`\n\n[Attached file: ${att.path}]`);
+        }
+      } else {
+        parts.push(`\n\n[Attached file (large): ${att.path}]`);
+      }
+    }
+
+    // For PDFs, note the path
+    if (pdfAttachments.length > 0) {
+      parts.push('\n\n[Attached PDFs: ' + pdfAttachments.map(a => a.path).join(', ') + ']');
+    }
+
+    // For other files
+    if (otherAttachments.length > 0) {
+      parts.push('\n\n[Other attachments: ' + otherAttachments.map(a => a.path).join(', ') + ']');
+    }
+
+    return parts.join('');
   }
 
   // ── Smart routing (capable local LLM) ──
