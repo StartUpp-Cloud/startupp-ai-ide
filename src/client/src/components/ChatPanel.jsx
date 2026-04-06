@@ -617,7 +617,21 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     }
   }, [projectId, activeSessionId]);
 
-  const displayMessages = searchResults || messages;
+  // Sort messages by createdAt to ensure correct display order
+  // (prevents progress messages from previous interactions appearing before newer user messages)
+  const sortedMessages = [...messages].sort((a, b) =>
+    new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+
+  // Filter out stale progress messages (those older than the last user message)
+  // Progress messages should only appear AFTER the most recent user message
+  const lastUserMsg = [...sortedMessages].reverse().find(m => m.role === 'user');
+  const lastUserTime = lastUserMsg ? new Date(lastUserMsg.createdAt).getTime() : 0;
+  const filteredMessages = sortedMessages.filter(m =>
+    m.role !== 'progress' || new Date(m.createdAt).getTime() > lastUserTime
+  );
+
+  const displayMessages = searchResults || filteredMessages;
   const activeSession = sessions.find(s => s.id === activeSessionId);
 
   if (!projectId) {
