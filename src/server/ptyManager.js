@@ -229,15 +229,24 @@ class PTYManager extends EventEmitter {
       const socketPath = `/tmp/${role}-session.dtach`;
       const workDir = cwd || '/workspace';
 
-      // If no active session exists for this container+role, the dtach socket
-      // is orphaned (from a killed/crashed session). Clean it so dtach -A
-      // creates a fresh session instead of reattaching to a dead one.
-      const hasActiveSession = Array.from(this.sessions.values()).some(
+      // Check for existing active session for this container+role
+      // If one exists, return it instead of creating a duplicate
+      const existingSession = Array.from(this.sessions.values()).find(
         s => s.containerName === containerName && s.role === role && s.status === 'active'
       );
-      if (!hasActiveSession) {
-        this._cleanDtachSocket(containerName, role);
+      if (existingSession) {
+        console.log(`[ptyManager] Reusing existing ${role} session for ${containerName}: ${existingSession.id}`);
+        return {
+          sessionId: existingSession.id,
+          projectId: existingSession.projectId,
+          containerName,
+          role,
+          reused: true,
+        };
       }
+
+      // No active session - clean any orphaned dtach socket before creating new
+      this._cleanDtachSocket(containerName, role);
 
       shell = '/bin/bash';
       args = [
