@@ -370,29 +370,34 @@ class Scheduler extends EventEmitter {
     let result;
 
     try {
-      switch (schedule.type) {
-        case 'command':
-          result = await this._executeCommand(schedule);
-          break;
+      // If a CLI tool is specified, use it instead of raw command execution
+      if (schedule.cliTool && schedule.cliTool !== 'shell') {
+        result = await this._executeCliTool(schedule);
+      } else {
+        switch (schedule.type) {
+          case 'command':
+            result = await this._executeCommand(schedule);
+            break;
 
-        case 'test':
-          result = await this._executeTest(schedule);
-          break;
+          case 'test':
+            result = await this._executeTest(schedule);
+            break;
 
-        case 'plan':
-          result = await this._executePlan(schedule);
-          break;
+          case 'plan':
+            result = await this._executePlan(schedule);
+            break;
 
-        case 'webhook':
-          result = await this._executeWebhook(schedule);
-          break;
+          case 'webhook':
+            result = await this._executeWebhook(schedule);
+            break;
 
-        default:
-          result = {
-            success: false,
-            output: `Unknown schedule type: ${schedule.type}`,
-            duration: Date.now() - startTime,
-          };
+          default:
+            result = {
+              success: false,
+              output: `Unknown schedule type: ${schedule.type}`,
+              duration: Date.now() - startTime,
+            };
+        }
       }
     } catch (err) {
       result = {
@@ -498,6 +503,64 @@ class Scheduler extends EventEmitter {
             duration,
           });
         }
+      });
+    });
+  }
+
+  /**
+   * Execute a command using a CLI tool (claude, copilot, etc.)
+   * Uses claude -p / copilot -p in non-interactive mode inside the container.
+   *
+   * @param {Schedule} schedule - The schedule containing the prompt and tool config
+   * @returns {Promise<ScheduleLastResult>}
+   * @private
+   */
+  async _executeCliTool(schedule) {
+    const startTime = Date.now();
+    const tool = schedule.cliTool || 'claude';
+    const containerName = this._getContainerName(schedule.projectId);
+    const workDir = schedule.projectPath || '/workspace';
+
+    // Build the CLI command
+    const escaped = schedule.command.replace(/"/g, '\\"');
+    let command;
+
+    switch (tool) {
+      case 'claude':
+        command = `claude -p "${escaped}"`;
+        break;
+      case 'copilot':
+        command = `copilot -p "${escaped}"`;
+        break;
+      case 'aider':
+        command = `aider --message "${escaped}" --yes`;
+        break;
+      default:
+        command = schedule.command;
+    }
+
+    // Wrap in docker exec if container-based
+    if (containerName) {
+      command = `docker exec -w "${workDir}" ${containerName} bash -c '${command.replace(/'/g, "'\\''")}'`;
+    }
+
+    return new Promise((resolve) => {
+      exec(command, {
+        cwd: containerName ? undefined : (schedule.projectPath || undefined),
+        timeout: 120000, // 2 min timeout for AI tools
+        encoding: 'utf-8',
+        maxBuffer: 5 * 1024 * 1024,
+        env: { ...process.env },
+      }, (error, stdout, stderr) => {
+        const duration = Date.now() - startTime;
+        const output = (stdout || '') + (stderr || '');
+        const truncated = output.length > 10000 ? output.slice(0, 10000) + '\n...(truncated)' : output;
+
+        resolve({
+          success: !error,
+          output: truncated || (error ? error.message : 'No output'),
+          duration,
+        });
       });
     });
   }

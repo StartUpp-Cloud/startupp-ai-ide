@@ -15,6 +15,8 @@ import { initDB } from "./db.js";
 // Import terminal server
 import { terminalServer } from "./terminalServer.js";
 import { ptyManager } from "./ptyManager.js";
+// Initialize agent shell pool (attaches ptyManager data listener in constructor)
+import "./agentShellPool.js";
 
 // Import routes
 import projectRoutes from "./routes/projects.js";
@@ -40,10 +42,14 @@ import skillRoutes from "./routes/skills.js";
 import debugElementRoutes from "./routes/debugElement.js";
 import containerRoutes from "./routes/containers.js";
 import sessionHistoryRoutes from "./routes/sessionHistory.js";
+import chatRoutes from "./routes/chat.js";
+import profileRoutes from "./routes/profile.js";
+import { authMiddleware, getToken } from "./authToken.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
 import { scheduler } from "./scheduler.js";
 import { skillManager } from "./skillManager.js";
+import { jobManager } from "./jobManager.js";
 
 // Load environment variables
 dotenv.config();
@@ -59,10 +65,11 @@ const __dirname = path.dirname(__filename);
 // Security middleware
 app.use(helmet());
 
-// Rate limiting — relaxed for local/LAN IDE usage
+// Rate limiting — essentially disabled for local IDE usage
+// This is a localhost-only dev tool with many polling endpoints across multiple projects/sessions
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // 1000 requests per 15 min — IDE makes frequent LLM + polling calls
+  windowMs: 60 * 1000, // 1 minute window
+  max: 10000, // 10000 requests per minute — practically unlimited for local use
   message: "Too many requests from this IP, please try again later.",
 });
 app.use("/api/", limiter);
@@ -80,6 +87,12 @@ app.use(cors(corsOptions));
 // Body parsing middleware
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// API authentication — disabled for now (localhost-only tool, CORS handles same-origin)
+// Security is handled by: encrypted tokens at rest, file permissions (700), gitignore
+// To re-enable: uncomment the middleware below
+// app.get("/api/auth/token", (req, res) => { res.json({ token: getToken() }); });
+// app.use(authMiddleware);
 
 // Initialize database and start server
 async function startServer() {
@@ -103,6 +116,10 @@ async function startServer() {
     // Initialize skill manager
     await skillManager.init();
     console.log("Skill manager ready");
+
+    // Initialize job manager (recovers interrupted jobs from previous session)
+    await jobManager.init();
+    console.log("Job manager ready");
 
     // API routes
     app.use("/api/projects", projectRoutes);
@@ -129,6 +146,9 @@ async function startServer() {
     app.use("/api/debug", debugElementRoutes);
     app.use("/api/containers", containerRoutes);
     app.use("/api/session-history", sessionHistoryRoutes);
+    app.use("/api/projects", chatRoutes);
+    app.use("/api/profile", profileRoutes);
+    app.use("/api/jobs", (await import("./routes/jobs.js")).default);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {
@@ -138,6 +158,17 @@ async function startServer() {
         environment: NODE_ENV,
         uptime: process.uptime(),
       });
+    });
+
+    // Global unread counts (for all projects)
+    app.get("/api/unread-counts", async (req, res) => {
+      try {
+        const { chatStore } = await import("./chatStore.js");
+        const counts = chatStore.getAllUnreadCounts();
+        res.json({ unread: counts });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
     // System health — lightweight, uses only Node built-in os module
@@ -185,7 +216,7 @@ async function startServer() {
           llmAvailable: health.available === true,
           llmProvider: settings.provider,
           hasProjects: projects.length > 0,
-          setupComplete: settings.enabled === true && health.available === true && projects.length > 0,
+          setupComplete: settings.enabled === true && projects.length > 0,
           serverOS: osModule.platform(),
         });
       } catch (error) {

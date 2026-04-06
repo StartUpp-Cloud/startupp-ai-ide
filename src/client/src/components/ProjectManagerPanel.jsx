@@ -46,6 +46,7 @@ export default function ProjectManagerPanel({
   onProjectChanged,
   sessions = [],
   activeSessionId = null,
+  unreadCounts = {},
 }) {
   const {
     projects,
@@ -412,6 +413,11 @@ export default function ProjectManagerPanel({
               )}
               <FolderOpen className="w-4 h-4 text-surface-400 flex-shrink-0" />
               <span className="text-sm truncate flex-1">{project.name}</span>
+
+              {/* Unread badge */}
+              {unreadCounts[project.id] > 0 && (
+                <span className="flex-shrink-0 w-2 h-2 rounded-full bg-primary-500 animate-pulse" title={`${unreadCounts[project.id]} unread`} />
+              )}
 
               {/* Hover actions */}
               <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">

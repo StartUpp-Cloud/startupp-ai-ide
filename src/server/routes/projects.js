@@ -1,6 +1,8 @@
 import express from "express";
 import Project from "../models/Project.js";
 import { normalizePromptSettings } from "../models/Project.js";
+import { containerManager } from "../containerManager.js";
+import { ptyManager } from "../ptyManager.js";
 
 const router = express.Router();
 
@@ -256,6 +258,23 @@ router.delete("/:id", async (req, res) => {
     if (!project) {
       return res.status(404).json({ error: "Project not found" });
     }
+
+    // Kill any active PTY sessions for this project
+    const activeSessions = ptyManager.getProjectSessions(id);
+    for (const session of activeSessions) {
+      if (session.status === 'active') {
+        ptyManager.killSession(session.id);
+      }
+    }
+
+    // Remove container and its volumes (workspace + home)
+    if (project.containerName) {
+      containerManager.removeContainer(project.containerName);
+    }
+
+    // Clean up chat history
+    const { chatStore } = await import('../chatStore.js');
+    chatStore.deleteProject(id);
 
     await Project.delete(id);
     res.json({ message: "Project deleted successfully" });

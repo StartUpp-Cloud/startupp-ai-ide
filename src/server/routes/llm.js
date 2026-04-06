@@ -255,6 +255,32 @@ router.put('/deepseek/config', async (req, res) => {
 });
 
 /**
+ * PUT /api/llm/github/config - Configure GitHub Models settings
+ */
+router.put('/github/config', async (req, res) => {
+  try {
+    const { endpoint, model, apiKey, timeout } = req.body;
+
+    const updates = {};
+    if (endpoint) updates.endpoint = endpoint;
+    if (model) updates.model = model;
+    if (apiKey) updates.apiKey = apiKey;
+    if (timeout) updates.timeout = timeout;
+
+    const settings = await llmProvider.updateSettings({
+      github: { ...llmProvider.getSettings().github, ...updates },
+    });
+
+    res.json({
+      ...settings.github,
+      apiKey: settings.github?.apiKey ? '***configured***' : '',
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update', message: error.message });
+  }
+});
+
+/**
  * POST /api/llm/generate-prompt - AI-assisted prompt generation
  * Takes a project + user description, returns a well-crafted prompt for a CLI agent
  */

@@ -10,9 +10,12 @@ const __dirname = path.dirname(__filename);
 // Data directory at project root
 const dataDir = path.join(__dirname, "../../data");
 
-// Ensure data directory exists
+// Ensure data directory exists with restrictive permissions (owner-only)
 if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+} else {
+  // Tighten permissions on existing data directory
+  try { fs.chmodSync(dataDir, 0o700); } catch {}
 }
 
 const dbPath = path.join(dataDir, "db.json");
@@ -43,6 +46,15 @@ const defaultData = {
   skills: [],
   sessionHistory: [],
   safetySettings: { ...defaultSafetySettings },
+  profile: {
+    name: '',
+    role: '',
+    tone: 'concise',         // 'concise' | 'detailed' | 'casual' | 'formal'
+    preferences: '',          // Free-text preferences
+    codeStyle: '',            // e.g., "Prefer functional React, TypeScript, minimal comments"
+    languages: '',            // e.g., "JavaScript, TypeScript, Python"
+    setupComplete: false,
+  },
 };
 
 // Initialize LowDB with JSON file adapter
@@ -69,6 +81,7 @@ export async function initDB() {
   if (!db.data.skills) db.data.skills = [];
   if (!db.data.sessionHistory) db.data.sessionHistory = [];
   if (!db.data.safetySettings) db.data.safetySettings = { ...defaultSafetySettings };
+  if (!db.data.profile) db.data.profile = { name: '', role: '', tone: 'concise', preferences: '', codeStyle: '', languages: '', setupComplete: false };
   await db.write();
   console.log("Database initialized at:", dbPath);
 }

@@ -20,6 +20,7 @@ import {
   Shield,
   AlertTriangle,
   RotateCcw,
+  Sparkles,
 } from 'lucide-react';
 
 const API_BASE = '/api';
@@ -151,6 +152,24 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
     }
   };
 
+  const saveGitHubConfig = async (updates) => {
+    try {
+      setSaving(true);
+      const res = await fetch(`${API_BASE}/llm/github/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      await res.json();
+      await loadSettings();
+      loadHealth();
+    } catch (error) {
+      console.error('Failed to save GitHub config:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const testConnection = async () => {
     try {
       setTesting(true);
@@ -206,6 +225,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
             { id: 'ollama', label: 'Ollama', icon: Server },
             { id: 'openai', label: 'OpenAI', icon: Key },
             { id: 'deepseek', label: 'DeepSeek', icon: Brain },
+            { id: 'github', label: 'GitHub', icon: Sparkles },
             { id: 'advanced', label: 'Advanced', icon: Sliders },
           ].map((tab) => (
             <button
@@ -330,6 +350,28 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                         </div>
                         <p className="text-xs text-surface-500">
                           Affordable API - Great for code tasks
+                        </p>
+                      </button>
+
+                      <button
+                        onClick={() => saveSettings({ provider: 'github' })}
+                        className={`p-4 rounded-lg border text-left transition-all ${
+                          settings.provider === 'github'
+                            ? 'border-emerald-500 bg-emerald-500/10'
+                            : 'border-surface-700 bg-surface-800 hover:border-surface-600'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-2">
+                          <Sparkles className={`w-5 h-5 ${settings.provider === 'github' ? 'text-emerald-400' : 'text-surface-400'}`} />
+                          <span className={`font-medium ${settings.provider === 'github' ? 'text-emerald-300' : 'text-surface-300'}`}>
+                            GitHub Copilot
+                          </span>
+                          {settings.provider === 'github' && (
+                            <Check className="w-4 h-4 text-emerald-400 ml-auto" />
+                          )}
+                        </div>
+                        <p className="text-xs text-surface-500">
+                          Free with Copilot - GPT-4o, Llama & more
                         </p>
                       </button>
                     </div>
@@ -924,6 +966,73 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                     <p className="text-xs text-surface-500 mt-1">
                       DeepSeek can be slower than other providers, recommended: 60000ms
                     </p>
+                  </div>
+                </div>
+              )}
+
+              {/* GitHub Models Tab */}
+              {activeTab === 'github' && settings && (
+                <div className="space-y-6">
+                  <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-xl">
+                    <h3 className="text-sm font-semibold text-green-300 mb-1">Free with GitHub Copilot</h3>
+                    <p className="text-[12px] text-surface-400">
+                      Use GPT-4o, GPT-4o-mini, or Llama models for free through GitHub Models API.
+                      Requires a GitHub PAT with the "copilot" scope.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-surface-300 mb-2">GitHub Token (PAT)</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        id="github-token-input"
+                        defaultValue=""
+                        placeholder={settings.github?.apiKey ? '••••••••(configured — paste new to replace)' : 'ghp_xxxxxxxxxxxxxxxxxxxx'}
+                        className="flex-1 px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm font-mono placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
+                      />
+                      <button
+                        onClick={() => {
+                          const input = document.getElementById('github-token-input');
+                          if (input?.value?.trim()) {
+                            saveGitHubConfig({ apiKey: input.value.trim() });
+                            input.value = '';
+                          }
+                        }}
+                        className="px-3 py-2 bg-primary-500 hover:bg-primary-600 text-surface-950 rounded-lg text-sm font-medium transition-colors"
+                      >
+                        Save
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-surface-500 mt-1">
+                      Create at github.com/settings/tokens → Fine-grained → "copilot" permission
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-surface-300 mb-2">Model</label>
+                    <select
+                      value={settings.github?.model || 'openai/gpt-4o-mini'}
+                      onChange={(e) => saveGitHubConfig({ model: e.target.value })}
+                      className="w-full px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
+                    >
+                      <option value="openai/gpt-4o-mini">GPT-4o Mini (Fast, recommended)</option>
+                      <option value="openai/gpt-4o">GPT-4o (Powerful)</option>
+                      <option value="openai/o4-mini">o4-mini (Reasoning)</option>
+                      <option value="meta-llama/Llama-4-Scout-17B-16E-Instruct">Llama 4 Scout 17B</option>
+                      <option value="meta-llama/Llama-4-Maverick-17B-128E-Instruct">Llama 4 Maverick 17B</option>
+                      <option value="mistralai/mistral-small-2503">Mistral Small</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-surface-300 mb-2">API Endpoint</label>
+                    <input
+                      type="text"
+                      value={settings.github?.endpoint || 'https://models.github.ai/inference'}
+                      onChange={(e) => saveGitHubConfig({ endpoint: e.target.value })}
+                      className="w-full px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm font-mono placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
+                    />
                   </div>
                 </div>
               )}

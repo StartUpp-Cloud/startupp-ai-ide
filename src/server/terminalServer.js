@@ -12,6 +12,7 @@ import { autoResponder } from './autoResponder.js';
 import { sessionContext } from './sessionContext.js';
 import { orchestrator } from './orchestrator.js';
 import { activityFeed } from './activityFeed.js';
+import { agentShellPool } from './agentShellPool.js';
 
 class TerminalServer {
   constructor() {
@@ -23,6 +24,75 @@ class TerminalServer {
     this.recentOutput = new Map(); // sessionId -> recent output for prompt detection
     this.sessionCliTools = new Map(); // sessionId -> cliTool
     this.autoResponseTimers = new Map(); // sessionId -> pending auto-response timer
+
+    // Per-session WebSocket tracking for isolation
+    // Each chat session gets its own dedicated client set
+    this.chatSessionClients = new Map(); // chatSessionId -> Set of ws clients
+    this.clientChatSessions = new Map(); // ws -> chatSessionId (for cleanup)
+  }
+
+  /**
+   * Attach a WebSocket client to a specific chat session.
+   * This enables per-session isolation for parallel work.
+   */
+  attachToChatSession(ws, chatSessionId) {
+    // Remove from previous chat session if any
+    const prevSession = this.clientChatSessions.get(ws);
+    if (prevSession && prevSession !== chatSessionId) {
+      const prevClients = this.chatSessionClients.get(prevSession);
+      if (prevClients) {
+        prevClients.delete(ws);
+        if (prevClients.size === 0) {
+          this.chatSessionClients.delete(prevSession);
+        }
+      }
+    }
+
+    // Add to new chat session
+    if (!this.chatSessionClients.has(chatSessionId)) {
+      this.chatSessionClients.set(chatSessionId, new Set());
+    }
+    this.chatSessionClients.get(chatSessionId).add(ws);
+    this.clientChatSessions.set(ws, chatSessionId);
+
+    console.log(`[TerminalServer] Client attached to chat session ${chatSessionId}`);
+  }
+
+  /**
+   * Broadcast to all clients attached to a specific chat session.
+   * Used for isolated per-session communication.
+   */
+  broadcastToChatSession(chatSessionId, message) {
+    const clients = this.chatSessionClients.get(chatSessionId);
+    if (!clients || clients.size === 0) return;
+
+    const data = JSON.stringify(message);
+    for (const client of clients) {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        try {
+          client.send(data);
+        } catch (err) {
+          console.warn(`[TerminalServer] Failed to send to chat session client:`, err.message);
+        }
+      }
+    }
+  }
+
+  /**
+   * Clean up chat session tracking when a client disconnects.
+   */
+  detachFromChatSession(ws) {
+    const chatSessionId = this.clientChatSessions.get(ws);
+    if (chatSessionId) {
+      const clients = this.chatSessionClients.get(chatSessionId);
+      if (clients) {
+        clients.delete(ws);
+        if (clients.size === 0) {
+          this.chatSessionClients.delete(chatSessionId);
+        }
+      }
+      this.clientChatSessions.delete(ws);
+    }
   }
 
   /**
@@ -32,6 +102,11 @@ class TerminalServer {
     this.wss = new WebSocketServer({
       server,
       path: '/ws/terminal',
+    });
+
+    // Broadcast agent shell output to all clients for live stream viewer
+    agentShellPool.on('output', ({ sessionId, data }) => {
+      this.broadcast({ type: 'agent-shell-output', sessionId, data });
     });
 
     this.wss.on('connection', (ws) => {
@@ -77,7 +152,7 @@ class TerminalServer {
       buf.data += data;
 
       if (buf.timer) clearTimeout(buf.timer);
-      buf.timer = setTimeout(() => {
+      buf.timer = setTimeout(async () => {
         const coalesced = buf.data;
         buf.data = '';
         coalesceBufs.delete(sessionId);
@@ -100,6 +175,9 @@ class TerminalServer {
 
         // Forward to orchestrator if it has an active execution for this session
         orchestrator.feedOutput(sessionId, coalesced);
+
+        // agentShellPool.feedOutput is handled via ptyManager 'data' event listener
+        // (set up in agentShellPool constructor — no dynamic import needed)
       }, 5);
     });
 
@@ -245,7 +323,7 @@ class TerminalServer {
   /**
    * Handle incoming WebSocket messages
    */
-  handleMessage(ws, msg) {
+  async handleMessage(ws, msg) {
     const { type, ...payload } = msg;
 
     switch (type) {
@@ -347,6 +425,139 @@ class TerminalServer {
       case 'kill-switch':
         this.handleKillSwitch(ws, payload);
         break;
+
+      // ── Per-session WebSocket management ──
+
+      case 'attach-chat-session': {
+        // Attach this WebSocket to a specific chat session for isolated communication
+        const { chatSessionId, projectId } = payload;
+        if (chatSessionId) {
+          this.attachToChatSession(ws, chatSessionId);
+          this.send(ws, { type: 'chat-session-attached', chatSessionId, projectId });
+
+          // Check for incomplete streaming messages and send recovery info
+          const { chatStore } = await import('./chatStore.js');
+          const incomplete = chatStore.getIncompleteStreamingMessages(projectId, chatSessionId);
+          if (incomplete.length > 0) {
+            this.send(ws, {
+              type: 'chat-session-recovery',
+              chatSessionId,
+              projectId,
+              incompleteMessages: incomplete.map(i => ({
+                messageId: i.message.id,
+                partialContent: i.partialContent,
+                chunkCount: i.chunks.length,
+              })),
+            });
+          }
+        }
+        break;
+      }
+
+      case 'recover-streaming-message': {
+        // Recover a streaming message that was interrupted
+        const { chatStore } = await import('./chatStore.js');
+        const { projectId, sessionId, messageId } = payload;
+
+        const recovered = chatStore.recoverStreamingMessage({ projectId, sessionId, messageId });
+        if (recovered) {
+          this.broadcastToChatSession(sessionId, {
+            type: 'chat-message-recovered',
+            projectId,
+            sessionId,
+            message: recovered,
+          });
+        } else {
+          this.send(ws, { type: 'error', error: 'Failed to recover message' });
+        }
+        break;
+      }
+
+      case 'chat-send': {
+        const { chatStore } = await import('./chatStore.js');
+        const { agentGateway } = await import('./agentGateway.js');
+
+        // Ensure session exists
+        chatStore.migrateIfNeeded(payload.projectId);
+        const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
+
+        // Attach client to this chat session for isolated communication
+        this.attachToChatSession(ws, chatSessionId);
+
+        // Build display content with attachment info
+        let displayContent = payload.content || '';
+        const attachments = payload.attachments || [];
+        if (attachments.length > 0) {
+          const attachmentList = attachments.map(a => `📎 ${a.name}`).join('\n');
+          displayContent = displayContent ? `${displayContent}\n\n${attachmentList}` : attachmentList;
+        }
+
+        // Persist user message
+        const userMsg = chatStore.addMessage({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          role: 'user',
+          content: displayContent,
+          metadata: { mode: payload.mode, attachments },
+        });
+
+        // Broadcast to all clients attached to this chat session
+        this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: userMsg });
+
+        // Also broadcast globally for any listeners (backward compatibility)
+        this.broadcast({ type: 'chat-message', message: userMsg });
+
+        // Dispatch to agent gateway (async — runs in background)
+        // Use per-session broadcast for isolated response delivery
+        agentGateway.handleTask({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          content: payload.content,
+          attachments,
+          mode: payload.mode,
+          tool: payload.tool || 'claude',
+          broadcastFn: (data) => {
+            // Broadcast to chat session clients first (isolated)
+            this.broadcastToChatSession(chatSessionId, data);
+            // Also broadcast globally (backward compatibility)
+            this.broadcast(data);
+          },
+        }).catch(err => {
+          const errMsg = chatStore.addMessage({
+            projectId: payload.projectId,
+            sessionId: chatSessionId,
+            role: 'error',
+            content: `Gateway error: ${err.message}`,
+          });
+          this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: errMsg });
+          this.broadcast({ type: 'chat-message', message: errMsg });
+        });
+        break;
+      }
+
+      case 'chat-approve-plan': {
+        const { agentGateway } = await import('./agentGateway.js');
+        agentGateway.executePlan({
+          projectId: payload.projectId,
+          steps: payload.steps,
+          broadcastFn: (data) => this.broadcast(data),
+        }).catch(err => {
+          console.error('Plan execution error:', err);
+          this.broadcast({
+            type: 'chat-message',
+            message: { id: Date.now().toString(), projectId: payload.projectId, role: 'error', content: `Plan failed: ${err.message}`, createdAt: new Date().toISOString() },
+          });
+        });
+        break;
+      }
+
+      case 'chat-stop': {
+        const { agentGateway } = await import('./agentGateway.js');
+        // Abort by session ID (supports parallel sessions)
+        agentGateway.abort(payload.sessionId || payload.projectId);
+        this.broadcast({ type: 'agent-status', projectId: payload.projectId, busy: false });
+        break;
+      }
 
       default:
         this.sendError(ws, `Unknown message type: ${type}`);
@@ -756,6 +967,7 @@ class TerminalServer {
    */
   handleDisconnect(ws) {
     this.detachClient(ws);
+    this.detachFromChatSession(ws); // Clean up chat session tracking
     this.clients.delete(ws);
     console.log('WebSocket client disconnected');
   }

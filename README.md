@@ -2,6 +2,8 @@
 
 An open-source, containerized AI development environment. Each project runs in its own Docker container with isolated tools, auth, and workspace. Connect your local LLM to generate prompts, review branches, and run autonomous plans — all from one interface accessible across your network.
 
+![StartUpp AI IDE Screenshot](docs/images/ide-screenshot.png)
+
 ## Architecture
 
 ```
