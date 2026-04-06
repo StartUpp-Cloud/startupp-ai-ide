@@ -628,17 +628,24 @@ RULES:
 
   async _cleanContent(displayOutput) {
     let content;
-    if (displayOutput.length < 2000 && !displayOutput.includes('\x1b')) {
+    // Only use LLM cleanup if there are actual escape sequences to clean
+    // Clean JSON-parsed content should NOT be sent to LLM (it mangles long responses)
+    const hasEscapeSequences = displayOutput.includes('\x1b') || displayOutput.includes('\u001b');
+
+    if (!hasEscapeSequences) {
+      // Content is already clean - use as-is regardless of length
       content = displayOutput;
     } else {
+      // Has terminal escape sequences - try to clean with LLM
       try {
         const result = await llmProvider.generateResponse(
           `Clean up this terminal output for a chat UI. Keep ALL content. Use markdown. NEVER use HTML tags.\n\nOutput:\n${displayOutput.slice(-5000)}`,
-          { maxTokens: 2000, temperature: 0.1 }
+          { maxTokens: 4000, temperature: 0.1 }
         );
         content = result.response;
       } catch {
-        content = displayOutput;
+        // Fallback: strip escape sequences manually
+        content = displayOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
       }
     }
     // HTML safety net
