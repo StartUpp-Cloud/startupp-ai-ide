@@ -1415,15 +1415,23 @@ class TerminalServer {
    */
   async _checkForIncompleteResponse(projectId, chatSessionId, chatStore) {
     try {
-      const messages = chatStore.getMessages(projectId, chatSessionId, 5); // Last 5 messages
-      if (!messages || messages.length === 0) return null;
+      const messages = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 10 });
+      if (!messages || messages.length === 0) {
+        console.log(`[terminalServer] No messages found for session ${chatSessionId}`);
+        return null;
+      }
 
-      // Find the most recent assistant message
-      const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
-      if (!lastAssistant) return null;
+      // Find the most recent assistant/agent message
+      const lastAssistant = [...messages].reverse().find(m =>
+        m.role === 'assistant' || m.role === 'agent'
+      );
+      if (!lastAssistant) {
+        console.log(`[terminalServer] No assistant/agent message found in session ${chatSessionId}`);
+        return null;
+      }
 
       const content = lastAssistant.content || '';
-      const lowerContent = content.toLowerCase();
+      console.log(`[terminalServer] Checking last message (${lastAssistant.role}): "${content.slice(0, 80)}..."`);
 
       // Patterns that indicate an incomplete response (waiting for background work)
       const incompletePatterns = [
@@ -1436,10 +1444,12 @@ class TerminalServer {
       ];
 
       const looksIncomplete = incompletePatterns.some(p => p.test(content));
+      console.log(`[terminalServer] Pattern match result: looksIncomplete=${looksIncomplete}`);
 
       // Also check if it was recent (within last 60 minutes)
       const msgTime = new Date(lastAssistant.createdAt || lastAssistant.timestamp);
       const ageMinutes = (Date.now() - msgTime.getTime()) / (1000 * 60);
+      console.log(`[terminalServer] Message age: ${ageMinutes.toFixed(1)} minutes`);
 
       if (looksIncomplete && ageMinutes < 60) {
         // Try to get CLI session ID from session metadata
