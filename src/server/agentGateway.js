@@ -29,8 +29,6 @@ class AgentGateway extends EventEmitter {
   // ── Entry point ──
 
   async handleTask({ projectId, sessionId = null, content, attachments = [], mode, tool = 'claude', broadcastFn }) {
-    this._sessionId = sessionId;
-
     const existing = this._running.get(sessionId);
     if (existing && existing.queue) {
       existing.queue = existing.queue.then(() =>
@@ -45,7 +43,6 @@ class AgentGateway extends EventEmitter {
   }
 
   async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, broadcastFn }) {
-    this._sessionId = sessionId;
     const ctx = { aborted: false, startedAt: Date.now() };
     this._running.set(sessionId, { ...ctx, queue: this._running.get(sessionId)?.queue });
 
@@ -63,18 +60,18 @@ class AgentGateway extends EventEmitter {
 
       if (mode === 'plan') {
         // Plan mode: always send to tool with plan instructions, never auto-execute
-        this._addProgressMessage(projectId, `Asking ${tool} to create a plan...`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `Asking ${tool} to create a plan...`, broadcastFn);
         await this._sendToCliTool(projectId, sessionId, fullContent, tool, broadcastFn, ctx, 'plan');
       } else if (isCapable) {
         // Agent mode + capable LLM: smart routing
         await this._smartRoute(projectId, sessionId, fullContent, mode, tool, broadcastFn, ctx);
       } else {
         // Agent mode + Ollama: everything goes to the CLI tool
-        this._addProgressMessage(projectId, `Sending to ${tool}...`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn);
         await this._sendToCliTool(projectId, sessionId, fullContent, tool, broadcastFn, ctx, 'agent');
       }
     } catch (error) {
-      this._addErrorMessage(projectId, `Error: ${error.message}`, broadcastFn);
+      this._addErrorMessage(projectId, sessionId, `Error: ${error.message}`, broadcastFn);
     } finally {
       this._running.delete(sessionId);
       broadcastFn({ type: 'agent-status', projectId, busy: false });
@@ -181,35 +178,35 @@ RULES:
       const body = response.slice(response.indexOf('\n') + 1).trim();
 
       if (firstLine.startsWith('ANSWER')) {
-        this._addProgressMessage(projectId, `Analyzing your question — I can answer this directly.`, broadcastFn);
-        this._addAgentMessage(projectId, body || response, broadcastFn, { tool: 'local' });
+        this._addProgressMessage(projectId, sessionId, `Analyzing your question — I can answer this directly.`, broadcastFn);
+        this._addAgentMessage(projectId, sessionId, body || response, broadcastFn, { tool: 'local' });
 
       } else if (firstLine.startsWith('COMMAND')) {
         const cmd = body;
         const looksValid = cmd && !cmd.includes('[') && !cmd.includes('NEEDS') && cmd.length < 200;
         if (looksValid) {
-          this._addProgressMessage(projectId, `Running shell command: \`${cmd}\``, broadcastFn);
+          this._addProgressMessage(projectId, sessionId, `Running shell command: \`${cmd}\``, broadcastFn);
           await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx);
         } else {
-          this._addProgressMessage(projectId, `This needs ${tool} — delegating your request...`, broadcastFn);
+          this._addProgressMessage(projectId, sessionId, `This needs ${tool} — delegating your request...`, broadcastFn);
           await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
         }
 
       } else if (firstLine.startsWith('DELEGATE')) {
-        this._addProgressMessage(projectId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn);
         await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
 
       } else {
         const isGarbage = response.includes('NEEDS_USER') || response.includes('[') || response.length < 10;
         if (!isGarbage && response.length < 500 && !response.includes('```')) {
-          this._addAgentMessage(projectId, response, broadcastFn, { tool: 'local' });
+          this._addAgentMessage(projectId, sessionId, response, broadcastFn, { tool: 'local' });
         } else {
-          this._addProgressMessage(projectId, `Routing to ${tool}...`, broadcastFn);
+          this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn);
           await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
         }
       }
     } catch (err) {
-      this._addProgressMessage(projectId, `Routing to ${tool}...`, broadcastFn);
+      this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn);
       await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
     }
   }
@@ -263,7 +260,7 @@ RULES:
       shellSessionId = sess.sessionId;
       if (sess.isNew) await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
-      this._addErrorMessage(projectId, `Failed to start shell: ${err.message}`, broadcastFn);
+      this._addErrorMessage(projectId, sessionId, `Failed to start shell: ${err.message}`, broadcastFn);
       return;
     }
 
@@ -293,9 +290,9 @@ RULES:
         `The user asked: "${originalQuestion}"\nCommand run: ${cmd}\nOutput:\n${display.slice(-3000)}\n\nGive a clean, helpful answer based on this output. Use markdown.`,
         { maxTokens: 500, temperature: 0.1 }
       );
-      this._addAgentMessage(projectId, result.response, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) });
+      this._addAgentMessage(projectId, sessionId, result.response, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) });
     } catch {
-      this._addAgentMessage(projectId, `\`\`\`\n${display}\n\`\`\``, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) });
+      this._addAgentMessage(projectId, sessionId, `\`\`\`\n${display}\n\`\`\``, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) });
     }
   }
 
@@ -346,7 +343,7 @@ RULES:
       });
       // Also send as a progress message for the chat
       if (progress.summary) {
-        this._addProgressMessage(projectId, progress.summary, broadcastFn);
+        this._addProgressMessage(projectId, chatSessionId, progress.summary, broadcastFn);
       }
     };
     jobManager.on('job-progress', jobProgressHandler);
@@ -435,7 +432,7 @@ RULES:
 
         if (result.retry && attempt < MAX_ATTEMPTS) {
           // ── Retry: compaction or context recovery ──
-          this._addProgressMessage(projectId,
+          this._addProgressMessage(projectId, chatSessionId,
             `⚠ ${result.retryReason} — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})...`,
             broadcastFn);
 
@@ -528,7 +525,7 @@ RULES:
     const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode);
     const isFollowUp = !!(cliState?.cliSessionId);
 
-    this._addProgressMessage(projectId,
+    this._addProgressMessage(projectId, chatSessionId,
       isFollowUp ? `↻ Continuing conversation with ${tool}...` : `→ Asking ${tool}...`,
       broadcastFn);
 
@@ -578,11 +575,11 @@ RULES:
             const taskNames = Array.from(pendingBackgroundTasks.values())
               .map(t => t.description)
               .join(', ');
-            this._addProgressMessage(projectId,
+            this._addProgressMessage(projectId, chatSessionId,
               `⏳ Waiting for ${pendingBackgroundTasks.size} agent(s): ${taskNames} (${duration})`,
               broadcastFn);
           } else {
-            this._addProgressMessage(projectId, `⏳ ${tool} is still working... (${duration} since last activity)`, broadcastFn);
+            this._addProgressMessage(projectId, chatSessionId, `⏳ ${tool} is still working... (${duration} since last activity)`, broadcastFn);
           }
         }
 
@@ -624,7 +621,7 @@ RULES:
             description: event.description,
             startedAt: Date.now(),
           });
-          this._addProgressMessage(projectId,
+          this._addProgressMessage(projectId, chatSessionId,
             `🚀 Background agent started: ${event.description}`,
             broadcastFn);
         } else if (event.type === 'task_completed') {
@@ -633,7 +630,7 @@ RULES:
           pendingBackgroundTasks.delete(event.taskId);
           if (task) {
             const elapsed = Math.round((Date.now() - task.startedAt) / 1000);
-            this._addProgressMessage(projectId,
+            this._addProgressMessage(projectId, chatSessionId,
               `✅ Agent completed: ${event.summary || task.description} (${elapsed}s)`,
               broadcastFn);
           }
@@ -641,7 +638,7 @@ RULES:
           if (pendingBackgroundTasks.size === 0 && resultEventSeen) {
             allTasksCompleted = true;
             // All background tasks are done - send follow-up to get final summary
-            this._addProgressMessage(projectId,
+            this._addProgressMessage(projectId, chatSessionId,
               `🔄 All background agents completed. Getting final summary...`,
               broadcastFn);
             // Send a follow-up prompt to Claude to process the results
@@ -663,7 +660,7 @@ RULES:
 
         // If there are pending background tasks, DON'T break - keep waiting
         if (pendingBackgroundTasks.size > 0) {
-          this._addProgressMessage(projectId,
+          this._addProgressMessage(projectId, chatSessionId,
             `⏳ Waiting for ${pendingBackgroundTasks.size} background agent(s) to complete...`,
             broadcastFn);
           // Log which tasks are still pending
@@ -698,7 +695,7 @@ RULES:
         const event = this._parseStreamEvent(cleanChunk);
         if (event) {
           lastProgressTime = now;
-          this._addProgressMessage(projectId, event, broadcastFn);
+          this._addProgressMessage(projectId, chatSessionId, event, broadcastFn);
         }
       }
 
@@ -708,14 +705,14 @@ RULES:
         const fastResponse = this._fastPromptDetect(cleanChunk);
         if (fastResponse !== null) {
           agentShellPool.write(shellSessionId, fastResponse + '\n');
-          this._addProgressMessage(projectId, `✓ Auto-confirmed`, broadcastFn);
+          this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed`, broadcastFn);
         } else {
           const provider = llmProvider.getSettings().provider;
           if (provider !== 'ollama' && this._looksLikePrompt(cleanChunk)) {
-            const autoResponse = await this._smartAutoConfirm(cleanChunk, projectId, broadcastFn);
+            const autoResponse = await this._smartAutoConfirm(cleanChunk, projectId, chatSessionId, broadcastFn);
             if (autoResponse !== null) {
               agentShellPool.write(shellSessionId, autoResponse + '\n');
-              this._addProgressMessage(projectId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
+              this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
             }
           }
         }
@@ -1041,7 +1038,6 @@ RULES:
   // ── Plan execution ──
 
   async executePlan({ projectId, sessionId = null, steps, tool = 'claude', broadcastFn }) {
-    this._sessionId = sessionId;
     const ctx = { aborted: false, startedAt: Date.now() };
     this._running.set(sessionId, { ...ctx, queue: null });
 
@@ -1052,17 +1048,17 @@ RULES:
           title: s.title,
           status: j < i ? 'done' : j === i ? 'running' : 'pending',
         }));
-        this._addProgressMessage(projectId, `Step ${i + 1}/${steps.length}: ${steps[i].title}`, broadcastFn, tasks);
+        this._addProgressMessage(projectId, sessionId, `Step ${i + 1}/${steps.length}: ${steps[i].title}`, broadcastFn, tasks);
         await this._sendToCliTool(projectId, sessionId, steps[i].prompt, tool, broadcastFn, ctx);
         if (ctx.aborted) break;
       }
       if (!ctx.aborted) {
-        this._addAgentMessage(projectId, 'Plan completed.', broadcastFn, {
+        this._addAgentMessage(projectId, sessionId, 'Plan completed.', broadcastFn, {
           tasks: steps.map(s => ({ title: s.title, status: 'done' }))
         });
       }
     } catch (error) {
-      this._addErrorMessage(projectId, `Plan failed: ${error.message}`, broadcastFn);
+      this._addErrorMessage(projectId, sessionId, `Plan failed: ${error.message}`, broadcastFn);
     } finally {
       this._running.delete(sessionId);
       broadcastFn({ type: 'agent-status', projectId, busy: false });
@@ -1139,7 +1135,7 @@ RULES:
    * Use the local LLM to decide how to respond to an ambiguous prompt.
    * Returns the response string, or null if it needs user input.
    */
-  async _smartAutoConfirm(text, projectId, broadcastFn) {
+  async _smartAutoConfirm(text, projectId, sessionId, broadcastFn) {
     const lastBit = text.slice(-500);
     try {
       const result = await llmProvider.generateResponse(
@@ -1162,7 +1158,7 @@ NEEDS_USER`,
       const response = result.response.trim();
       if (response.startsWith('YES:')) {
         const answer = response.slice(4).trim();
-        this._addProgressMessage(projectId, `Auto-confirmed: "${answer || '(enter)'}"`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `Auto-confirmed: "${answer || '(enter)'}"`, broadcastFn);
         return answer;
       }
       return null; // Needs user input
@@ -1432,8 +1428,8 @@ NEEDS_USER`,
       .replace(/\r/g, '');
   }
 
-  _addAgentMessage(projectId, content, broadcastFn, metadata = null) {
-    const sessionId = this._sessionId;
+  _addAgentMessage(projectId, sessionId, content, broadcastFn, metadata = null) {
+    // sessionId is now passed explicitly to avoid concurrency issues
 
     // Generate suggested follow-ups for capable LLMs (async, don't block)
     const provider = llmProvider.getSettings().provider;
@@ -1482,14 +1478,14 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
     return null;
   }
 
-  _addProgressMessage(projectId, content, broadcastFn, tasks = null) {
-    const sessionId = this._sessionId;
+  _addProgressMessage(projectId, sessionId, content, broadcastFn, tasks = null) {
+    // sessionId is now passed explicitly to avoid concurrency issues
     const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks, live: true } });
     broadcastFn({ type: 'chat-progress', projectId, message: msg });
   }
 
-  _addErrorMessage(projectId, content, broadcastFn) {
-    const sessionId = this._sessionId;
+  _addErrorMessage(projectId, sessionId, content, broadcastFn) {
+    // sessionId is now passed explicitly to avoid concurrency issues
     const msg = chatStore.addMessage({ projectId, sessionId, role: 'error', content });
     broadcastFn({ type: 'chat-message', message: msg });
   }
