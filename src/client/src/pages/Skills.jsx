@@ -409,16 +409,54 @@ export default function Skills() {
           )}
         </div>
 
-        {/* Built-in skills notice */}
-        <div className="mt-8 p-4 bg-surface-850 rounded-xl border border-surface-700">
-          <div className="flex items-start gap-3">
-            <Package size={16} className="text-surface-500 mt-0.5" />
-            <div>
-              <h3 className="text-sm font-medium text-surface-300">About Skills</h3>
-              <p className="text-xs text-surface-500 mt-1">
-                Skills extend AI capabilities with custom rules, conventions, and commands.
-                Built-in skills cannot be uninstalled. Install custom skills from URLs pointing to JSON skill files.
-              </p>
+        {/* About Skills section */}
+        <div className="mt-8 space-y-4">
+          {/* Active skills indicator */}
+          {projects.some(p => (projectSkills[p.id] || []).length > 0) && (
+            <div className="p-4 bg-primary-500/10 rounded-xl border border-primary-500/20">
+              <div className="flex items-start gap-3">
+                <Zap size={16} className="text-primary-400 mt-0.5" />
+                <div>
+                  <h3 className="text-sm font-medium text-primary-300">Skills Active</h3>
+                  <p className="text-xs text-surface-400 mt-1">
+                    Enabled skills are automatically injected into every AI prompt for their respective projects.
+                    The AI coding assistant will follow the rules and conventions defined in active skills.
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {projects.filter(p => (projectSkills[p.id] || []).length > 0).map(project => (
+                      <span key={project.id} className="inline-flex items-center gap-1.5 px-2 py-1 bg-surface-800 rounded text-[10px]">
+                        <span className="font-medium text-surface-200">{project.name}</span>
+                        <span className="text-primary-400">{(projectSkills[project.id] || []).length} active</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* General info */}
+          <div className="p-4 bg-surface-850 rounded-xl border border-surface-700">
+            <div className="flex items-start gap-3">
+              <Package size={16} className="text-surface-500 mt-0.5" />
+              <div>
+                <h3 className="text-sm font-medium text-surface-300">About Skills</h3>
+                <p className="text-xs text-surface-500 mt-1">
+                  Skills extend AI capabilities with custom rules, conventions, and commands.
+                  Install skills from public GitHub repos or any URL pointing to .md or .json files.
+                  Built-in skills cannot be uninstalled.
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-3 text-[10px]">
+                  <div className="p-2 bg-surface-800 rounded">
+                    <div className="text-surface-400 mb-1">Install from GitHub</div>
+                    <code className="text-surface-500">github.com/user/repo/blob/main/skill.md</code>
+                  </div>
+                  <div className="p-2 bg-surface-800 rounded">
+                    <div className="text-surface-400 mb-1">Supported formats</div>
+                    <code className="text-surface-500">.md (Markdown) or .json</code>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -427,8 +465,8 @@ export default function Skills() {
       {/* Install Modal */}
       {showInstallModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-surface-850 rounded-xl border border-surface-700 w-full max-w-md shadow-xl">
-            <div className="flex items-center justify-between p-4 border-b border-surface-700">
+          <div className="bg-surface-850 rounded-xl border border-surface-700 w-full max-w-lg shadow-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-4 border-b border-surface-700 sticky top-0 bg-surface-850">
               <h2 className="text-sm font-semibold flex items-center gap-2">
                 <Download size={16} className="text-primary-400" />
                 Install Skill from URL
@@ -443,15 +481,18 @@ export default function Skills() {
 
             <div className="p-4 space-y-4">
               <div>
-                <label className="text-[11px] text-surface-500 uppercase mb-1 block">Skill JSON URL</label>
+                <label className="text-[11px] text-surface-500 uppercase mb-1 block">Skill URL (JSON or Markdown)</label>
                 <input
                   type="url"
                   value={installUrl}
                   onChange={e => setInstallUrl(e.target.value)}
-                  placeholder="https://example.com/skill.json"
+                  placeholder="https://github.com/user/repo/blob/main/skill.md"
                   className="w-full bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 outline-none focus:border-primary-500/50"
                   disabled={installing}
                 />
+                <p className="text-[10px] text-surface-500 mt-1">
+                  GitHub URLs are automatically converted to raw format
+                </p>
               </div>
 
               {installError && (
@@ -460,21 +501,69 @@ export default function Skills() {
                 </div>
               )}
 
-              <div className="text-xs text-surface-500">
-                <p className="mb-2">The URL should point to a JSON file with the skill definition:</p>
-                <pre className="bg-surface-800 p-2 rounded text-[10px] overflow-x-auto">
+              {/* Format tabs */}
+              <div className="space-y-3">
+                <p className="text-xs text-surface-400">Supports both Markdown (.md) and JSON formats:</p>
+
+                {/* Markdown format */}
+                <div className="bg-surface-800 rounded-lg border border-surface-700 overflow-hidden">
+                  <div className="px-3 py-1.5 bg-surface-750 border-b border-surface-700 flex items-center gap-2">
+                    <span className="text-[10px] font-medium text-primary-400">MARKDOWN FORMAT</span>
+                    <span className="text-[10px] text-surface-500">(Recommended)</span>
+                  </div>
+                  <pre className="p-3 text-[10px] text-surface-300 overflow-x-auto">
+{`---
+name: My Skill
+description: What this skill does
+version: 1.0.0
+author: Your Name
+category: general
+---
+
+# Rules
+
+- Always follow this pattern
+- Use this convention
+
+# Conventions
+
+Additional guidelines and best practices
+that the AI should follow...`}
+                  </pre>
+                </div>
+
+                {/* JSON format */}
+                <div className="bg-surface-800 rounded-lg border border-surface-700 overflow-hidden">
+                  <div className="px-3 py-1.5 bg-surface-750 border-b border-surface-700">
+                    <span className="text-[10px] font-medium text-surface-400">JSON FORMAT</span>
+                  </div>
+                  <pre className="p-3 text-[10px] text-surface-300 overflow-x-auto">
 {`{
   "name": "My Skill",
   "description": "What this skill does",
   "version": "1.0.0",
-  "category": "general",
   "rules": ["Rule 1", "Rule 2"]
 }`}
-                </pre>
+                  </pre>
+                </div>
+              </div>
+
+              {/* Info box */}
+              <div className="p-3 bg-primary-500/10 border border-primary-500/20 rounded-lg">
+                <div className="flex items-start gap-2">
+                  <Zap size={14} className="text-primary-400 mt-0.5 flex-shrink-0" />
+                  <div className="text-xs text-surface-300">
+                    <p className="font-medium text-primary-300 mb-1">When enabled, skills are always active</p>
+                    <p className="text-surface-400">
+                      Enabled skills inject their rules and conventions into every AI interaction for the project,
+                      ensuring consistent behavior.
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div className="flex justify-end gap-2 p-4 border-t border-surface-700">
+            <div className="flex justify-end gap-2 p-4 border-t border-surface-700 sticky bottom-0 bg-surface-850">
               <button
                 onClick={() => { setShowInstallModal(false); setInstallError(null); }}
                 className="px-3 py-1.5 text-sm text-surface-400 hover:text-surface-200"
@@ -486,7 +575,7 @@ export default function Skills() {
                 disabled={installing || !installUrl.trim()}
                 className="flex items-center gap-2 px-4 py-1.5 bg-primary-500 hover:bg-primary-600 text-surface-950 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
               >
-                {installing ? 'Installing...' : 'Install'}
+                {installing ? 'Installing...' : 'Install Skill'}
               </button>
             </div>
           </div>

@@ -8,6 +8,153 @@ import { findProjectById, updateProject } from "./models/Project.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * Convert a GitHub blob/tree URL to raw.githubusercontent.com URL
+ */
+function convertGitHubUrl(url) {
+  // Handle github.com/user/repo/blob/branch/path URLs
+  const blobMatch = url.match(
+    /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/
+  );
+  if (blobMatch) {
+    const [, owner, repo, branch, filePath] = blobMatch;
+    return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filePath}`;
+  }
+
+  // Handle github.com/user/repo/raw/branch/path URLs
+  const rawMatch = url.match(
+    /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/raw\/([^/]+)\/(.+)$/
+  );
+  if (rawMatch) {
+    const [, owner, repo, branch, filePath] = rawMatch;
+    return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filePath}`;
+  }
+
+  // Already a raw URL or other URL
+  return url;
+}
+
+/**
+ * Parse YAML-like frontmatter from markdown content
+ */
+function parseFrontmatter(content) {
+  const frontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+  if (!frontmatterMatch) {
+    return { frontmatter: {}, body: content };
+  }
+
+  const frontmatterStr = frontmatterMatch[1];
+  const body = content.slice(frontmatterMatch[0].length);
+
+  // Simple YAML parser for key: value pairs
+  const frontmatter = {};
+  for (const line of frontmatterStr.split("\n")) {
+    const match = line.match(/^(\w+):\s*(.*)$/);
+    if (match) {
+      const [, key, value] = match;
+      // Remove quotes if present
+      frontmatter[key] = value.replace(/^["']|["']$/g, "").trim();
+    }
+  }
+
+  return { frontmatter, body };
+}
+
+/**
+ * Parse a markdown file into a skill object
+ * Supports frontmatter for metadata and sections for rules/conventions
+ */
+function parseMarkdownSkill(content, sourceUrl = null) {
+  const { frontmatter, body } = parseFrontmatter(content);
+
+  const skill = {
+    name: frontmatter.name || "Untitled Skill",
+    description: frontmatter.description || "",
+    version: frontmatter.version || "1.0.0",
+    author: frontmatter.author || "Unknown",
+    category: frontmatter.category || "general",
+    icon: frontmatter.icon || "puzzle",
+    rules: [],
+    conventions: "",
+    promptTemplates: [],
+    quickCommands: [],
+    triggers: [],
+    sourceUrl,
+  };
+
+  // Parse sections from markdown body
+  const sections = body.split(/^#+\s+/m).filter(Boolean);
+
+  for (const section of sections) {
+    const lines = section.split("\n");
+    const title = lines[0].toLowerCase().trim();
+    const sectionContent = lines.slice(1).join("\n").trim();
+
+    if (title.includes("rule")) {
+      // Parse rules from bullet points
+      const ruleLines = sectionContent.split("\n");
+      for (const line of ruleLines) {
+        const ruleMatch = line.match(/^[-*]\s+(.+)$/);
+        if (ruleMatch) {
+          skill.rules.push(ruleMatch[1].trim());
+        }
+      }
+    } else if (title.includes("convention")) {
+      skill.conventions = sectionContent;
+    } else if (title.includes("template")) {
+      // Parse prompt templates (sub-sections with ## or content)
+      const templateSections = sectionContent.split(/^##\s+/m).filter(Boolean);
+      for (const tmpl of templateSections) {
+        const tmplLines = tmpl.split("\n");
+        const tmplName = tmplLines[0].trim();
+        const tmplContent = tmplLines.slice(1).join("\n").trim();
+        if (tmplName && tmplContent) {
+          skill.promptTemplates.push({ name: tmplName, template: tmplContent });
+        }
+      }
+    } else if (title.includes("command")) {
+      // Parse quick commands: - `name`: description
+      const cmdLines = sectionContent.split("\n");
+      for (const line of cmdLines) {
+        const cmdMatch = line.match(/^[-*]\s+`([^`]+)`[:\s]+(.+)$/);
+        if (cmdMatch) {
+          skill.quickCommands.push({
+            name: cmdMatch[1].trim(),
+            command: cmdMatch[2].trim(),
+          });
+        }
+      }
+    } else if (title.includes("trigger") || title.includes("pattern")) {
+      // Parse file triggers
+      const triggerLines = sectionContent.split("\n");
+      for (const line of triggerLines) {
+        const triggerMatch = line.match(/^[-*]\s+`([^`]+)`[:\s]*(.*)$/);
+        if (triggerMatch) {
+          skill.triggers.push({
+            filePattern: triggerMatch[1].trim(),
+            description: triggerMatch[2].trim() || "",
+          });
+        }
+      }
+    }
+  }
+
+  // If no sections were found, treat the entire body as conventions/rules
+  if (skill.rules.length === 0 && !skill.conventions) {
+    // Check if it's a list of rules
+    const lines = body.split("\n");
+    const bulletLines = lines.filter((l) => l.match(/^[-*]\s+/));
+    if (bulletLines.length > 0) {
+      skill.rules = bulletLines.map((l) => l.replace(/^[-*]\s+/, "").trim());
+    } else {
+      // Treat entire content as conventions
+      skill.conventions = body.trim();
+    }
+  }
+
+  return skill;
+}
+
 const VALID_CATEGORIES = [
   "testing",
   "deployment",
@@ -254,14 +401,19 @@ class SkillManager {
   }
 
   /**
-   * Install a skill from a URL. Fetches the JSON and delegates to install().
+   * Install a skill from a URL. Supports both JSON and Markdown files.
+   * Automatically converts GitHub blob URLs to raw URLs.
    */
   async installFromUrl(url) {
     if (!url || typeof url !== "string") {
       throw new Error("A valid URL is required");
     }
 
-    const response = await fetch(url);
+    // Convert GitHub URLs to raw URLs
+    const rawUrl = convertGitHubUrl(url.trim());
+    const isMarkdown = rawUrl.endsWith(".md") || rawUrl.endsWith(".markdown");
+
+    const response = await fetch(rawUrl);
     if (!response.ok) {
       throw new Error(
         `Failed to fetch skill from URL: ${response.status} ${response.statusText}`,
@@ -269,22 +421,45 @@ class SkillManager {
     }
 
     const contentType = response.headers.get("content-type") || "";
-    if (
-      !contentType.includes("application/json") &&
-      !contentType.includes("text/plain") &&
-      !url.endsWith(".json")
-    ) {
-      throw new Error(
-        "URL does not appear to serve JSON. Expected content-type application/json.",
-      );
-    }
+    const content = await response.text();
 
     let skillData;
-    try {
-      skillData = await response.json();
-    } catch {
-      throw new Error("Failed to parse skill JSON from URL");
+
+    if (isMarkdown || contentType.includes("text/markdown")) {
+      // Parse as markdown skill
+      skillData = parseMarkdownSkill(content, url);
+    } else if (
+      contentType.includes("application/json") ||
+      contentType.includes("text/plain") ||
+      rawUrl.endsWith(".json")
+    ) {
+      // Parse as JSON skill
+      try {
+        skillData = JSON.parse(content);
+      } catch {
+        throw new Error("Failed to parse skill JSON from URL");
+      }
+    } else {
+      // Try to auto-detect format
+      const trimmed = content.trim();
+      if (trimmed.startsWith("{")) {
+        try {
+          skillData = JSON.parse(content);
+        } catch {
+          throw new Error("Failed to parse skill JSON from URL");
+        }
+      } else if (trimmed.startsWith("---") || trimmed.startsWith("#")) {
+        // Looks like markdown
+        skillData = parseMarkdownSkill(content, url);
+      } else {
+        throw new Error(
+          "Could not detect skill format. URL should point to a .json or .md file.",
+        );
+      }
     }
+
+    // Store the source URL for reference
+    skillData.sourceUrl = url;
 
     return this.install(skillData);
   }
