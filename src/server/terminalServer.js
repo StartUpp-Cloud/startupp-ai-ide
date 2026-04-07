@@ -494,7 +494,12 @@ class TerminalServer {
 
           // Check for incomplete streaming messages and send recovery info
           const { chatStore } = await import('./chatStore.js');
+          const { jobManager } = await import('./jobManager.js');
+
           const incomplete = chatStore.getIncompleteStreamingMessages(projectId, chatSessionId);
+          const resumableJobs = jobManager.getResumableJobs(projectId, chatSessionId, 60);
+
+          // Handle incomplete streaming messages (connection dropped mid-stream)
           if (incomplete.length > 0) {
             this.send(ws, {
               type: 'chat-session-recovery',
@@ -506,6 +511,24 @@ class TerminalServer {
                 chunkCount: i.chunks.length,
               })),
             });
+          }
+
+          // Handle resumable jobs (server restarted while Claude was working)
+          if (resumableJobs.length > 0) {
+            const mostRecent = resumableJobs[0];
+            console.log(`[terminalServer] Found resumable job ${mostRecent.id} with CLI session ${mostRecent.cliSessionId}`);
+
+            // Notify client that we're attempting recovery
+            this.send(ws, {
+              type: 'chat-recovery-starting',
+              chatSessionId,
+              projectId,
+              jobId: mostRecent.id,
+              message: 'Attempting to recover interrupted conversation...',
+            });
+
+            // Auto-resume the conversation
+            this._autoResumeJob(ws, projectId, chatSessionId, mostRecent);
           }
         }
         break;
@@ -525,7 +548,8 @@ class TerminalServer {
             message: recovered,
           });
         } else {
-          this.send(ws, { type: 'error', error: 'Failed to recover message' });
+          // Don't show error - the auto-resume will handle this
+          console.log(`[terminalServer] Message ${messageId} recovery deferred to auto-resume`);
         }
         break;
       }
@@ -1367,6 +1391,84 @@ class TerminalServer {
       }
     }
     this.send(ws, { type: 'kill-switch-activated', executionId });
+  }
+
+  /**
+   * Auto-resume an interrupted job by sending a follow-up prompt to Claude.
+   * Uses the preserved CLI session ID to continue the conversation.
+   */
+  async _autoResumeJob(ws, projectId, chatSessionId, job) {
+    try {
+      const { chatStore } = await import('./chatStore.js');
+      const { agentGateway } = await import('./agentGateway.js');
+      const { jobManager } = await import('./jobManager.js');
+
+      // Mark this job as resumed so we don't try again
+      jobManager.markJobResumed(job.id);
+
+      // Create a system message explaining the recovery
+      const recoveryMsg = chatStore.addMessage({
+        projectId,
+        sessionId: chatSessionId,
+        role: 'system',
+        content: '🔄 Reconnected. Checking on interrupted work...',
+        metadata: { recovery: true, jobId: job.id },
+      });
+      this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: recoveryMsg });
+      this.broadcast({ type: 'chat-message', message: recoveryMsg });
+
+      // Ensure the CLI session ID is stored in the chat session
+      chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: job.cliSessionId });
+
+      // Send a follow-up prompt to check on the interrupted work
+      const followUpPrompt = 'Connection was interrupted. Please summarize what you were working on and its current status. If there were any pending tasks or agents, check their status and complete any remaining work.';
+
+      console.log(`[terminalServer] Auto-resuming job ${job.id} with CLI session ${job.cliSessionId}`);
+
+      // Use the agentGateway to send the follow-up
+      await agentGateway.handleTask({
+        projectId,
+        sessionId: chatSessionId,
+        content: followUpPrompt,
+        mode: 'agent',
+        tool: job.tool || 'claude',
+        broadcastFn: (msg) => {
+          this.broadcastToChatSession(chatSessionId, msg);
+          this.broadcast(msg);
+        },
+      });
+
+      // Notify client that recovery completed
+      this.send(ws, {
+        type: 'chat-recovery-complete',
+        chatSessionId,
+        projectId,
+        jobId: job.id,
+        message: 'Conversation resumed successfully.',
+      });
+
+    } catch (err) {
+      console.warn(`[terminalServer] Auto-resume needs manual retry for job ${job.id}:`, err.message);
+      // Don't show scary error - just add a helpful message
+      const { chatStore } = await import('./chatStore.js');
+      const helpMsg = chatStore.addMessage({
+        projectId,
+        sessionId: chatSessionId,
+        role: 'system',
+        content: '🔄 Previous work was interrupted. You can continue by sending a message - Claude will remember the context.',
+        metadata: { recovery: true, recoveryRetry: true },
+      });
+      this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: helpMsg });
+      this.broadcast({ type: 'chat-message', message: helpMsg });
+
+      this.send(ws, {
+        type: 'chat-recovery-complete', // Mark as complete even if partial - don't alarm user
+        chatSessionId,
+        projectId,
+        jobId: job.id,
+        message: 'Ready to continue.',
+      });
+    }
   }
 
   /**

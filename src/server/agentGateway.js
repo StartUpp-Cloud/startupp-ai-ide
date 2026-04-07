@@ -540,6 +540,14 @@ RULES:
     let lastProgressTime = 0;
     let resultEventSeen = false;
 
+    // ── Background task tracking ──
+    // When Claude launches agents with run_in_background:true, it may return
+    // intermediate results while waiting. We need to track these tasks and
+    // continue waiting until they all complete.
+    const pendingBackgroundTasks = new Map(); // task_id -> { description, startedAt }
+    let lastResultText = null; // Store intermediate result text
+    let allTasksCompleted = false;
+
     // Support operations up to 60 minutes (1800 rounds × 2s = 60 min)
     // Actual timeout is managed by JobManager based on activity
     const MAX_IDLE = 1800;
@@ -561,7 +569,18 @@ RULES:
           const mins = Math.floor(silenceMs / 60000);
           const secs = Math.floor((silenceMs % 60000) / 1000);
           const duration = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-          this._addProgressMessage(projectId, `⏳ ${tool} is still working... (${duration} since last activity)`, broadcastFn);
+
+          // Show background agent status if waiting for them
+          if (pendingBackgroundTasks.size > 0) {
+            const taskNames = Array.from(pendingBackgroundTasks.values())
+              .map(t => t.description)
+              .join(', ');
+            this._addProgressMessage(projectId,
+              `⏳ Waiting for ${pendingBackgroundTasks.size} agent(s): ${taskNames} (${duration})`,
+              broadcastFn);
+          } else {
+            this._addProgressMessage(projectId, `⏳ ${tool} is still working... (${duration} since last activity)`, broadcastFn);
+          }
         }
 
         // Check for completion via shell prompt or result event
@@ -593,10 +612,66 @@ RULES:
       const cleanChunk = this._stripAnsi(chunk);
       const cleanTotal = this._stripAnsi(totalOutput);
 
+      // ── Parse background task events ──
+      const taskEvents = this._parseTaskEvents(cleanChunk);
+      for (const event of taskEvents) {
+        if (event.type === 'task_started') {
+          console.log(`[agentGateway] Background task STARTED: ${event.taskId} - ${event.description}`);
+          pendingBackgroundTasks.set(event.taskId, {
+            description: event.description,
+            startedAt: Date.now(),
+          });
+          this._addProgressMessage(projectId,
+            `🚀 Background agent started: ${event.description}`,
+            broadcastFn);
+        } else if (event.type === 'task_completed') {
+          console.log(`[agentGateway] Background task COMPLETED: ${event.taskId} - ${event.summary || 'done'}`);
+          const task = pendingBackgroundTasks.get(event.taskId);
+          pendingBackgroundTasks.delete(event.taskId);
+          if (task) {
+            const elapsed = Math.round((Date.now() - task.startedAt) / 1000);
+            this._addProgressMessage(projectId,
+              `✅ Agent completed: ${event.summary || task.description} (${elapsed}s)`,
+              broadcastFn);
+          }
+          // Check if all background tasks are now done
+          if (pendingBackgroundTasks.size === 0 && resultEventSeen) {
+            allTasksCompleted = true;
+            // All background tasks are done - send follow-up to get final summary
+            this._addProgressMessage(projectId,
+              `🔄 All background agents completed. Getting final summary...`,
+              broadcastFn);
+            // Send a follow-up prompt to Claude to process the results
+            const followUpCmd = this._buildToolCommand(tool, 'All background agents have completed. Please summarize the results and let me know what was done.', chatSessionId, projectId, mode);
+            agentShellPool.write(shellSessionId, followUpCmd + '\n');
+            resultEventSeen = false; // Reset to wait for the new result
+          }
+        }
+      }
+
       // ── Event-driven completion: look for {"type":"result"} ──
       if (cleanChunk.includes('"type":"result"') || cleanChunk.includes('"type": "result"')) {
         resultEventSeen = true;
-        // Wait briefly for trailing output (shell prompt)
+        // Extract the result text for checking
+        const resultMatch = cleanChunk.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (resultMatch) {
+          lastResultText = resultMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+        }
+
+        // If there are pending background tasks, DON'T break - keep waiting
+        if (pendingBackgroundTasks.size > 0) {
+          this._addProgressMessage(projectId,
+            `⏳ Waiting for ${pendingBackgroundTasks.size} background agent(s) to complete...`,
+            broadcastFn);
+          // Log which tasks are still pending
+          for (const [taskId, task] of pendingBackgroundTasks) {
+            console.log(`[agentGateway] Still waiting for task ${taskId}: ${task.description}`);
+          }
+          // Continue waiting - don't break
+          continue;
+        }
+
+        // No pending tasks - wait briefly for trailing output (shell prompt)
         const trailing = await this._waitForOutput(shellSessionId, ctx, 1500);
         if (trailing) {
           totalOutput += trailing;
@@ -1081,6 +1156,50 @@ NEEDS_USER`,
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Parse task lifecycle events from stream-json output.
+   * Tracks background agents launched with run_in_background:true.
+   *
+   * Events:
+   * - task_started: {"type":"system","subtype":"task_started","task_id":"xxx","description":"..."}
+   * - task_notification (completed): {"type":"system","subtype":"task_notification","task_id":"xxx","status":"completed","summary":"..."}
+   */
+  _parseTaskEvents(chunk) {
+    const events = [];
+    const lines = chunk.split('\n');
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) continue;
+
+      try {
+        const json = JSON.parse(trimmed);
+
+        // Background task started
+        if (json.type === 'system' && json.subtype === 'task_started') {
+          events.push({
+            type: 'task_started',
+            taskId: json.task_id,
+            description: json.description || 'Background agent',
+            toolUseId: json.tool_use_id,
+          });
+        }
+
+        // Background task completed
+        if (json.type === 'system' && json.subtype === 'task_notification' && json.status === 'completed') {
+          events.push({
+            type: 'task_completed',
+            taskId: json.task_id,
+            summary: json.summary,
+            toolUseId: json.tool_use_id,
+          });
+        }
+      } catch {}
+    }
+
+    return events;
   }
 
   /**

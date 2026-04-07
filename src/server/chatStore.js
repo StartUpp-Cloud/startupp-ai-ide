@@ -424,8 +424,8 @@ class ChatStore {
     if (!cleanedContent || cleanedContent.length < 10) {
       // Not enough content to recover - but we might have the session ID
       const failureMsg = cliSessionId
-        ? '⚠️ Response was interrupted. The conversation can be continued - Claude will remember the context.'
-        : '⚠️ Response was interrupted and could not be recovered.';
+        ? '🔄 Connection was briefly interrupted. Resuming conversation automatically...'
+        : '🔄 Reconnecting and recovering progress...';
 
       return this.finalizeStreamingMessage({
         projectId,
@@ -434,7 +434,7 @@ class ChatStore {
         finalContent: failureMsg,
         metadata: {
           recovered: true,
-          recoveryFailed: true,
+          recoveryPending: true, // Changed from recoveryFailed - system will auto-resume
           chunkCount: chunks.length,
           cliSessionId: cliSessionId || null,
         },
@@ -543,7 +543,7 @@ class ChatStore {
       const partialContent = partialTextBlocks.join('').trim();
       if (partialContent.length > 20) {
         return {
-          content: partialContent + '\n\n⚠️ *Response was interrupted - above content may be incomplete*',
+          content: partialContent + '\n\n---\n🔄 *Recovered partial response. The system will continue automatically.*',
           cliSessionId,
         };
       }

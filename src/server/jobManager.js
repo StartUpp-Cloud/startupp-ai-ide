@@ -366,6 +366,53 @@ class JobManager extends EventEmitter {
   }
 
   /**
+   * Get resumable jobs for a session (recently interrupted with CLI session ID).
+   * These are jobs that can be continued via --resume.
+   * @param {string} projectId
+   * @param {string} sessionId - Chat session ID
+   * @param {number} maxAgeMinutes - Only return jobs interrupted within this window
+   * @returns {Array} Jobs that can be resumed
+   */
+  getResumableJobs(projectId, sessionId, maxAgeMinutes = 60) {
+    const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000).toISOString();
+    const jobs = [];
+    const files = fs.readdirSync(JOBS_DIR).filter(f => f.endsWith('.json'));
+
+    for (const file of files) {
+      try {
+        const job = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, file), 'utf-8'));
+        // Check if this job belongs to the session, has a CLI session ID, and is recent
+        if (
+          job.projectId === projectId &&
+          job.sessionId === sessionId &&
+          job.cliSessionId &&
+          job.status === 'failed' &&
+          job.completedAt > cutoff &&
+          job.error?.includes('resumed') // Only jobs marked as resumable
+        ) {
+          jobs.push(job);
+        }
+      } catch {}
+    }
+
+    return jobs.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+  }
+
+  /**
+   * Mark a job as being resumed (so we don't try to resume it again)
+   */
+  markJobResumed(jobId) {
+    const job = this.getJob(jobId);
+    if (job) {
+      job.status = 'resumed';
+      job.error = 'This job was automatically resumed after reconnection.';
+      this._saveJob(job);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Get job output
    */
   getJobOutput(jobId, tail = 50000) {
