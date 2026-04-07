@@ -82,10 +82,10 @@ class TerminalServer {
       }
     }
 
-    // Mirror assistant/error messages to Slack thread
+    // Mirror agent/assistant/error messages to Slack thread
     if (slackService.connected && message?.type === 'chat-message' && message.message) {
       const msg = message.message;
-      if ((msg.role === 'assistant' || msg.role === 'error') && msg.content && msg.projectId) {
+      if ((msg.role === 'agent' || msg.role === 'assistant' || msg.role === 'error') && msg.content && msg.projectId) {
         slackService.postToThread(msg.projectId, chatSessionId, msg.content).catch(() => {});
       }
     }
