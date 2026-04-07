@@ -481,35 +481,42 @@ export default function IDE() {
         {/* ── Center: Chat ── */}
         {/* Render cached ChatPanels - keeps them mounted for instant switching */}
         <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, height: '100%', width: '100%' }}>
-          {cachedProjectIds.map(projectId => (
-            <div
-              key={projectId}
-              style={{
-                display: projectId === selectedProjectId ? 'flex' : 'none',
-                flexDirection: 'column',
-                overflow: 'hidden',
-                minHeight: 0,
-                flex: '1 1 0%',
-                height: '100%',
-              }}
-            >
-              <ChatPanel
-                projectId={projectId}
-                wsRef={chatWsRef}
-                mode={agentMode}
-                tool={selectedTool}
-                isActive={projectId === selectedProjectId}
-              />
-            </div>
-          ))}
-          {/* Show empty state if no project selected */}
-          {!selectedProjectId && (
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <div className="text-surface-500 text-center">
-                <p className="text-sm">Select a project to start chatting</p>
+          {/* Sessions container - position relative with flex:1 to fill available space */}
+          <div style={{ position: 'relative', flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}>
+            {cachedProjectIds.map(projectId => (
+              <div
+                key={projectId}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  overflow: 'hidden',
+                  visibility: projectId === selectedProjectId ? 'visible' : 'hidden',
+                  pointerEvents: projectId === selectedProjectId ? 'auto' : 'none',
+                }}
+              >
+                <ChatPanel
+                  projectId={projectId}
+                  wsRef={chatWsRef}
+                  mode={agentMode}
+                  tool={selectedTool}
+                  isActive={projectId === selectedProjectId}
+                />
               </div>
-            </div>
-          )}
+            ))}
+            {/* Show empty state if no project selected */}
+            {!selectedProjectId && (
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <div className="text-surface-500 text-center">
+                  <p className="text-sm">Select a project to start chatting</p>
+                </div>
+              </div>
+            )}
+          </div>
           <InternalConsole projectId={selectedProjectId} wsRef={chatWsRef} />
         </div>
 

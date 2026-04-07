@@ -547,7 +547,7 @@ function ChatSessionContent({
   return (
     <div
       style={{
-        display: isVisible ? 'flex' : 'none',
+        display: 'flex',
         flexDirection: 'column',
         flex: '1 1 0%',
         minHeight: 0,
