@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
 import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal } from 'lucide-react';
@@ -26,14 +26,12 @@ function formatJobProgress(progress) {
   let text = `${emoji} ${progress.status.charAt(0).toUpperCase() + progress.status.slice(1)}`;
 
   if (progress.detail) {
-    // Truncate long details
     const detail = progress.detail.length > 60
       ? progress.detail.slice(0, 60) + '...'
       : progress.detail;
     text += `: ${detail}`;
   }
 
-  // Add LLM summary if available
   if (progress.summary) {
     text = progress.summary;
   }
@@ -43,7 +41,6 @@ function formatJobProgress(progress) {
 
 /**
  * Working indicator with live timer and stop button.
- * Shows as a single message that counts up, not spammed progress messages.
  */
 function WorkingIndicator({ wsRef, projectId, sessionId }) {
   const [elapsed, setElapsed] = useState(0);
@@ -58,14 +55,12 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
     return () => clearInterval(interval);
   }, []);
 
-  // Listen for agent shell output to show live stream
   useEffect(() => {
     if (!wsRef?.current) return;
     const handler = (event) => {
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
-      if (msg.type === 'agent-shell-output') {
-        // Strip ANSI codes and clean up for display
+      if (msg.type === 'agent-shell-output' && (!msg.sessionId || msg.sessionId === sessionId)) {
         const clean = msg.data
           .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
           .replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '')
@@ -73,7 +68,6 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
           .replace(/\r/g, '');
         setLiveOutput(prev => {
           const combined = prev + clean;
-          // Keep last 3000 chars
           return combined.length > 3000 ? combined.slice(-3000) : combined;
         });
       }
@@ -81,9 +75,8 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
     const ws = wsRef.current;
     ws.addEventListener('message', handler);
     return () => ws.removeEventListener('message', handler);
-  }, [wsRef]);
+  }, [wsRef, sessionId]);
 
-  // Auto-scroll the live output
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
@@ -101,15 +94,14 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
     return `${Math.floor(s / 60)}m ${s % 60}s`;
   };
 
-  // Extract meaningful lines from the output (skip JSON, show actions)
   const getDisplayLines = () => {
     if (!liveOutput) return [];
     return liveOutput.split('\n')
       .filter(l => {
         const t = l.trim();
         if (!t) return false;
-        if (t.startsWith('{') && t.includes('"type"')) return false; // Skip JSON events
-        if (t.startsWith('claude -p')) return false; // Skip command echo
+        if (t.startsWith('{') && t.includes('"type"')) return false;
+        if (t.startsWith('claude -p')) return false;
         return true;
       })
       .slice(-8);
@@ -120,7 +112,6 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
   return (
     <div className="flex justify-start mb-3 px-3">
       <div className="w-full max-w-[85%] rounded-lg border border-surface-700/30 bg-surface-800/40">
-        {/* Header */}
         <div className="flex items-center gap-3 px-3 py-2">
           <Bot size={13} className="text-primary-400" />
           <div className="flex items-center gap-1.5">
@@ -144,12 +135,8 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
           </button>
         </div>
 
-        {/* Live output stream */}
         {showLive && displayLines.length > 0 && (
-          <div
-            ref={outputRef}
-            className="px-3 pb-2 max-h-32 overflow-y-auto"
-          >
+          <div ref={outputRef} className="px-3 pb-2 max-h-32 overflow-y-auto">
             <div className="font-mono text-[10px] text-surface-500 space-y-0.5">
               {displayLines.map((line, i) => (
                 <div key={i} className="truncate">{line}</div>
@@ -162,121 +149,84 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
   );
 }
 
-export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true }) {
+/**
+ * Individual session content - manages its own state independently.
+ * Stays mounted when hidden to preserve scroll position and continue receiving updates.
+ */
+function ChatSessionContent({
+  projectId,
+  sessionId,
+  wsRef,
+  mode,
+  tool,
+  isVisible,
+  onSessionUpdate,
+}) {
   const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
   const [searchResults, setSearchResults] = useState(null);
-  const messagesEndRef = useRef(null);
-
-  // Session state
-  const [sessions, setSessions] = useState([]);
-  const [activeSessionId, setActiveSessionId] = useState(null);
-  const [openTabs, setOpenTabs] = useState([]); // Session IDs that are visible as tabs
-  const [showSessionList, setShowSessionList] = useState(false);
-  const sessionListRef = useRef(null);
-
-  // Close session dropdown on outside click
-  useEffect(() => {
-    const handler = (e) => {
-      if (sessionListRef.current && !sessionListRef.current.contains(e.target)) {
-        setShowSessionList(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  // Load sessions when project changes
-  useEffect(() => {
-    if (!projectId) { setSessions([]); setActiveSessionId(null); setOpenTabs([]); return; }
-    fetch(`/api/projects/${projectId}/chat/sessions`)
-      .then(r => r.json())
-      .then(data => {
-        const list = data.sessions || [];
-        setSessions(list);
-        if (list.length > 0) {
-          // Open the most recent session as a tab
-          setOpenTabs([list[0].id]);
-          setActiveSessionId(list[0].id);
-        } else {
-          createNewSession();
-        }
-      })
-      .catch(() => { setSessions([]); setActiveSessionId(null); setOpenTabs([]); });
-  }, [projectId]);
-
-  // Load messages when active session changes
-  const knownIdsRef = useRef(new Set());
-  const busyClearRef = useRef(false);
-
-  // Streaming message state for real-time updates
   const [streamingMessage, setStreamingMessage] = useState(null);
-  const streamingChunksRef = useRef('');
-
-  // Recovery status for interrupted conversations
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null });
 
-  useEffect(() => {
-    if (!projectId || !activeSessionId) { setMessages([]); knownIdsRef.current.clear(); return; }
-    setLoading(true);
-    setSearchResults(null);
-    setAgentBusy(false);
-    setStreamingMessage(null);
-    streamingChunksRef.current = '';
+  const messagesEndRef = useRef(null);
+  const knownIdsRef = useRef(new Set());
+  const busyClearRef = useRef(false);
+  const streamingChunksRef = useRef('');
+  const prevMessageCountRef = useRef(0);
+  const isInitialLoadRef = useRef(true);
 
-    fetch(`/api/projects/${projectId}/chat?limit=100&sessionId=${activeSessionId}`)
+  // Load messages on mount
+  useEffect(() => {
+    if (!projectId || !sessionId) return;
+
+    setLoading(true);
+    fetch(`/api/projects/${projectId}/chat?limit=100&sessionId=${sessionId}`)
       .then(r => r.json())
       .then(data => {
         const msgs = (data.messages || []).reverse();
         knownIdsRef.current = new Set(msgs.map(m => m.id));
         setMessages(msgs);
-        // Mark session as read when loading messages
-        fetch(`/api/projects/${projectId}/chat/sessions/${activeSessionId}/read`, { method: 'POST' }).catch(() => {});
-        setSessions(prev => prev.map(s => s.id === activeSessionId ? { ...s, hasUnread: false } : s));
+        // Mark as read
+        fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
+        onSessionUpdate?.(sessionId, { hasUnread: false });
       })
       .catch(() => setMessages([]))
       .finally(() => setLoading(false));
-  }, [projectId, activeSessionId]);
+  }, [projectId, sessionId]);
 
-  // Attach to chat session when it changes (for isolated per-session communication)
+  // Attach to chat session for WebSocket events
   useEffect(() => {
-    if (!projectId || !activeSessionId) return;
+    if (!projectId || !sessionId || !wsRef?.current) return;
 
     let cancelled = false;
     let retryCount = 0;
     const maxRetries = 10;
 
     const attachToSession = () => {
-      if (cancelled) return;
-
-      // Check if wsRef exists and is connected
+      if (cancelled) return false;
       if (wsRef?.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'attach-chat-session',
-          chatSessionId: activeSessionId,
+          chatSessionId: sessionId,
           projectId,
         }));
-        console.log(`[ChatPanel] Attached to chat session ${activeSessionId}`);
         return true;
       }
       return false;
     };
 
-    // Try immediately
     if (!attachToSession() && retryCount < maxRetries) {
-      // If not ready, retry with backoff
       const tryAttach = () => {
         if (cancelled) return;
         retryCount++;
         if (!attachToSession() && retryCount < maxRetries) {
-          setTimeout(tryAttach, 200); // Retry every 200ms
+          setTimeout(tryAttach, 200);
         }
       };
       setTimeout(tryAttach, 100);
     }
 
-    // Also listen for WebSocket reconnections
     const handleOpen = () => attachToSession();
     wsRef?.current?.addEventListener('open', handleOpen);
 
@@ -284,22 +234,21 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       cancelled = true;
       wsRef?.current?.removeEventListener('open', handleOpen);
     };
-  }, [projectId, activeSessionId, wsRef]);
+  }, [projectId, sessionId, wsRef]);
 
-  // Handle streaming message events from WebSocket
+  // Handle WebSocket messages for THIS session
   useEffect(() => {
-    if (!wsRef?.current) return;
+    if (!wsRef?.current || !sessionId) return;
 
     const handleMessage = (event) => {
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
 
-      // Only handle messages for our active session
-      if (msg.sessionId && msg.sessionId !== activeSessionId) return;
+      // Only handle messages for THIS session
+      if (msg.sessionId && msg.sessionId !== sessionId) return;
 
       switch (msg.type) {
         case 'chat-message-stream-start':
-          // A new streaming message started
           setStreamingMessage({
             id: msg.messageId,
             jobId: msg.jobId,
@@ -312,9 +261,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           break;
 
         case 'chat-message-chunk':
-          // Append chunk to streaming message
           streamingChunksRef.current += msg.chunk || '';
-          // Update display (throttled - only update every 100ms worth of content)
           setStreamingMessage(prev => prev ? {
             ...prev,
             content: streamingChunksRef.current.slice(-2000) || 'Processing...',
@@ -322,7 +269,6 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           break;
 
         case 'chat-message-stream-complete':
-          // Streaming finished - add the final message
           setStreamingMessage(null);
           streamingChunksRef.current = '';
           if (msg.message) {
@@ -333,7 +279,6 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           break;
 
         case 'chat-message-recovered':
-          // A previously incomplete message was recovered
           if (msg.message) {
             knownIdsRef.current.add(msg.message.id);
             setMessages(prev => {
@@ -344,9 +289,6 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           break;
 
         case 'chat-session-recovery':
-          // Server detected incomplete streaming messages - offer to recover
-          console.log('[ChatPanel] Session has incomplete messages:', msg.incompleteMessages);
-          // Auto-recover incomplete messages
           for (const incomplete of msg.incompleteMessages || []) {
             wsRef.current?.send(JSON.stringify({
               type: 'recover-streaming-message',
@@ -358,19 +300,14 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           break;
 
         case 'chat-recovery-starting':
-          // Server is attempting to resume an interrupted conversation
-          console.log('[ChatPanel] Recovery starting for job:', msg.jobId);
           setRecoveryStatus({ active: true, message: msg.message || 'Recovering interrupted work...' });
           break;
 
         case 'chat-recovery-complete':
-          // Recovery finished - clear the banner
-          console.log('[ChatPanel] Recovery complete for job:', msg.jobId);
           setRecoveryStatus({ active: false, message: null });
           break;
 
         case 'job-progress':
-          // Update streaming message with job progress
           if (msg.progress) {
             setStreamingMessage(prev => prev ? {
               ...prev,
@@ -381,11 +318,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           break;
 
         case 'session-unread':
-          // Update session unread state
-          if (msg.projectId === projectId) {
-            setSessions(prev => prev.map(s =>
-              s.id === msg.sessionId ? { ...s, hasUnread: msg.hasUnread } : s
-            ));
+          if (msg.projectId === projectId && msg.sessionId === sessionId) {
+            onSessionUpdate?.(sessionId, { hasUnread: msg.hasUnread });
           }
           break;
       }
@@ -393,55 +327,41 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
 
     wsRef.current.addEventListener('message', handleMessage);
     return () => wsRef.current?.removeEventListener('message', handleMessage);
-  }, [wsRef, activeSessionId]);
+  }, [wsRef, sessionId, projectId, onSessionUpdate]);
 
-  // Scroll to bottom only when NEW messages are added (not on project switch)
-  const prevMessageCountRef = useRef(0);
-  const isInitialLoadRef = useRef(true);
-
+  // Scroll handling - only when visible and new messages arrive
   useEffect(() => {
+    if (!isVisible) return;
+
     const currentCount = messages.length;
     const prevCount = prevMessageCountRef.current;
 
-    // Only scroll if:
-    // 1. Initial load of this session (scroll instant to bottom)
-    // 2. New message was added (user sent or agent responded)
     if (isInitialLoadRef.current && currentCount > 0) {
-      // Initial load - instant scroll to bottom
       messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
       isInitialLoadRef.current = false;
     } else if (currentCount > prevCount && prevCount > 0) {
-      // New message added - instant scroll to bottom
       messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
     }
 
     prevMessageCountRef.current = currentCount;
-  }, [messages]);
+  }, [messages, isVisible]);
 
-  // Reset initial load flag when session changes
+  // Scroll to bottom when becoming visible
   useEffect(() => {
-    isInitialLoadRef.current = true;
-    prevMessageCountRef.current = 0;
-  }, [activeSessionId]);
-
-  // Instant scroll to bottom when panel becomes active (visible)
-  useEffect(() => {
-    if (isActive) {
-      // Small delay to ensure DOM is ready after visibility change
+    if (isVisible) {
       const timer = setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
       }, 50);
       return () => clearTimeout(timer);
     }
-  }, [isActive]);
+  }, [isVisible]);
 
-  // ── SINGLE SOURCE OF TRUTH: Poll API every 2s for new messages ──
-  // No WebSocket for messages — polling is 100% reliable
+  // Poll for new messages (runs even when hidden)
   useEffect(() => {
-    if (!projectId || !activeSessionId) return;
+    if (!projectId || !sessionId) return;
 
     const poll = setInterval(() => {
-      fetch(`/api/projects/${projectId}/chat?limit=20&sessionId=${activeSessionId}`)
+      fetch(`/api/projects/${projectId}/chat?limit=20&sessionId=${sessionId}`)
         .then(r => r.json())
         .then(data => {
           const serverMsgs = (data.messages || []).reverse();
@@ -451,13 +371,10 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             const newMsgs = serverMsgs.filter(m => !knownIdsRef.current.has(m.id));
             if (newMsgs.length === 0) return prev;
 
-            // Track all new IDs
             for (const m of newMsgs) knownIdsRef.current.add(m.id);
 
-            // Remove optimistic pending messages ONLY when the real version exists on the server
             let result = prev.filter(m => {
               if (!m.id.startsWith('pending-')) return true;
-              // Only remove if we found the real message in THIS poll batch
               const hasReal = newMsgs.some(sm => sm.role === 'user' && sm.content === m.content);
               return !hasReal;
             });
@@ -465,34 +382,26 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             const lastUserIdx = result.findLastIndex(m => m.role === 'user');
             const lastUserTime = lastUserIdx >= 0 ? result[lastUserIdx].createdAt : '';
 
-            // Split new messages
             const newProgress = newMsgs.filter(m => m.role === 'progress');
             const newFinal = newMsgs.filter(m => m.role === 'agent' || m.role === 'error');
             const newOther = newMsgs.filter(m => m.role !== 'progress' && m.role !== 'agent' && m.role !== 'error');
 
-            // Only count final messages that are AFTER the last user message as truly new
             const hasNewFinalAfterUser = newFinal.some(m => m.createdAt > lastUserTime);
 
-            // Progress: keep only the latest one after last user
             if (newProgress.length > 0) {
               result = result.filter((m, i) => !(m.role === 'progress' && i > lastUserIdx));
               result.push(newProgress[newProgress.length - 1]);
             }
 
-            // Final response: clear progress, clear busy
             if (hasNewFinalAfterUser) {
               result = result.filter(m => m.role !== 'progress' || result.indexOf(m) <= lastUserIdx);
-              // Clear busy OUTSIDE this updater via a ref
               busyClearRef.current = true;
             }
 
-            // Add final + other messages
             result.push(...newFinal, ...newOther);
-
             return result;
           });
 
-          // Clear busy state outside the updater (side effects not allowed inside)
           if (busyClearRef.current) {
             busyClearRef.current = false;
             setAgentBusy(false);
@@ -502,23 +411,221 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     }, 2000);
 
     return () => clearInterval(poll);
-  }, [projectId, activeSessionId]);
+  }, [projectId, sessionId]);
 
-  // No WebSocket handlers — polling is the single source of truth for everything.
-  // agentBusy is set to true on send, cleared when polling finds agent/error response.
+  // Send message handler
+  const handleSend = useCallback((content, attachments = []) => {
+    if (!projectId || !sessionId) return;
 
-  // ── Session actions ──
+    let displayContent = content;
+    if (attachments.length > 0) {
+      const attachmentList = attachments.map(a => `📎 ${a.name}`).join('\n');
+      displayContent = content ? `${content}\n\n${attachmentList}` : attachmentList;
+    }
 
+    const optimistic = {
+      id: 'pending-' + Date.now(),
+      projectId,
+      sessionId,
+      role: 'user',
+      content: displayContent,
+      metadata: { mode, attachments },
+      createdAt: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, optimistic]);
+    setAgentBusy(true);
+
+    if (wsRef?.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'chat-send',
+        projectId,
+        sessionId,
+        content,
+        attachments: attachments.map(a => ({
+          id: a.id,
+          name: a.name,
+          type: a.type,
+          size: a.size,
+          path: a.path,
+          url: a.url,
+        })),
+        mode,
+        tool,
+      }));
+    } else {
+      setAgentBusy(false);
+      setMessages(prev => [...prev, {
+        id: 'err-' + Date.now(),
+        projectId,
+        role: 'error',
+        content: 'Not connected to server. Please wait and retry.',
+        createdAt: new Date().toISOString(),
+      }]);
+    }
+  }, [projectId, sessionId, mode, tool, wsRef]);
+
+  const handleSearch = useCallback(async (query) => {
+    if (!query || !projectId) { setSearchResults(null); return; }
+    try {
+      const r = await fetch(`/api/projects/${projectId}/chat/search?q=${encodeURIComponent(query)}&sessionId=${sessionId || ''}`);
+      const data = await r.json();
+      setSearchResults(data.messages || []);
+    } catch {
+      setSearchResults([]);
+    }
+  }, [projectId, sessionId]);
+
+  // Prepare display messages
+  const sortedMessages = useMemo(() =>
+    [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()),
+    [messages]
+  );
+
+  const filteredMessages = useMemo(() => {
+    const lastUserMsg = [...sortedMessages].reverse().find(m => m.role === 'user');
+    const lastUserTime = lastUserMsg ? new Date(lastUserMsg.createdAt).getTime() : 0;
+    return sortedMessages.filter(m =>
+      m.role !== 'progress' || new Date(m.createdAt).getTime() > lastUserTime
+    );
+  }, [sortedMessages]);
+
+  const displayMessages = searchResults || filteredMessages;
+
+  return (
+    <div
+      style={{
+        display: isVisible ? 'flex' : 'none',
+        flexDirection: 'column',
+        flex: 1,
+        minHeight: 0,
+        overflow: 'hidden'
+      }}
+    >
+      {/* Search result indicator */}
+      {searchResults && (
+        <div className="px-3 py-1 text-[10px] text-surface-500 bg-surface-850/30 border-b border-surface-700/30">
+          {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} found
+        </div>
+      )}
+
+      {/* Messages */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }} className="px-1 py-4">
+        {loading ? (
+          <div className="flex items-center justify-center h-full">
+            <Loader size={22} className="animate-spin text-surface-600" />
+          </div>
+        ) : displayMessages.length === 0 ? (
+          <div className="flex items-center justify-center h-full text-surface-500 text-sm">
+            {searchResults ? 'No results found' : 'Start a conversation...'}
+          </div>
+        ) : (
+          displayMessages.map(msg => (
+            <ChatMessage key={msg.id} message={msg} wsRef={wsRef} projectId={projectId} onSend={handleSend} />
+          ))
+        )}
+
+        {recoveryStatus.active && (
+          <div className="mx-4 mb-2 px-4 py-2 bg-blue-500/10 border border-blue-500/30 rounded-lg flex items-center gap-2 text-sm text-blue-400">
+            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+            {recoveryStatus.message || 'Resuming where we left off...'}
+          </div>
+        )}
+
+        {streamingMessage && (
+          <ChatMessage
+            key={streamingMessage.id}
+            message={streamingMessage}
+            wsRef={wsRef}
+            projectId={projectId}
+            onSend={handleSend}
+          />
+        )}
+
+        {(agentBusy || streamingMessage || recoveryStatus.active) && (
+          <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
+        )}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input */}
+      <ChatInput
+        mode={mode}
+        projectId={projectId}
+        onSend={handleSend}
+        onSearch={handleSearch}
+        busy={agentBusy}
+      />
+    </div>
+  );
+}
+
+/**
+ * Main ChatPanel - manages sessions/tabs and renders all open sessions.
+ * Sessions stay mounted when hidden to preserve state and continue working.
+ */
+export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true }) {
+  const [sessions, setSessions] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState(null);
+  const [openTabs, setOpenTabs] = useState([]);
+  const [showSessionList, setShowSessionList] = useState(false);
+  const sessionListRef = useRef(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (sessionListRef.current && !sessionListRef.current.contains(e.target)) {
+        setShowSessionList(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Load sessions when project changes
+  useEffect(() => {
+    if (!projectId) {
+      setSessions([]);
+      setActiveSessionId(null);
+      setOpenTabs([]);
+      return;
+    }
+
+    fetch(`/api/projects/${projectId}/chat/sessions`)
+      .then(r => r.json())
+      .then(data => {
+        const list = data.sessions || [];
+        setSessions(list);
+        if (list.length > 0) {
+          setOpenTabs([list[0].id]);
+          setActiveSessionId(list[0].id);
+        } else {
+          createNewSession();
+        }
+      })
+      .catch(() => {
+        setSessions([]);
+        setActiveSessionId(null);
+        setOpenTabs([]);
+      });
+  }, [projectId]);
+
+  // Session actions
   const createNewSession = useCallback(async () => {
     if (!projectId) return;
     try {
-      const r = await fetch(`/api/projects/${projectId}/chat/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const r = await fetch(`/api/projects/${projectId}/chat/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
       const session = await r.json();
       setSessions(prev => [session, ...prev]);
-      // Add to open tabs and make active
       setOpenTabs(prev => [...prev, session.id]);
       setActiveSessionId(session.id);
-      setMessages([]);
       setShowSessionList(false);
     } catch {}
   }, [projectId]);
@@ -527,12 +634,10 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     if (!projectId) return;
     try {
       await fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, { method: 'DELETE' });
-      // Remove from open tabs
       setOpenTabs(prev => prev.filter(id => id !== sessionId));
       setSessions(prev => {
         const filtered = prev.filter(s => s.id !== sessionId);
         if (sessionId === activeSessionId) {
-          // Switch to another open tab or create new
           const remainingTabs = openTabs.filter(id => id !== sessionId);
           if (remainingTabs.length > 0) {
             setActiveSessionId(remainingTabs[remainingTabs.length - 1]);
@@ -548,25 +653,19 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     } catch {}
   }, [projectId, activeSessionId, openTabs, createNewSession]);
 
-  // Mark session as read (API call + local state)
   const markSessionRead = useCallback((sessionId) => {
     if (!projectId || !sessionId) return;
-    // Update local state immediately
     setSessions(prev => prev.map(s =>
       s.id === sessionId ? { ...s, hasUnread: false } : s
     ));
-    // Fire-and-forget API call
-    fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' })
-      .catch(() => {});
+    fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
   }, [projectId]);
 
-  // Switch to a session tab (doesn't open from dropdown, just switches active)
   const switchToTab = useCallback((sessionId) => {
     setActiveSessionId(sessionId);
     markSessionRead(sessionId);
   }, [markSessionRead]);
 
-  // Open a session from the dropdown (adds to tabs and makes active)
   const openSession = useCallback((sessionId) => {
     if (!openTabs.includes(sessionId)) {
       setOpenTabs(prev => [...prev, sessionId]);
@@ -576,17 +675,14 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     markSessionRead(sessionId);
   }, [openTabs, markSessionRead]);
 
-  // Close a tab (removes from tabs but keeps session in history)
   const closeTab = useCallback((sessionId, e) => {
     e?.stopPropagation();
     setOpenTabs(prev => {
       const filtered = prev.filter(id => id !== sessionId);
-      // If closing active tab, switch to another
       if (sessionId === activeSessionId) {
         if (filtered.length > 0) {
           setActiveSessionId(filtered[filtered.length - 1]);
         } else {
-          // No tabs left, create a new one
           createNewSession();
         }
       }
@@ -594,95 +690,15 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     });
   }, [activeSessionId, createNewSession]);
 
-  // Legacy switchSession for backward compatibility
-  const switchSession = useCallback((sessionId) => {
-    openSession(sessionId);
-  }, [openSession]);
+  // Handle session state updates from child components
+  const handleSessionUpdate = useCallback((sessionId, updates) => {
+    setSessions(prev => prev.map(s =>
+      s.id === sessionId ? { ...s, ...updates } : s
+    ));
+  }, []);
 
-  // Sessions not currently open as tabs (for dropdown)
   const closedSessions = sessions.filter(s => !openTabs.includes(s.id));
-
-  // ── Send ──
-
-  const handleSend = useCallback((content, attachments = []) => {
-    if (!projectId || !activeSessionId) return;
-
-    // Build display content with attachment info
-    let displayContent = content;
-    if (attachments.length > 0) {
-      const attachmentList = attachments.map(a => `📎 ${a.name}`).join('\n');
-      displayContent = content ? `${content}\n\n${attachmentList}` : attachmentList;
-    }
-
-    const optimistic = {
-      id: 'pending-' + Date.now(),
-      projectId,
-      sessionId: activeSessionId,
-      role: 'user',
-      content: displayContent,
-      metadata: { mode, attachments },
-      createdAt: new Date().toISOString(),
-    };
-    setMessages(prev => [...prev, optimistic]);
-    setAgentBusy(true);
-
-    if (wsRef?.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'chat-send',
-        projectId,
-        sessionId: activeSessionId,
-        content,
-        attachments: attachments.map(a => ({
-          id: a.id,
-          name: a.name,
-          type: a.type,
-          size: a.size,
-          path: a.path,
-          url: a.url,
-        })),
-        mode,
-        tool,
-      }));
-      // No timeout — polling clears busy when response arrives
-    } else {
-      setAgentBusy(false);
-      setMessages(prev => [...prev, {
-        id: 'err-' + Date.now(),
-        projectId,
-        role: 'error',
-        content: 'Not connected to server. Please wait and retry.',
-        createdAt: new Date().toISOString(),
-      }]);
-    }
-  }, [projectId, activeSessionId, mode, tool, wsRef]);
-
-  const handleSearch = useCallback(async (query) => {
-    if (!query || !projectId) { setSearchResults(null); return; }
-    try {
-      const r = await fetch(`/api/projects/${projectId}/chat/search?q=${encodeURIComponent(query)}&sessionId=${activeSessionId || ''}`);
-      const data = await r.json();
-      setSearchResults(data.messages || []);
-    } catch {
-      setSearchResults([]);
-    }
-  }, [projectId, activeSessionId]);
-
-  // Sort messages by createdAt to ensure correct display order
-  // (prevents progress messages from previous interactions appearing before newer user messages)
-  const sortedMessages = [...messages].sort((a, b) =>
-    new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-  );
-
-  // Filter out stale progress messages (those older than the last user message)
-  // Progress messages should only appear AFTER the most recent user message
-  const lastUserMsg = [...sortedMessages].reverse().find(m => m.role === 'user');
-  const lastUserTime = lastUserMsg ? new Date(lastUserMsg.createdAt).getTime() : 0;
-  const filteredMessages = sortedMessages.filter(m =>
-    m.role !== 'progress' || new Date(m.createdAt).getTime() > lastUserTime
-  );
-
-  const displayMessages = searchResults || filteredMessages;
-  const activeSession = sessions.find(s => s.id === activeSessionId);
+  const openTabSessions = openTabs.map(id => sessions.find(s => s.id === id)).filter(Boolean);
 
   if (!projectId) {
     return (
@@ -695,16 +711,12 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     );
   }
 
-  // Get session data for tabs
-  const openTabSessions = openTabs.map(id => sessions.find(s => s.id === id)).filter(Boolean);
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
       {/* Session tabs bar */}
       <div className="flex items-center border-b border-surface-700/50 bg-surface-850/60" style={{ flexShrink: 0 }}>
-        {/* Tab strip - horizontally scrollable */}
         <div className="flex-1 flex items-center overflow-x-auto scrollbar-none min-w-0">
-          {openTabSessions.map((s, idx) => (
+          {openTabSessions.map((s) => (
             <div
               key={s.id}
               onClick={() => switchToTab(s.id)}
@@ -716,11 +728,9 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             >
               <MessageCircle size={11} className={s.id === activeSessionId ? 'text-primary-400 flex-shrink-0' : 'text-surface-600 flex-shrink-0'} />
               <span className="truncate text-[11px]">{s.name || 'Chat'}</span>
-              {/* Unread badge */}
               {s.hasUnread && s.id !== activeSessionId && (
                 <span className="flex-shrink-0 w-1.5 h-1.5 rounded-full bg-primary-500 animate-pulse" />
               )}
-              {/* Close tab button */}
               <button
                 onClick={(e) => closeTab(s.id, e)}
                 className={`p-0.5 rounded flex-shrink-0 transition-all ${
@@ -735,7 +745,6 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             </div>
           ))}
 
-          {/* New tab button */}
           <button
             onClick={createNewSession}
             className="p-1.5 text-surface-500 hover:text-primary-400 hover:bg-surface-700/50 transition-colors flex-shrink-0"
@@ -745,9 +754,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           </button>
         </div>
 
-        {/* Right side controls */}
         <div className="flex items-center gap-0.5 px-1 border-l border-surface-700/30 flex-shrink-0">
-          {/* History dropdown - shows closed sessions */}
           <div className="relative" ref={sessionListRef}>
             <button
               onClick={() => setShowSessionList(!showSessionList)}
@@ -763,7 +770,6 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
 
             {showSessionList && (
               <div className="absolute top-full right-0 mt-1 w-72 bg-surface-800 border border-surface-700 rounded-lg shadow-modal z-50 overflow-hidden animate-scale-in">
-                {/* Header */}
                 <div className="px-3 py-2 text-[10px] text-surface-500 uppercase tracking-wider border-b border-surface-700/50 bg-surface-850/50">
                   {closedSessions.length > 0 ? 'Closed Sessions' : 'All Sessions Open'}
                 </div>
@@ -800,7 +806,6 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             )}
           </div>
 
-          {/* Skills quick access */}
           <button
             onClick={() => window.open('/skills', '_blank')}
             className="p-1.5 rounded text-surface-500 hover:text-purple-400 hover:bg-surface-700/50 transition-colors"
@@ -811,65 +816,19 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         </div>
       </div>
 
-      {/* Search result indicator */}
-      {searchResults && (
-        <div className="px-3 py-1 text-[10px] text-surface-500 bg-surface-850/30 border-b border-surface-700/30">
-          {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} found
-        </div>
-      )}
-
-      {/* Messages */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }} className="px-1 py-4">
-        {loading ? (
-          <div className="flex items-center justify-center h-full">
-            <Loader size={22} className="animate-spin text-surface-600" />
-          </div>
-        ) : displayMessages.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-surface-500 text-sm">
-            {searchResults ? 'No results found' : 'Start a conversation...'}
-          </div>
-        ) : (
-          displayMessages.map(msg => (
-            <ChatMessage key={msg.id} message={msg} wsRef={wsRef} projectId={projectId} onSend={handleSend} />
-          ))
-        )}
-
-        {/* Recovery status banner - shows when resuming interrupted work */}
-        {recoveryStatus.active && (
-          <div className="mx-4 mb-2 px-4 py-2 bg-blue-500/10 border border-blue-500/30 rounded-lg flex items-center gap-2 text-sm text-blue-400">
-            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-            </svg>
-            {recoveryStatus.message || 'Resuming where we left off...'}
-          </div>
-        )}
-
-        {/* Streaming message preview - shows real-time response as it arrives */}
-        {streamingMessage && (
-          <ChatMessage
-            key={streamingMessage.id}
-            message={streamingMessage}
-            wsRef={wsRef}
-            projectId={projectId}
-            onSend={handleSend}
-          />
-        )}
-
-        {/* Working indicator with timer and stop button - show during active work */}
-        {(agentBusy || streamingMessage || recoveryStatus.active) && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={activeSessionId} />}
-
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input */}
-      <ChatInput
-        mode={mode}
-        projectId={projectId}
-        onSend={handleSend}
-        onSearch={handleSearch}
-        busy={agentBusy}
-      />
+      {/* Render ALL open sessions - hidden ones use display:none but stay mounted */}
+      {openTabs.map(tabId => (
+        <ChatSessionContent
+          key={tabId}
+          projectId={projectId}
+          sessionId={tabId}
+          wsRef={wsRef}
+          mode={mode}
+          tool={tool}
+          isVisible={tabId === activeSessionId}
+          onSessionUpdate={handleSessionUpdate}
+        />
+      ))}
     </div>
   );
 }
