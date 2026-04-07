@@ -51,6 +51,7 @@ const VALID_TYPES = new Set(['command', 'test', 'plan', 'webhook']);
  * @property {ScheduleLastResult|null} lastResult - Result of last run
  * @property {number} runCount - Total number of runs
  * @property {number} failCount - Total number of failed runs
+ * @property {'container'|'host'} runTarget - Where to execute: inside Docker container or on the host
  * @property {string} createdAt - ISO 8601 creation timestamp
  * @property {string} updatedAt - ISO 8601 last-updated timestamp
  */
@@ -130,6 +131,7 @@ class Scheduler extends EventEmitter {
       enabled = true,
       notifyOnFailure = true,
       notifyOnSuccess = false,
+      runTarget = 'container',
     } = params;
 
     // Validation
@@ -165,6 +167,7 @@ class Scheduler extends EventEmitter {
       enabled,
       notifyOnFailure,
       notifyOnSuccess,
+      runTarget: runTarget === 'host' ? 'host' : 'container',
       lastRunAt: null,
       lastResult: null,
       runCount: 0,
@@ -464,8 +467,9 @@ class Scheduler extends EventEmitter {
     return new Promise((resolve) => {
       const startTime = Date.now();
 
-      // Determine if this runs inside a container
-      const containerName = this._getContainerName(schedule.projectId);
+      // Determine if this runs inside a container or on the host
+      const useContainer = schedule.runTarget !== 'host';
+      const containerName = useContainer ? this._getContainerName(schedule.projectId) : null;
       let command = schedule.command;
 
       if (containerName) {
@@ -518,7 +522,8 @@ class Scheduler extends EventEmitter {
   async _executeCliTool(schedule) {
     const startTime = Date.now();
     const tool = schedule.cliTool || 'claude';
-    const containerName = this._getContainerName(schedule.projectId);
+    const useContainer = schedule.runTarget !== 'host';
+    const containerName = useContainer ? this._getContainerName(schedule.projectId) : null;
     const workDir = schedule.projectPath || '/workspace';
 
     // Build the CLI command
@@ -596,7 +601,8 @@ class Scheduler extends EventEmitter {
     }
 
     const startTime = Date.now();
-    const containerName = this._getContainerName(schedule.projectId);
+    const useContainer = schedule.runTarget !== 'host';
+    const containerName = useContainer ? this._getContainerName(schedule.projectId) : null;
 
     try {
       if (containerName) {

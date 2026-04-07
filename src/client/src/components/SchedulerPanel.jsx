@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import {
   Clock, Plus, Play, Pause, Trash2, X, Check, AlertCircle,
   Terminal, TestTube, ListTodo, ChevronDown, ChevronRight,
-  RefreshCw, Loader2, Globe, Sparkles,
+  RefreshCw, Loader2, Globe, Sparkles, Box, Monitor,
 } from 'lucide-react';
 
 // Interval presets for easy selection
@@ -71,6 +71,7 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
   const [formCommand, setFormCommand] = useState('');
   const [formIntervalMs, setFormIntervalMs] = useState(300000);
   const [formCliTool, setFormCliTool] = useState('');
+  const [formRunTarget, setFormRunTarget] = useState('container');
   const [creating, setCreating] = useState(false);
 
   const fetchSchedules = async () => {
@@ -117,6 +118,7 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
           cliTool: formCliTool || undefined,
           projectPath,
           intervalMs: formIntervalMs,
+          runTarget: formRunTarget,
           enabled: true,
         }),
       });
@@ -138,6 +140,7 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
     setFormCommand('');
     setFormIntervalMs(300000);
     setFormCliTool('');
+    setFormRunTarget('container');
   };
 
   const handleToggle = async (schedule) => {
@@ -328,6 +331,33 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
             </div>
           </div>
 
+          {/* Run target */}
+          <div>
+            <label className="text-[10px] text-surface-500 uppercase mb-1 block">Run in</label>
+            <div className="flex gap-1">
+              {[
+                { id: 'container', label: 'Container', icon: Box, hint: 'Inside project Docker container' },
+                { id: 'host', label: 'Host', icon: Monitor, hint: 'On the server / host machine' },
+              ].map(t => (
+                <button
+                  key={t.id}
+                  onClick={() => setFormRunTarget(t.id)}
+                  title={t.hint}
+                  className={`flex items-center gap-1 px-2 py-0.5 text-[10px] rounded border transition-colors ${
+                    formRunTarget === t.id
+                      ? t.id === 'host'
+                        ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-300'
+                        : 'bg-primary-500/20 border-primary-500/40 text-primary-300'
+                      : 'bg-surface-800 border-surface-700 text-surface-400 hover:text-surface-200'
+                  }`}
+                >
+                  <t.icon className="w-3 h-3" />
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Interval dropdown */}
           <select
             value={formIntervalMs}
@@ -440,6 +470,14 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
                           <Clock className="w-2.5 h-2.5" />
                           {formatInterval(schedule.intervalMs)}
                         </span>
+
+                        {/* Run target badge */}
+                        {schedule.runTarget === 'host' && (
+                          <span className="inline-flex items-center gap-0.5 px-1 py-0 text-[10px] rounded bg-yellow-500/10 text-yellow-400 flex-shrink-0" title="Runs on host">
+                            <Monitor className="w-2.5 h-2.5" />
+                            Host
+                          </span>
+                        )}
 
                         {/* Last result dot */}
                         {lastResult && (
