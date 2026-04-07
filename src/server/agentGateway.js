@@ -1329,22 +1329,37 @@ NEEDS_USER`,
     let isError = false;
     let errorType = null;
 
-    // Check for authentication errors in the raw output
-    if (/authentication_error|401.*Invalid authentication|Invalid authentication credentials/i.test(cleanOutput)) {
+    // IMPORTANT: If we successfully extracted a result from JSON (sessionId means valid response),
+    // only check the result text itself for errors, not the entire output.
+    // This prevents post-response errors (rate limits after completion) from overwriting success.
+    const hasValidJsonResult = !!sessionId && text && text.length > 20 && !text.startsWith('⚠️');
+    const textToCheckForErrors = hasValidJsonResult ? text : cleanOutput;
+
+    // Check for authentication errors
+    if (/authentication_error|401.*Invalid authentication|Invalid authentication credentials/i.test(textToCheckForErrors)) {
       isError = true;
       errorType = 'auth';
       text = '🔐 **Authentication failed** — Your API key is invalid or expired.\n\nRun `/login` to re-authenticate.';
     }
 
-    // Check for rate limit errors
-    if (/rate_limit|429|too many requests/i.test(cleanOutput)) {
-      isError = true;
-      errorType = 'rate_limit';
-      text = '⏳ **Rate limit reached** — Too many requests.\n\nPlease wait a moment and try again.';
+    // Check for rate limit errors - only if we don't have a valid result
+    // IMPORTANT: Claude Code emits "rate_limit_event" with status:"allowed" as informational messages
+    // Only treat as error if it's an actual rejection, not an informational event
+    if (!hasValidJsonResult) {
+      // Check for actual rate limit errors (not just informational events)
+      const hasRateLimitError = /429|too many requests/i.test(cleanOutput) ||
+        /"status"\s*:\s*"(rejected|rate_limited|limited)"/i.test(cleanOutput) ||
+        (/"rate_limit/i.test(cleanOutput) && /"error"/i.test(cleanOutput));
+
+      if (hasRateLimitError) {
+        isError = true;
+        errorType = 'rate_limit';
+        text = '⏳ **Rate limit reached** — Too many requests.\n\nPlease wait a moment and try again.';
+      }
     }
 
-    // Check for overloaded errors
-    if (/overloaded|503|service unavailable/i.test(cleanOutput)) {
+    // Check for overloaded errors - only if we don't have a valid result
+    if (!hasValidJsonResult && /overloaded|503|service unavailable/i.test(cleanOutput)) {
       isError = true;
       errorType = 'overloaded';
       text = '🔄 **Service temporarily unavailable** — Claude is overloaded.\n\nPlease try again in a few minutes.';
