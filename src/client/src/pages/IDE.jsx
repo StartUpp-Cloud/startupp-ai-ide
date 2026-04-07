@@ -489,8 +489,8 @@ export default function IDE() {
                 flexDirection: 'column',
                 overflow: 'hidden',
                 minHeight: 0,
-                maxHeight: '100%',
-                flex: 1,
+                flex: '1 1 0%',
+                height: '100%',
               }}
             >
               <ChatPanel

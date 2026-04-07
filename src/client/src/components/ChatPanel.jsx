@@ -549,11 +549,11 @@ function ChatSessionContent({
       style={{
         display: isVisible ? 'flex' : 'none',
         flexDirection: 'column',
-        flex: 1,
+        flex: '1 1 0%',
         minHeight: 0,
         overflow: 'hidden',
         width: '100%',
-        position: isVisible ? 'relative' : 'absolute',
+        height: '100%',
       }}
     >
       {/* Search result indicator */}
