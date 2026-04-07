@@ -118,8 +118,8 @@ class TerminalServer {
     });
 
     // Broadcast agent shell output to all clients for live stream viewer
-    agentShellPool.on('output', ({ sessionId, data }) => {
-      this.broadcast({ type: 'agent-shell-output', sessionId, data });
+    agentShellPool.on('output', ({ sessionId, data, projectId, chatSessionId }) => {
+      this.broadcast({ type: 'agent-shell-output', sessionId, data, projectId, chatSessionId });
     });
 
     // Register Slack inbound handler — Slack messages enter the same chat pipeline

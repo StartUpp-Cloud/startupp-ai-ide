@@ -6,6 +6,7 @@ class AgentShellPool extends EventEmitter {
     super();
     this.sessions = new Map(); // key -> { sessionId, projectId, tool, createdAt }
     this.outputBuffers = new Map(); // sessionId -> string (last 20KB)
+    this.shellToChat = new Map(); // shellSessionId -> { projectId, chatSessionId }
 
     // Listen directly to ptyManager data events — reliable, no dynamic imports needed
     ptyManager.on('data', ({ sessionId, data }) => {
@@ -68,6 +69,8 @@ class AgentShellPool extends EventEmitter {
       createdAt: new Date().toISOString(),
     });
     this.outputBuffers.set(result.sessionId, '');
+    // Track reverse mapping: shell session -> chat session info
+    this.shellToChat.set(result.sessionId, { projectId, chatSessionId: tool });
 
     if (tool && tool !== 'shell') {
       setTimeout(() => {
@@ -87,7 +90,9 @@ class AgentShellPool extends EventEmitter {
     if (buf !== undefined) {
       const combined = buf + data;
       this.outputBuffers.set(sessionId, combined.slice(-20480));
-      this.emit('output', { sessionId, data });
+      // Include chat session info for UI matching
+      const chatInfo = this.shellToChat.get(sessionId) || {};
+      this.emit('output', { sessionId, data, projectId: chatInfo.projectId, chatSessionId: chatInfo.chatSessionId });
     }
   }
 
@@ -101,6 +106,7 @@ class AgentShellPool extends EventEmitter {
         ptyManager.killSession(entry.sessionId);
         this.sessions.delete(key);
         this.outputBuffers.delete(entry.sessionId);
+        this.shellToChat.delete(entry.sessionId);
       }
     }
   }
@@ -111,6 +117,7 @@ class AgentShellPool extends EventEmitter {
         ptyManager.killSession(sessionId);
         this.sessions.delete(key);
         this.outputBuffers.delete(sessionId);
+        this.shellToChat.delete(sessionId);
         return;
       }
     }

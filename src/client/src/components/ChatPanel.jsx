@@ -60,7 +60,7 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
     const handler = (event) => {
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
-      if (msg.type === 'agent-shell-output' && (!msg.sessionId || msg.sessionId === sessionId)) {
+      if (msg.type === 'agent-shell-output' && (!msg.chatSessionId || msg.chatSessionId === sessionId)) {
         const clean = msg.data
           .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
           .replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '')
