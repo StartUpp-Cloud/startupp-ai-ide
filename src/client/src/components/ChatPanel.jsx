@@ -551,7 +551,9 @@ function ChatSessionContent({
         flexDirection: 'column',
         flex: 1,
         minHeight: 0,
-        overflow: 'hidden'
+        overflow: 'hidden',
+        width: '100%',
+        position: isVisible ? 'relative' : 'absolute',
       }}
     >
       {/* Search result indicator */}
