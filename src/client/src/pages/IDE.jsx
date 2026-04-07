@@ -480,7 +480,7 @@ export default function IDE() {
 
         {/* ── Center: Chat ── */}
         {/* Render cached ChatPanels - keeps them mounted for instant switching */}
-        <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, maxHeight: '100%', position: 'relative' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, height: '100%', width: '100%' }}>
           {cachedProjectIds.map(projectId => (
             <div
               key={projectId}

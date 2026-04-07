@@ -104,7 +104,7 @@ export default function ChatInput({ mode, projectId, onSend, onSearch, disabled 
       : 'Tell the agent what to do... (Ctrl+Enter to send)';
 
   return (
-    <div className="flex-shrink-0 border-t border-surface-700 bg-surface-850/80 px-3 py-2">
+    <div className="flex-shrink-0 border-t border-surface-700 bg-surface-850/80 px-3 py-2 w-full">
       {/* Search bar */}
       {searching && (
         <div className="flex items-center gap-2 mb-2">
@@ -157,7 +157,7 @@ export default function ChatInput({ mode, projectId, onSend, onSearch, disabled 
       )}
 
       {/* Input area */}
-      <div className="flex items-end gap-2">
+      <div className="flex items-end gap-2 w-full min-w-0">
         {/* Search button */}
         <button
           onClick={() => setSearching(!searching)}
@@ -204,7 +204,7 @@ export default function ChatInput({ mode, projectId, onSend, onSearch, disabled 
           placeholder={placeholder}
           disabled={disabled}
           rows={1}
-          className="flex-1 bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 resize-none outline-none focus:border-primary-500/50 focus:ring-1 focus:ring-primary-500/20 disabled:opacity-40 placeholder:text-surface-500 transition-colors"
+          className="flex-1 min-w-0 bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 resize-none outline-none focus:border-primary-500/50 focus:ring-1 focus:ring-primary-500/20 disabled:opacity-40 placeholder:text-surface-500 transition-colors"
         />
 
         {/* Send button */}
