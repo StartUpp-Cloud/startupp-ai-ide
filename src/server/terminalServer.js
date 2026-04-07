@@ -13,6 +13,7 @@ import { sessionContext } from './sessionContext.js';
 import { orchestrator } from './orchestrator.js';
 import { activityFeed } from './activityFeed.js';
 import { agentShellPool } from './agentShellPool.js';
+import { slackService } from './slackService.js';
 
 class TerminalServer {
   constructor() {
@@ -64,16 +65,28 @@ class TerminalServer {
    */
   broadcastToChatSession(chatSessionId, message) {
     const clients = this.chatSessionClients.get(chatSessionId);
-    if (!clients || clients.size === 0) return;
+    if (!clients || clients.size === 0) {
+      // Even with no UI clients, still mirror to Slack
+    }
 
     const data = JSON.stringify(message);
-    for (const client of clients) {
-      if (client.readyState === 1) { // WebSocket.OPEN
-        try {
-          client.send(data);
-        } catch (err) {
-          console.warn(`[TerminalServer] Failed to send to chat session client:`, err.message);
+    if (clients) {
+      for (const client of clients) {
+        if (client.readyState === 1) { // WebSocket.OPEN
+          try {
+            client.send(data);
+          } catch (err) {
+            console.warn(`[TerminalServer] Failed to send to chat session client:`, err.message);
+          }
         }
+      }
+    }
+
+    // Mirror assistant/error messages to Slack thread
+    if (slackService.connected && message?.type === 'chat-message' && message.message) {
+      const msg = message.message;
+      if ((msg.role === 'assistant' || msg.role === 'error') && msg.content && msg.projectId) {
+        slackService.postToThread(msg.projectId, chatSessionId, msg.content).catch(() => {});
       }
     }
   }
@@ -107,6 +120,50 @@ class TerminalServer {
     // Broadcast agent shell output to all clients for live stream viewer
     agentShellPool.on('output', ({ sessionId, data }) => {
       this.broadcast({ type: 'agent-shell-output', sessionId, data });
+    });
+
+    // Register Slack inbound handler — Slack messages enter the same chat pipeline
+    slackService.onInboundMessage(async ({ projectId, sessionId, content, mode, tool }) => {
+      const { chatStore } = await import('./chatStore.js');
+      const { agentGateway } = await import('./agentGateway.js');
+
+      chatStore.migrateIfNeeded(projectId);
+
+      // Persist user message
+      const userMsg = chatStore.addMessage({
+        projectId,
+        sessionId,
+        role: 'user',
+        content,
+        metadata: { mode, source: 'slack' },
+      });
+
+      // Broadcast to UI clients watching this session
+      this.broadcastToChatSession(sessionId, { type: 'chat-message', message: userMsg });
+      this.broadcast({ type: 'chat-message', message: userMsg });
+
+      // Dispatch to agent
+      agentGateway.handleTask({
+        projectId,
+        sessionId,
+        content,
+        attachments: [],
+        mode: mode || 'agent',
+        tool: tool || 'claude',
+        broadcastFn: (data) => {
+          this.broadcastToChatSession(sessionId, data);
+          this.broadcast(data);
+        },
+      }).catch(err => {
+        const errMsg = chatStore.addMessage({
+          projectId,
+          sessionId,
+          role: 'error',
+          content: `Gateway error: ${err.message}`,
+        });
+        this.broadcastToChatSession(sessionId, { type: 'chat-message', message: errMsg });
+        this.broadcast({ type: 'chat-message', message: errMsg });
+      });
     });
 
     this.wss.on('connection', (ws) => {

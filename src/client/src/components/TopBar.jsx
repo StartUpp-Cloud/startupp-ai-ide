@@ -6,12 +6,14 @@ import {
   UserCircle,
   Settings,
   HelpCircle,
+  MessageSquare,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import SystemHealth from './SystemHealth';
 import ModeToggle from './ModeToggle';
 import LLMSettingsPanel from './LLMSettingsPanel';
 import WelcomeGuide from './WelcomeGuide';
+import SlackSetupPanel from './SlackSetupPanel';
 
 const CLI_TOOLS = [
   { id: 'claude', name: 'Claude', color: 'text-orange-400', context: 'Full conversation memory via --resume' },
@@ -32,11 +34,13 @@ export default function TopBar({
   selectedTool,
   onToolChange,
   notificationSlot,
+  projects,
 }) {
   const completedSteps = planSteps ? planSteps.filter((_, i) => i < (planCurrentStep || 0)).length : 0;
   const totalSteps = planSteps?.length || 0;
   const [showToolMenu, setShowToolMenu] = useState(false);
   const [showLLMSettings, setShowLLMSettings] = useState(false);
+  const [showSlack, setShowSlack] = useState(false);
   const [showGuide, setShowGuide] = useState(() => localStorage.getItem('hideWelcomeGuide') !== 'true');
   const toolMenuRef = useRef(null);
 
@@ -127,6 +131,18 @@ export default function TopBar({
           </div>
         )}
 
+        <div className="w-px h-4 bg-surface-700" />
+
+        {/* Slack */}
+        <button
+          onClick={() => setShowSlack(true)}
+          className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium text-surface-400 hover:text-surface-200 hover:bg-surface-750 transition-colors"
+          title="Connect Slack"
+        >
+          <MessageSquare size={12} className="text-[#4A154B]" />
+          <span className="hidden sm:inline">Slack</span>
+        </button>
+
         {/* Spacer */}
         <div className="flex-1" />
 
@@ -181,6 +197,7 @@ export default function TopBar({
       {/* Modals */}
       <LLMSettingsPanel isOpen={showLLMSettings} onClose={() => setShowLLMSettings(false)} />
       <WelcomeGuide isOpen={showGuide} onClose={() => setShowGuide(false)} />
+      <SlackSetupPanel isOpen={showSlack} onClose={() => setShowSlack(false)} projects={projects || []} />
     </div>
   );
 }

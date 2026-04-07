@@ -345,6 +345,7 @@ export default function IDE() {
         onModeChange={setAgentMode}
         selectedTool={selectedTool}
         onToolChange={setSelectedTool}
+        projects={projects}
         notificationSlot={
           <NotificationCenter
             notifications={notifications}

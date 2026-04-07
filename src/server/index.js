@@ -44,6 +44,7 @@ import containerRoutes from "./routes/containers.js";
 import sessionHistoryRoutes from "./routes/sessionHistory.js";
 import chatRoutes from "./routes/chat.js";
 import profileRoutes from "./routes/profile.js";
+import slackRoutes from "./routes/slack.js";
 import { authMiddleware, getToken } from "./authToken.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
@@ -148,6 +149,7 @@ async function startServer() {
     app.use("/api/session-history", sessionHistoryRoutes);
     app.use("/api/projects", chatRoutes);
     app.use("/api/profile", profileRoutes);
+    app.use("/api/slack", slackRoutes);
     app.use("/api/jobs", (await import("./routes/jobs.js")).default);
 
     // Health check endpoint
@@ -278,11 +280,19 @@ async function startServer() {
     terminalServer.init(server);
 
     // Start server
-    server.listen(PORT, () => {
+    server.listen(PORT, async () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`WebSocket terminal available at ws://localhost:${PORT}/ws/terminal`);
       console.log(`Environment: ${NODE_ENV}`);
       console.log(`PM2 Process: ${process.env.pm_id || "Not managed by PM2"}`);
+
+      // Auto-start Slack bot if previously configured
+      try {
+        const { slackService } = await import("./slackService.js");
+        await slackService.autoStart();
+      } catch (err) {
+        console.warn("Slack auto-start skipped:", err.message);
+      }
     });
   } catch (error) {
     console.error("Failed to start server:", error);
