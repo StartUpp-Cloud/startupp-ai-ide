@@ -671,8 +671,14 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         const list = data.sessions || [];
         setSessions(list);
         if (list.length > 0) {
-          setOpenTabs([list[0].id]);
-          setActiveSessionId(list[0].id);
+          // Auto-open all pinned sessions + the most recent session
+          const pinnedIds = list.filter(s => s.pinned).map(s => s.id);
+          const mostRecentId = list[0].id;
+          const tabsToOpen = pinnedIds.includes(mostRecentId)
+            ? pinnedIds
+            : [mostRecentId, ...pinnedIds];
+          setOpenTabs(tabsToOpen);
+          setActiveSessionId(mostRecentId);
         } else {
           createNewSession();
         }
