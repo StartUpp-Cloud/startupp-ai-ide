@@ -19,7 +19,7 @@ const WS_CONFIG = {
  * Includes visibility-aware reconnection for stability.
  */
 export default function InternalConsole({ projectId }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const [connected, setConnected] = useState(false);
   const termRef = useRef(null);
   const xtermRef = useRef(null);
@@ -228,9 +228,13 @@ export default function InternalConsole({ projectId }) {
     <div className="border-t border-surface-700 flex-shrink-0">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full px-3 py-1 text-xs text-surface-500 hover:text-surface-200 bg-surface-850/50 transition-colors"
+        className={`flex items-center gap-2 w-full px-3 py-1.5 text-xs transition-colors ${
+          open
+            ? 'text-surface-500 hover:text-surface-200 bg-surface-850/50'
+            : 'text-surface-300 hover:text-surface-100 bg-surface-800 hover:bg-surface-750'
+        }`}
       >
-        <TerminalIcon size={12} />
+        <TerminalIcon size={open ? 12 : 14} className={open ? '' : 'text-primary-400'} />
         Internal Console
         {open && (
           <div
@@ -239,7 +243,7 @@ export default function InternalConsole({ projectId }) {
           />
         )}
         <span className="flex-1" />
-        {open ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+        {open ? <ChevronDown size={12} /> : <ChevronUp size={14} className="text-primary-400" />}
       </button>
       {open && (
         <>

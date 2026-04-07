@@ -5,11 +5,13 @@ import {
   ChevronDown,
   UserCircle,
   Settings,
+  HelpCircle,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import SystemHealth from './SystemHealth';
 import ModeToggle from './ModeToggle';
 import LLMSettingsPanel from './LLMSettingsPanel';
+import WelcomeGuide from './WelcomeGuide';
 
 const CLI_TOOLS = [
   { id: 'claude', name: 'Claude', color: 'text-orange-400', context: 'Full conversation memory via --resume' },
@@ -35,6 +37,7 @@ export default function TopBar({
   const totalSteps = planSteps?.length || 0;
   const [showToolMenu, setShowToolMenu] = useState(false);
   const [showLLMSettings, setShowLLMSettings] = useState(false);
+  const [showGuide, setShowGuide] = useState(() => localStorage.getItem('hideWelcomeGuide') !== 'true');
   const toolMenuRef = useRef(null);
 
   const activeTool = CLI_TOOLS.find(t => t.id === selectedTool) || CLI_TOOLS[0];
@@ -154,6 +157,14 @@ export default function TopBar({
           </button>
 
           <button
+            onClick={() => setShowGuide(true)}
+            className="p-1.5 rounded hover:bg-surface-750 text-surface-400 hover:text-surface-200 transition-colors"
+            title="Welcome Guide"
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+          </button>
+
+          <button
             onClick={() => setShowLLMSettings(true)}
             className="p-1.5 rounded hover:bg-surface-750 text-surface-400 hover:text-surface-200 transition-colors"
             title="LLM Settings"
@@ -167,8 +178,9 @@ export default function TopBar({
         </div>
       </div>
 
-      {/* LLM Settings Modal */}
+      {/* Modals */}
       <LLMSettingsPanel isOpen={showLLMSettings} onClose={() => setShowLLMSettings(false)} />
+      <WelcomeGuide isOpen={showGuide} onClose={() => setShowGuide(false)} />
     </div>
   );
 }
