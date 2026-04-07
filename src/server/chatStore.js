@@ -117,6 +117,14 @@ class ChatStore {
   }
 
   /**
+   * Get session metadata (including cliSessionId for --resume).
+   */
+  getSessionMeta(projectId, sessionId) {
+    const sessions = this._readIndex(projectId);
+    return sessions.find(s => s.id === sessionId) || null;
+  }
+
+  /**
    * Mark a session as having unread messages.
    * Called when an agent response is received.
    */

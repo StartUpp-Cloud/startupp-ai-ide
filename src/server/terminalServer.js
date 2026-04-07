@@ -530,6 +530,22 @@ class TerminalServer {
             // Auto-resume the conversation
             this._autoResumeJob(ws, projectId, chatSessionId, mostRecent);
           }
+
+          // Check if last message looks incomplete (e.g., "Waiting on agent...")
+          // This handles cases where job completed but Claude was waiting for background agents
+          if (incomplete.length === 0 && resumableJobs.length === 0) {
+            const lastIncomplete = await this._checkForIncompleteResponse(projectId, chatSessionId, chatStore);
+            if (lastIncomplete) {
+              console.log(`[terminalServer] Last message looks incomplete, auto-resuming: "${lastIncomplete.snippet}"`);
+              this.send(ws, {
+                type: 'chat-recovery-starting',
+                chatSessionId,
+                projectId,
+                message: 'Checking on previous work...',
+              });
+              this._autoResumeIncomplete(ws, projectId, chatSessionId, lastIncomplete.cliSessionId);
+            }
+          }
         }
         break;
       }
@@ -1391,6 +1407,116 @@ class TerminalServer {
       }
     }
     this.send(ws, { type: 'kill-switch-activated', executionId });
+  }
+
+  /**
+   * Check if the last assistant message looks incomplete (waiting on agents, etc.)
+   * Returns { snippet, cliSessionId } if incomplete, null otherwise.
+   */
+  async _checkForIncompleteResponse(projectId, chatSessionId, chatStore) {
+    try {
+      const messages = chatStore.getMessages(projectId, chatSessionId, 5); // Last 5 messages
+      if (!messages || messages.length === 0) return null;
+
+      // Find the most recent assistant message
+      const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+      if (!lastAssistant) return null;
+
+      const content = lastAssistant.content || '';
+      const lowerContent = content.toLowerCase();
+
+      // Patterns that indicate an incomplete response (waiting for background work)
+      const incompletePatterns = [
+        /waiting (on|for).*(agent|task|background)/i,
+        /agent.*running/i,
+        /background.*running/i,
+        /working in the background/i,
+        /launched.*agent/i,
+        /\.\.\.$/,  // Ends with ellipsis
+      ];
+
+      const looksIncomplete = incompletePatterns.some(p => p.test(content));
+
+      // Also check if it was recent (within last 60 minutes)
+      const msgTime = new Date(lastAssistant.createdAt || lastAssistant.timestamp);
+      const ageMinutes = (Date.now() - msgTime.getTime()) / (1000 * 60);
+
+      if (looksIncomplete && ageMinutes < 60) {
+        // Try to get CLI session ID from session metadata
+        const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
+        const cliSessionId = sessionMeta?.cliSessionId || lastAssistant.metadata?.cliSessionId;
+
+        if (cliSessionId) {
+          return {
+            snippet: content.slice(0, 100),
+            cliSessionId,
+            messageId: lastAssistant.id,
+          };
+        }
+      }
+
+      return null;
+    } catch (err) {
+      console.warn('[terminalServer] Error checking for incomplete response:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Auto-resume when last message looks incomplete (was waiting for background agents).
+   */
+  async _autoResumeIncomplete(ws, projectId, chatSessionId, cliSessionId) {
+    try {
+      const { chatStore } = await import('./chatStore.js');
+      const { agentGateway } = await import('./agentGateway.js');
+
+      // Create a system message explaining the check
+      const recoveryMsg = chatStore.addMessage({
+        projectId,
+        sessionId: chatSessionId,
+        role: 'system',
+        content: '🔄 Checking on previous work...',
+        metadata: { recovery: true },
+      });
+      this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: recoveryMsg });
+      this.broadcast({ type: 'chat-message', message: recoveryMsg });
+
+      // Ensure CLI session ID is stored
+      chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId });
+
+      // Ask Claude to check on the status
+      const followUpPrompt = 'What is the status of the background agents or tasks you were working on? If they completed, please summarize the results. If they are still running, let me know.';
+
+      console.log(`[terminalServer] Checking incomplete work with CLI session ${cliSessionId}`);
+
+      await agentGateway.handleTask({
+        projectId,
+        sessionId: chatSessionId,
+        content: followUpPrompt,
+        mode: 'agent',
+        tool: 'claude',
+        broadcastFn: (msg) => {
+          this.broadcastToChatSession(chatSessionId, msg);
+          this.broadcast(msg);
+        },
+      });
+
+      this.send(ws, {
+        type: 'chat-recovery-complete',
+        chatSessionId,
+        projectId,
+        message: 'Status check complete.',
+      });
+
+    } catch (err) {
+      console.warn('[terminalServer] Auto-resume incomplete failed:', err.message);
+      this.send(ws, {
+        type: 'chat-recovery-complete',
+        chatSessionId,
+        projectId,
+        message: 'Ready to continue.',
+      });
+    }
   }
 
   /**
