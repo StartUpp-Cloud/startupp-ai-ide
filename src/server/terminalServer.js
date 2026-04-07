@@ -488,6 +488,7 @@ class TerminalServer {
       case 'attach-chat-session': {
         // Attach this WebSocket to a specific chat session for isolated communication
         const { chatSessionId, projectId } = payload;
+        console.log(`[terminalServer] ▶ attach-chat-session received: project=${projectId}, session=${chatSessionId}`);
         if (chatSessionId) {
           this.attachToChatSession(ws, chatSessionId);
           this.send(ws, { type: 'chat-session-attached', chatSessionId, projectId });

@@ -241,28 +241,48 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
 
   // Attach to chat session when it changes (for isolated per-session communication)
   useEffect(() => {
-    if (!projectId || !activeSessionId || !wsRef?.current) return;
+    if (!projectId || !activeSessionId) return;
+
+    let cancelled = false;
+    let retryCount = 0;
+    const maxRetries = 10;
 
     const attachToSession = () => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
+      if (cancelled) return;
+
+      // Check if wsRef exists and is connected
+      if (wsRef?.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'attach-chat-session',
           chatSessionId: activeSessionId,
           projectId,
         }));
         console.log(`[ChatPanel] Attached to chat session ${activeSessionId}`);
+        return true;
       }
+      return false;
     };
 
-    // Attach immediately if connected
-    attachToSession();
+    // Try immediately
+    if (!attachToSession() && retryCount < maxRetries) {
+      // If not ready, retry with backoff
+      const tryAttach = () => {
+        if (cancelled) return;
+        retryCount++;
+        if (!attachToSession() && retryCount < maxRetries) {
+          setTimeout(tryAttach, 200); // Retry every 200ms
+        }
+      };
+      setTimeout(tryAttach, 100);
+    }
 
-    // Re-attach when WebSocket reconnects
+    // Also listen for WebSocket reconnections
     const handleOpen = () => attachToSession();
-    wsRef.current?.addEventListener('open', handleOpen);
+    wsRef?.current?.addEventListener('open', handleOpen);
 
     return () => {
-      wsRef.current?.removeEventListener('open', handleOpen);
+      cancelled = true;
+      wsRef?.current?.removeEventListener('open', handleOpen);
     };
   }, [projectId, activeSessionId, wsRef]);
 
