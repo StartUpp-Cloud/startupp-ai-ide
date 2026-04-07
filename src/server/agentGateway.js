@@ -47,7 +47,7 @@ class AgentGateway extends EventEmitter {
     this._running.set(sessionId, { ...ctx, queue: this._running.get(sessionId)?.queue });
 
     try {
-      broadcastFn({ type: 'agent-status', projectId, busy: true });
+      broadcastFn({ type: 'agent-status', projectId, sessionId, busy: true });
 
       // Auto-name session on first message (async, don't wait)
       this._autoNameSession(projectId, sessionId, content);
@@ -74,7 +74,7 @@ class AgentGateway extends EventEmitter {
       this._addErrorMessage(projectId, sessionId, `Error: ${error.message}`, broadcastFn);
     } finally {
       this._running.delete(sessionId);
-      broadcastFn({ type: 'agent-status', projectId, busy: false });
+      broadcastFn({ type: 'agent-status', projectId, sessionId, busy: false });
     }
   }
 
@@ -1042,7 +1042,7 @@ RULES:
     this._running.set(sessionId, { ...ctx, queue: null });
 
     try {
-      broadcastFn({ type: 'agent-status', projectId, busy: true });
+      broadcastFn({ type: 'agent-status', projectId, sessionId, busy: true });
       for (let i = 0; i < steps.length && !ctx.aborted; i++) {
         const tasks = steps.map((s, j) => ({
           title: s.title,
@@ -1061,7 +1061,7 @@ RULES:
       this._addErrorMessage(projectId, sessionId, `Plan failed: ${error.message}`, broadcastFn);
     } finally {
       this._running.delete(sessionId);
-      broadcastFn({ type: 'agent-status', projectId, busy: false });
+      broadcastFn({ type: 'agent-status', projectId, sessionId, busy: false });
     }
   }
 

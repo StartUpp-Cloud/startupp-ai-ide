@@ -307,6 +307,23 @@ function ChatSessionContent({
           setRecoveryStatus({ active: false, message: null });
           break;
 
+        case 'chat-progress':
+          // Progress messages during agent work - check sessionId inside message
+          if (msg.message?.sessionId === sessionId && msg.message?.content) {
+            setStreamingMessage(prev => prev ? {
+              ...prev,
+              content: msg.message.content,
+              progressTimestamp: Date.now(),
+            } : {
+              id: 'progress-' + Date.now(),
+              role: 'progress',
+              content: msg.message.content,
+              createdAt: new Date().toISOString(),
+              streaming: true,
+            });
+          }
+          break;
+
         case 'job-progress':
           if (msg.progress) {
             setStreamingMessage(prev => prev ? {
@@ -320,6 +337,13 @@ function ChatSessionContent({
         case 'session-unread':
           if (msg.projectId === projectId && msg.sessionId === sessionId) {
             onSessionUpdate?.(sessionId, { hasUnread: msg.hasUnread });
+          }
+          break;
+
+        case 'agent-status':
+          // Agent busy state - needs sessionId to target correct session
+          if (msg.projectId === projectId && (!msg.sessionId || msg.sessionId === sessionId)) {
+            setAgentBusy(msg.busy || false);
           }
           break;
       }
