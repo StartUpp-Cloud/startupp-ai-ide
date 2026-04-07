@@ -497,6 +497,8 @@ export default function IDE() {
                   overflow: 'hidden',
                   visibility: projectId === selectedProjectId ? 'visible' : 'hidden',
                   pointerEvents: projectId === selectedProjectId ? 'auto' : 'none',
+                  zIndex: projectId === selectedProjectId ? 1 : 0,
+                  backgroundColor: '#0d1117',
                 }}
               >
                 <ChatPanel

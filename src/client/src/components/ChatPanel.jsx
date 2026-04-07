@@ -1085,6 +1085,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               overflow: 'hidden',
               visibility: tabId === activeSessionId ? 'visible' : 'hidden',
               pointerEvents: tabId === activeSessionId ? 'auto' : 'none',
+              zIndex: tabId === activeSessionId ? 1 : 0,
+              backgroundColor: '#0d1117',
             }}
           >
             <ChatSessionContent
