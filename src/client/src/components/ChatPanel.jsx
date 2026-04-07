@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
-import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check } from 'lucide-react';
 
 /**
  * Format job progress for display
@@ -768,7 +768,89 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     ));
   }, []);
 
-  const closedSessions = sessions.filter(s => !openTabs.includes(s.id));
+  // Pin/unpin a session
+  const togglePin = useCallback(async (sessionId, e) => {
+    e?.stopPropagation();
+    if (!projectId) return;
+    const session = sessions.find(s => s.id === sessionId);
+    const newPinned = !session?.pinned;
+
+    // Optimistic update
+    setSessions(prev => prev.map(s =>
+      s.id === sessionId ? { ...s, pinned: newPinned } : s
+    ));
+
+    try {
+      await fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pinned: newPinned }),
+      });
+    } catch {
+      // Revert on error
+      setSessions(prev => prev.map(s =>
+        s.id === sessionId ? { ...s, pinned: !newPinned } : s
+      ));
+    }
+  }, [projectId, sessions]);
+
+  // Rename a session
+  const renameSession = useCallback(async (sessionId, newName) => {
+    if (!projectId || !newName?.trim()) return;
+    const trimmedName = newName.trim();
+
+    // Optimistic update
+    setSessions(prev => prev.map(s =>
+      s.id === sessionId ? { ...s, name: trimmedName } : s
+    ));
+
+    try {
+      await fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmedName }),
+      });
+    } catch {
+      // Could revert, but name changes are not critical
+    }
+  }, [projectId]);
+
+  // State for inline editing
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editingName, setEditingName] = useState('');
+  const editInputRef = useRef(null);
+
+  const startEditing = useCallback((sessionId, currentName, e) => {
+    e?.stopPropagation();
+    setEditingSessionId(sessionId);
+    setEditingName(currentName || '');
+    setTimeout(() => editInputRef.current?.focus(), 0);
+  }, []);
+
+  const finishEditing = useCallback(() => {
+    if (editingSessionId && editingName.trim()) {
+      renameSession(editingSessionId, editingName);
+    }
+    setEditingSessionId(null);
+    setEditingName('');
+  }, [editingSessionId, editingName, renameSession]);
+
+  const cancelEditing = useCallback(() => {
+    setEditingSessionId(null);
+    setEditingName('');
+  }, []);
+
+  // Sort sessions: pinned first, then by most recent
+  const sortedSessions = useMemo(() =>
+    [...sessions].sort((a, b) => {
+      if (a.pinned && !b.pinned) return -1;
+      if (!a.pinned && b.pinned) return 1;
+      return 0; // Keep original order (most recent) for same pin status
+    }),
+    [sessions]
+  );
+
+  const closedSessions = sortedSessions.filter(s => !openTabs.includes(s.id));
   const openTabSessions = openTabs.map(id => sessions.find(s => s.id === id)).filter(Boolean);
 
   if (!projectId) {
@@ -791,16 +873,59 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             <div
               key={s.id}
               onClick={() => switchToTab(s.id)}
-              className={`group flex items-center gap-1.5 px-3 py-1.5 cursor-pointer border-r border-surface-700/30 min-w-0 max-w-[180px] transition-colors ${
+              className={`group flex items-center gap-1.5 px-3 py-1.5 cursor-pointer border-r border-surface-700/30 min-w-0 max-w-[200px] transition-colors ${
                 s.id === activeSessionId
                   ? 'bg-surface-800 text-surface-100'
                   : 'bg-surface-850/80 text-surface-400 hover:bg-surface-800/50 hover:text-surface-200'
               }`}
             >
-              <MessageCircle size={11} className={s.id === activeSessionId ? 'text-primary-400 flex-shrink-0' : 'text-surface-600 flex-shrink-0'} />
-              <span className="truncate text-[11px]">{s.name || 'Chat'}</span>
+              {s.pinned ? (
+                <Pin size={10} className="text-amber-400 flex-shrink-0 -rotate-45" />
+              ) : (
+                <MessageCircle size={11} className={s.id === activeSessionId ? 'text-primary-400 flex-shrink-0' : 'text-surface-600 flex-shrink-0'} />
+              )}
+              {editingSessionId === s.id ? (
+                <input
+                  ref={editInputRef}
+                  type="text"
+                  value={editingName}
+                  onChange={(e) => setEditingName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') finishEditing();
+                    if (e.key === 'Escape') cancelEditing();
+                  }}
+                  onBlur={finishEditing}
+                  onClick={(e) => e.stopPropagation()}
+                  className="flex-1 min-w-0 bg-surface-700 border border-surface-600 rounded px-1 py-0 text-[11px] text-surface-100 focus:outline-none focus:border-primary-500"
+                  style={{ maxWidth: '120px' }}
+                  placeholder="Name..."
+                />
+              ) : (
+                <span className="truncate text-[11px]">{s.name || 'Chat'}</span>
+              )}
               {s.hasUnread && s.id !== activeSessionId && (
                 <span className="flex-shrink-0 w-1.5 h-1.5 rounded-full bg-primary-500 animate-pulse" />
+              )}
+              {/* Pin button - show on hover for active tab */}
+              {s.id === activeSessionId && (
+                <>
+                  <button
+                    onClick={(e) => togglePin(s.id, e)}
+                    className={`p-0.5 rounded flex-shrink-0 transition-all opacity-0 group-hover:opacity-100 ${
+                      s.pinned ? 'text-amber-400 hover:text-amber-300' : 'text-surface-500 hover:text-amber-400'
+                    }`}
+                    title={s.pinned ? 'Unpin session' : 'Pin session'}
+                  >
+                    <Pin size={9} className={s.pinned ? '-rotate-45' : ''} />
+                  </button>
+                  <button
+                    onClick={(e) => startEditing(s.id, s.name, e)}
+                    className="p-0.5 rounded flex-shrink-0 transition-all opacity-0 group-hover:opacity-100 text-surface-500 hover:text-surface-200"
+                    title="Rename session"
+                  >
+                    <Pencil size={9} />
+                  </button>
+                </>
               )}
               <button
                 onClick={(e) => closeTab(s.id, e)}
@@ -850,21 +975,70 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
                     {closedSessions.map(s => (
                       <div
                         key={s.id}
-                        onClick={() => openSession(s.id)}
+                        onClick={() => editingSessionId !== s.id && openSession(s.id)}
                         className="flex items-center gap-2 px-3 py-2 text-[11px] cursor-pointer transition-colors group text-surface-300 hover:bg-surface-750"
                       >
-                        <MessageCircle size={11} className="text-surface-600" />
-                        <span className="flex-1 truncate">{s.name}</span>
-                        <span className="text-[9px] text-surface-600 flex-shrink-0 tabular-nums">
-                          {s.messageCount || 0} msg
-                        </span>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                          className="p-0.5 text-surface-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
-                          title="Delete permanently"
-                        >
-                          <Trash2 size={10} />
-                        </button>
+                        {s.pinned ? (
+                          <Pin size={11} className="text-amber-400 flex-shrink-0 -rotate-45" />
+                        ) : (
+                          <MessageCircle size={11} className="text-surface-600 flex-shrink-0" />
+                        )}
+                        {editingSessionId === s.id ? (
+                          <input
+                            ref={editInputRef}
+                            type="text"
+                            value={editingName}
+                            onChange={(e) => setEditingName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') finishEditing();
+                              if (e.key === 'Escape') cancelEditing();
+                            }}
+                            onBlur={finishEditing}
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex-1 min-w-0 bg-surface-700 border border-surface-600 rounded px-1.5 py-0.5 text-[11px] text-surface-100 focus:outline-none focus:border-primary-500"
+                            placeholder="Session name..."
+                          />
+                        ) : (
+                          <span className="flex-1 truncate">{s.name}</span>
+                        )}
+                        {editingSessionId === s.id ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); finishEditing(); }}
+                            className="p-0.5 text-green-400 hover:text-green-300 transition-colors flex-shrink-0"
+                            title="Save"
+                          >
+                            <Check size={10} />
+                          </button>
+                        ) : (
+                          <>
+                            <span className="text-[9px] text-surface-600 flex-shrink-0 tabular-nums group-hover:hidden">
+                              {s.messageCount || 0} msg
+                            </span>
+                            <button
+                              onClick={(e) => togglePin(s.id, e)}
+                              className={`p-0.5 transition-all hidden group-hover:block flex-shrink-0 ${
+                                s.pinned ? 'text-amber-400 hover:text-amber-300' : 'text-surface-500 hover:text-amber-400'
+                              }`}
+                              title={s.pinned ? 'Unpin' : 'Pin'}
+                            >
+                              <Pin size={10} className={s.pinned ? '-rotate-45' : ''} />
+                            </button>
+                            <button
+                              onClick={(e) => startEditing(s.id, s.name, e)}
+                              className="p-0.5 text-surface-500 hover:text-surface-200 transition-all hidden group-hover:block flex-shrink-0"
+                              title="Rename"
+                            >
+                              <Pencil size={10} />
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                              className="p-0.5 text-surface-700 hover:text-red-400 hidden group-hover:block transition-all flex-shrink-0"
+                              title="Delete permanently"
+                            >
+                              <Trash2 size={10} />
+                            </button>
+                          </>
+                        )}
                       </div>
                     ))}
                   </div>

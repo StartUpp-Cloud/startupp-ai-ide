@@ -51,6 +51,18 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
   }
 });
 
+// POST /api/projects/:projectId/chat/sessions/:sessionId/pin — Toggle pin status
+router.post('/:projectId/chat/sessions/:sessionId/pin', (req, res) => {
+  try {
+    const { projectId, sessionId } = req.params;
+    const { pinned } = req.body;
+    chatStore.updateSessionMeta(projectId, sessionId, { pinned: !!pinned });
+    res.json({ pinned: !!pinned });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET /api/projects/:projectId/chat — Get messages (paginated, session-scoped)
 router.get('/:projectId/chat', (req, res) => {
   try {
