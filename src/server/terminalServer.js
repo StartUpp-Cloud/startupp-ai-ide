@@ -1448,12 +1448,12 @@ class TerminalServer {
       const looksIncomplete = incompletePatterns.some(p => p.test(content));
       console.log(`[terminalServer] Pattern match result: looksIncomplete=${looksIncomplete}`);
 
-      // Also check if it was recent (within last 60 minutes)
+      // Also check if it was recent (within last 2 hours)
       const msgTime = new Date(lastAssistant.createdAt || lastAssistant.timestamp);
       const ageMinutes = (Date.now() - msgTime.getTime()) / (1000 * 60);
       console.log(`[terminalServer] Message age: ${ageMinutes.toFixed(1)} minutes`);
 
-      if (looksIncomplete && ageMinutes < 60) {
+      if (looksIncomplete && ageMinutes < 120) {
         // Try to get CLI session ID from session metadata
         const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
         const cliSessionId = sessionMeta?.cliSessionId || lastAssistant.metadata?.cliSessionId;
