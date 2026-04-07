@@ -1069,19 +1069,36 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         </div>
       </div>
 
-      {/* Render ALL open sessions - hidden ones use display:none but stay mounted */}
-      {openTabs.map(tabId => (
-        <ChatSessionContent
-          key={tabId}
-          projectId={projectId}
-          sessionId={tabId}
-          wsRef={wsRef}
-          mode={mode}
-          tool={tool}
-          isVisible={tabId === activeSessionId}
-          onSessionUpdate={handleSessionUpdate}
-        />
-      ))}
+      {/* Render ALL open sessions - use absolute positioning to avoid layout conflicts */}
+      <div style={{ position: 'relative', flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}>
+        {openTabs.map(tabId => (
+          <div
+            key={tabId}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              visibility: tabId === activeSessionId ? 'visible' : 'hidden',
+              pointerEvents: tabId === activeSessionId ? 'auto' : 'none',
+            }}
+          >
+            <ChatSessionContent
+              projectId={projectId}
+              sessionId={tabId}
+              wsRef={wsRef}
+              mode={mode}
+              tool={tool}
+              isVisible={tabId === activeSessionId}
+              onSessionUpdate={handleSessionUpdate}
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
