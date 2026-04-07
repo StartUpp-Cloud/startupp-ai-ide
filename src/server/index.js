@@ -202,6 +202,25 @@ async function startServer() {
       });
     });
 
+    // Server restart - gracefully restart the IDE server (PM2 will auto-restart)
+    app.post("/api/server/restart", async (req, res) => {
+      res.json({
+        status: "restarting",
+        message: "Server will restart momentarily. Please wait a few seconds.",
+      });
+
+      setTimeout(async () => {
+        console.log("Server restart requested via API");
+        try {
+          await ptyManager.cleanup();
+          terminalServer.cleanup();
+        } catch (e) {
+          console.warn("Cleanup error during restart:", e.message);
+        }
+        process.exit(0);
+      }, 100);
+    });
+
     // Setup status - used by onboarding gate
     app.get("/api/setup-status", async (req, res) => {
       try {

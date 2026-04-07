@@ -248,6 +248,25 @@ class ContainerManager extends EventEmitter {
   }
 
   /**
+   * Restart a running container (stop then start)
+   * @param {string} containerName - Name of the container to restart
+   * @param {number} [timeout=10] - Seconds to wait for graceful stop
+   * @returns {boolean} - true if restart succeeded
+   */
+  restartContainer(containerName, timeout = 10) {
+    try {
+      dockerExec(`docker restart -t ${timeout} ${containerName}`, {
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: (timeout + 30) * 1000,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Remove a container and its volumes
    */
   removeContainer(containerName) {

@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
+import { RefreshCw, Server, Box, AlertTriangle } from 'lucide-react';
+import { useProjects } from '../contexts/ProjectContext';
 
 const POLL_INTERVAL = 5000; // 5 seconds
 
@@ -14,10 +16,16 @@ function getLevel(percent) {
   return { color: 'text-green-400', bg: 'bg-green-500', ring: 'ring-green-500/30', label: 'Normal' };
 }
 
-export default function SystemHealth() {
+export default function SystemHealth({ containerName }) {
+  const { notify } = useProjects();
   const [health, setHealth] = useState(null);
   const [showDetail, setShowDetail] = useState(false);
   const detailRef = useRef(null);
+
+  // Restart states
+  const [restartingServer, setRestartingServer] = useState(false);
+  const [restartingContainer, setRestartingContainer] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(null); // 'server' | 'container' | null
 
   useEffect(() => {
     let mounted = true;
@@ -41,6 +49,78 @@ export default function SystemHealth() {
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [showDetail]);
+
+  // Handle IDE server restart
+  const handleRestartServer = async () => {
+    setConfirmRestart(null);
+    setRestartingServer(true);
+
+    try {
+      const res = await fetch('/api/server/restart', { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to initiate restart');
+
+      notify?.('IDE Server restarting...', 'info');
+
+      // Poll for server to come back online
+      const checkServer = async (attempts = 0) => {
+        if (attempts > 30) {
+          notify?.('Server restart timed out. Please refresh manually.', 'error');
+          setRestartingServer(false);
+          return;
+        }
+
+        try {
+          const healthRes = await fetch('/api/health');
+          if (healthRes.ok) {
+            notify?.('IDE Server restarted successfully!', 'success');
+            setRestartingServer(false);
+            return;
+          }
+        } catch {
+          // Server not ready yet
+        }
+
+        setTimeout(() => checkServer(attempts + 1), 1000);
+      };
+
+      // Wait for server to shut down, then start polling
+      setTimeout(() => checkServer(), 2000);
+
+    } catch (error) {
+      notify?.(error.message, 'error');
+      setRestartingServer(false);
+    }
+  };
+
+  // Handle container restart
+  const handleRestartContainer = async () => {
+    if (!containerName) {
+      notify?.('No container associated with this project', 'error');
+      return;
+    }
+
+    setConfirmRestart(null);
+    setRestartingContainer(true);
+
+    try {
+      const res = await fetch(`/api/containers/${containerName}/restart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeout: 10 })
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to restart container');
+      }
+
+      notify?.('Container restarted successfully!', 'success');
+    } catch (error) {
+      notify?.(error.message, 'error');
+    } finally {
+      setRestartingContainer(false);
+    }
+  };
 
   if (!health) return null;
 
@@ -116,6 +196,83 @@ export default function SystemHealth() {
             <div className="flex items-center justify-between text-[11px] mt-0.5">
               <span className="text-surface-500">Uptime</span>
               <span className="text-surface-400 font-mono">{formatUptime(health.uptime)}</span>
+            </div>
+          </div>
+
+          {/* Restart Actions */}
+          <div className="pt-2 border-t border-surface-700/60 space-y-1.5">
+            <div className="text-[11px] font-medium text-surface-400 mb-2">Actions</div>
+
+            {/* Restart IDE Server */}
+            <button
+              onClick={() => setConfirmRestart('server')}
+              disabled={restartingServer}
+              className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-[11px] text-surface-300 hover:bg-surface-750 hover:text-surface-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {restartingServer ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Server className="w-3.5 h-3.5" />
+              )}
+              <span>{restartingServer ? 'Restarting...' : 'Restart IDE Server'}</span>
+            </button>
+
+            {/* Restart Container (only show if container exists) */}
+            {containerName && (
+              <button
+                onClick={() => setConfirmRestart('container')}
+                disabled={restartingContainer}
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-[11px] text-surface-300 hover:bg-surface-750 hover:text-surface-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {restartingContainer ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Box className="w-3.5 h-3.5" />
+                )}
+                <span>{restartingContainer ? 'Restarting...' : 'Restart Container'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal */}
+      {confirmRestart && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-surface-950/70 backdrop-blur-sm"
+            onClick={() => setConfirmRestart(null)}
+          />
+          <div className="relative bg-surface-800 border border-surface-700 rounded-xl p-4 w-full max-w-sm shadow-modal animate-scale-in">
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-lg bg-yellow-500/15 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="w-4 h-4 text-yellow-400" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-sm font-medium text-surface-100 mb-1">
+                  {confirmRestart === 'server' ? 'Restart IDE Server?' : 'Restart Container?'}
+                </h3>
+                <p className="text-xs text-surface-400">
+                  {confirmRestart === 'server'
+                    ? 'This will briefly disconnect all terminals and clients. They will reconnect automatically.'
+                    : 'This will restart the Docker container. Running processes inside will be terminated.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setConfirmRestart(null)}
+                className="px-3 py-1.5 text-xs text-surface-300 hover:text-surface-100 hover:bg-surface-750 rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRestart === 'server' ? handleRestartServer : handleRestartContainer}
+                className="px-3 py-1.5 text-xs bg-primary-500 text-white hover:bg-primary-600 rounded transition-colors"
+              >
+                Restart
+              </button>
             </div>
           </div>
         </div>

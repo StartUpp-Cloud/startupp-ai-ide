@@ -161,7 +161,7 @@ export default function TopBar({
             <Settings className="w-3.5 h-3.5" />
           </button>
 
-          <SystemHealth />
+          <SystemHealth containerName={selectedProject?.containerName} />
 
           {notificationSlot}
         </div>

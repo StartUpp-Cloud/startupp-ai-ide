@@ -137,6 +137,29 @@ router.post("/:name/stop", (req, res) => {
 });
 
 /**
+ * POST /api/containers/:name/restart
+ * Restart a container (stop + start)
+ */
+router.post("/:name/restart", (req, res) => {
+  try {
+    const { timeout } = req.body;
+    const success = containerManager.restartContainer(
+      req.params.name,
+      timeout || 10
+    );
+    if (success) {
+      res.json({ status: "restarted", container: req.params.name });
+    } else {
+      res
+        .status(404)
+        .json({ error: "Container not found or failed to restart" });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * DELETE /api/containers/:name
  * Remove a container and its volumes
  */
