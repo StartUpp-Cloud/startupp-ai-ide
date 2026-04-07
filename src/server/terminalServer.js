@@ -1423,7 +1423,8 @@ class TerminalServer {
       }
 
       // Find the most recent assistant/agent message
-      const lastAssistant = [...messages].reverse().find(m =>
+      // Note: getMessages returns messages in reverse chronological order (most recent first)
+      const lastAssistant = messages.find(m =>
         m.role === 'assistant' || m.role === 'agent'
       );
       if (!lastAssistant) {
