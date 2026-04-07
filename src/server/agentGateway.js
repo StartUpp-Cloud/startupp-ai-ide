@@ -450,8 +450,11 @@ RULES:
         }
 
         // ── Final failure: still finalize with whatever we got ──
+        // Use the error message directly if it's already formatted (auth, rate limit, etc.)
         const failureContent = result.error
-          ? `Error: ${result.error}`
+          ? (result.error.startsWith('🔐') || result.error.startsWith('⏳') || result.error.startsWith('🔄')
+              ? result.error
+              : `Error: ${result.error}`)
           : result.displayOutput || `No response from ${tool}. Check Internal Console.`;
 
         // Fail the job
@@ -737,10 +740,20 @@ RULES:
       }
       // Check for error in the result
       if (parsed.isError) {
+        // Don't retry on auth errors - user needs to re-login
+        if (parsed.errorType === 'auth') {
+          return { success: false, retry: false, displayOutput, error: displayOutput };
+        }
+        // Don't retry on rate limits - just show the message
+        if (parsed.errorType === 'rate_limit') {
+          return { success: false, retry: false, displayOutput, error: displayOutput };
+        }
+        // Retry on context overflow with compaction
         const isOverflow = /context.*overflow|token.*limit|too many tokens/i.test(displayOutput);
         if (isOverflow) {
           return { success: false, retry: true, retryReason: 'Context overflow', retryType: 'compaction' };
         }
+        // Other errors can be retried
         return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
       }
     } else {
@@ -1316,8 +1329,31 @@ NEEDS_USER`,
         .replace(/<h([1-6])>([\s\S]*?)<\/h\1>/gi, (_, l, c) => '#'.repeat(parseInt(l)) + ' ' + c);
     }
 
-    // Detect error results
+    // Detect error results and specific error types
     let isError = false;
+    let errorType = null;
+
+    // Check for authentication errors in the raw output
+    if (/authentication_error|401.*Invalid authentication|Invalid authentication credentials/i.test(cleanOutput)) {
+      isError = true;
+      errorType = 'auth';
+      text = '🔐 **Authentication failed** — Your API key is invalid or expired.\n\nRun `/login` to re-authenticate.';
+    }
+
+    // Check for rate limit errors
+    if (/rate_limit|429|too many requests/i.test(cleanOutput)) {
+      isError = true;
+      errorType = 'rate_limit';
+      text = '⏳ **Rate limit reached** — Too many requests.\n\nPlease wait a moment and try again.';
+    }
+
+    // Check for overloaded errors
+    if (/overloaded|503|service unavailable/i.test(cleanOutput)) {
+      isError = true;
+      errorType = 'overloaded';
+      text = '🔄 **Service temporarily unavailable** — Claude is overloaded.\n\nPlease try again in a few minutes.';
+    }
+
     // Check stream-json result event for is_error flag
     for (const line of cleanOutput.split('\n')) {
       if (line.includes('"type":"result"') || line.includes('"type": "result"')) {
@@ -1329,7 +1365,7 @@ NEEDS_USER`,
       }
     }
 
-    return { text, sessionId, isError };
+    return { text, sessionId, isError, errorType };
   }
 
   _extractToolResponse(cleanOutput, cmd) {
