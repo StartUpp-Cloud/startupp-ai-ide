@@ -226,27 +226,32 @@ class PTYManager extends EventEmitter {
       // posix_spawnp can fail on macOS when spawning docker directly (code signing).
       const dockerBin = findDockerBinary();
       ensureDtach(containerName);
-      const socketPath = `/tmp/${role}-session.dtach`;
+      // Agent sessions need unique socket paths to prevent mixing; utility sessions share one
+      const socketPath = role === 'agent'
+        ? `/tmp/${role}-${sessionId}.dtach`
+        : `/tmp/${role}-session.dtach`;
       const workDir = cwd || '/workspace';
 
       // Check for existing active session for this container+role
-      // If one exists, return it instead of creating a duplicate
-      const existingSession = Array.from(this.sessions.values()).find(
-        s => s.containerName === containerName && s.role === role && s.status === 'active'
-      );
-      if (existingSession) {
-        console.log(`[ptyManager] Reusing existing ${role} session for ${containerName}: ${existingSession.id}`);
-        return {
-          sessionId: existingSession.id,
-          projectId: existingSession.projectId,
-          containerName,
-          role,
-          reused: true,
-        };
+      // ONLY reuse utility sessions, NOT agent sessions - each chat session needs its own Claude CLI
+      if (role === 'utility') {
+        const existingSession = Array.from(this.sessions.values()).find(
+          s => s.containerName === containerName && s.role === role && s.status === 'active'
+        );
+        if (existingSession) {
+          console.log(`[ptyManager] Reusing existing ${role} session for ${containerName}: ${existingSession.id}`);
+          return {
+            sessionId: existingSession.id,
+            projectId: existingSession.projectId,
+            containerName,
+            role,
+            reused: true,
+          };
+        }
       }
 
       // No active session - clean any orphaned dtach socket before creating new
-      this._cleanDtachSocket(containerName, role);
+      this._cleanDtachSocket(containerName, role, sessionId);
 
       shell = '/bin/bash';
       args = [
@@ -328,7 +333,7 @@ class PTYManager extends EventEmitter {
 
         // Clean up dtach socket inside container so the next session starts fresh
         if (containerName) {
-          this._cleanDtachSocket(containerName, role);
+          this._cleanDtachSocket(containerName, role, sessionId);
         }
 
         // Save session to history before cleanup
@@ -433,7 +438,7 @@ class PTYManager extends EventEmitter {
 
             // Clean up dtach socket inside container so the next session starts fresh
             if (containerName) {
-              this._cleanDtachSocket(containerName, role);
+              this._cleanDtachSocket(containerName, role, sessionId);
             }
 
             sessionHistory.saveSession({
@@ -618,7 +623,7 @@ class PTYManager extends EventEmitter {
 
       // Kill dtach session inside container so it doesn't leave a stale socket
       if (session.containerName) {
-        this._cleanDtachSocket(session.containerName, session.role || 'main');
+        this._cleanDtachSocket(session.containerName, session.role || 'main', sessionId);
       }
 
       session.ptyProcess.kill();
@@ -632,9 +637,12 @@ class PTYManager extends EventEmitter {
    * Kill the dtach process and remove its socket inside a container.
    * This prevents stale dtach sessions from being reattached to.
    */
-  _cleanDtachSocket(containerName, role) {
+  _cleanDtachSocket(containerName, role, sessionId = null) {
     const dockerBin = findDockerBinary();
-    const socketPath = `/tmp/${role}-session.dtach`;
+    // Agent sessions have unique socket paths; utility sessions share one
+    const socketPath = (role === 'agent' && sessionId)
+      ? `/tmp/${role}-${sessionId}.dtach`
+      : `/tmp/${role}-session.dtach`;
     try {
       // Kill any dtach process using this socket, then remove the socket file
       execSync(
