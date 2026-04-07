@@ -167,7 +167,7 @@ function ChatSessionContent({
   const [agentBusy, setAgentBusy] = useState(false);
   const [searchResults, setSearchResults] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
-  const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null });
+  const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
 
   const messagesEndRef = useRef(null);
   const knownIdsRef = useRef(new Set());
@@ -300,11 +300,11 @@ function ChatSessionContent({
           break;
 
         case 'chat-recovery-starting':
-          setRecoveryStatus({ active: true, message: msg.message || 'Recovering interrupted work...' });
+          setRecoveryStatus({ active: true, message: msg.message || 'Recovering interrupted work...', startedAt: Date.now(), stalled: false });
           break;
 
         case 'chat-recovery-complete':
-          setRecoveryStatus({ active: false, message: null });
+          setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
           break;
 
         case 'chat-progress':
@@ -352,6 +352,35 @@ function ChatSessionContent({
     wsRef.current.addEventListener('message', handleMessage);
     return () => wsRef.current?.removeEventListener('message', handleMessage);
   }, [wsRef, sessionId, projectId, onSessionUpdate]);
+
+  // Detect stalled recovery after 30 seconds
+  useEffect(() => {
+    if (!recoveryStatus.active || !recoveryStatus.startedAt || recoveryStatus.stalled) return;
+
+    const timeout = setTimeout(() => {
+      setRecoveryStatus(prev => prev.active ? { ...prev, stalled: true } : prev);
+    }, 30000);
+
+    return () => clearTimeout(timeout);
+  }, [recoveryStatus.active, recoveryStatus.startedAt, recoveryStatus.stalled]);
+
+  // Retry handler for stalled recovery
+  const handleRetry = () => {
+    setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
+    // Get the last user message to retry
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+    if (lastUserMsg && wsRef?.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'chat-message',
+        projectId,
+        sessionId,
+        content: lastUserMsg.content,
+        mode,
+        tool,
+      }));
+      setAgentBusy(true);
+    }
+  };
 
   // Scroll handling - only when visible and new messages arrive
   useEffect(() => {
@@ -549,12 +578,30 @@ function ChatSessionContent({
         )}
 
         {recoveryStatus.active && (
-          <div className="mx-4 mb-2 px-4 py-2 bg-blue-500/10 border border-blue-500/30 rounded-lg flex items-center gap-2 text-sm text-blue-400">
-            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-            </svg>
-            {recoveryStatus.message || 'Resuming where we left off...'}
+          <div className={`mx-4 mb-2 px-4 py-2 border rounded-lg flex items-center gap-2 text-sm ${
+            recoveryStatus.stalled
+              ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+              : 'bg-blue-500/10 border-blue-500/30 text-blue-400'
+          }`}>
+            {!recoveryStatus.stalled && (
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+            )}
+            <span className="flex-1">
+              {recoveryStatus.stalled
+                ? 'Recovery seems to have stalled. You can retry your last message.'
+                : (recoveryStatus.message || 'Resuming where we left off...')}
+            </span>
+            {recoveryStatus.stalled && (
+              <button
+                onClick={handleRetry}
+                className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 rounded text-amber-300 text-xs font-medium transition-colors"
+              >
+                Retry
+              </button>
+            )}
           </div>
         )}
 
