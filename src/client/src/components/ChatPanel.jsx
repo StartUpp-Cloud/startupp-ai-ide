@@ -547,9 +547,32 @@ function ChatSessionContent({
   const filteredMessages = useMemo(() => {
     const lastUserMsg = [...sortedMessages].reverse().find(m => m.role === 'user');
     const lastUserTime = lastUserMsg ? new Date(lastUserMsg.createdAt).getTime() : 0;
-    return sortedMessages.filter(m =>
+    const recent = sortedMessages.filter(m =>
       m.role !== 'progress' || new Date(m.createdAt).getTime() > lastUserTime
     );
+
+    // De-duplicate noisy repeated progress updates while keeping final outputs/messages.
+    const seenProgressAt = new Map();
+    const deduped = [];
+    for (const m of recent) {
+      if (m.role !== 'progress') {
+        deduped.push(m);
+        continue;
+      }
+
+      const key = (m.content || '').trim();
+      if (!key) continue;
+
+      const ts = new Date(m.createdAt).getTime() || 0;
+      const prevTs = seenProgressAt.get(key);
+      // Hide repeated identical progress text within 2 minutes
+      if (prevTs && Math.abs(ts - prevTs) < 120000) continue;
+
+      seenProgressAt.set(key, ts);
+      deduped.push(m);
+    }
+
+    return deduped;
   }, [sortedMessages]);
 
   const displayMessages = searchResults || filteredMessages;
