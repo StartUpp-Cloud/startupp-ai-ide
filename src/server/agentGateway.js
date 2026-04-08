@@ -821,20 +821,30 @@ RULES:
     const hasPlanSignals = mode === 'plan' || /\b(PRD|plan|tasks added|phases?)\b/i.test(assistantContent);
     if (!hasPlanSignals) return null;
 
-    const mdMatches = Array.from(assistantContent.matchAll(/\b([\w./-]+\.md)\b/g));
+    const mdMatches = Array.from(assistantContent.matchAll(/\b([\w./-]+\.md)\b/gi));
     if (mdMatches.length === 0) return null;
 
     const { default: Project } = await import('./models/Project.js');
     const project = Project.findById(projectId);
-    if (!project?.folderPath) return null;
+    if (!project?.folderPath) {
+      const firstPath = this._pickReviewDocPath(mdMatches);
+      if (!firstPath) return null;
+      const summary = await this._summarizeReviewFromAssistant(userMessage, assistantContent);
+      return {
+        type: 'prd-review',
+        docPath: firstPath,
+        docPreview: null,
+        summary,
+        originalPrompt: userMessage,
+        source: 'assistant-response',
+      };
+    }
 
     for (const m of mdMatches) {
       const relPath = m[1];
       if (!relPath) continue;
 
-      const fileName = path.basename(relPath || '');
-      const isReviewDoc = /^prd.*\.md$/i.test(fileName) || /^plan.*\.md$/i.test(fileName);
-      if (!isReviewDoc) continue;
+      if (!this._isReviewDocPath(relPath)) continue;
 
       const projectRoot = path.resolve(project.folderPath);
       const absPath = path.resolve(projectRoot, relPath);
@@ -857,7 +867,37 @@ RULES:
       } catch {}
     }
 
+    const fallbackPath = this._pickReviewDocPath(mdMatches);
+    if (!fallbackPath) return null;
+    const summary = await this._summarizeReviewFromAssistant(userMessage, assistantContent);
+    return {
+      type: 'prd-review',
+      docPath: fallbackPath,
+      docPreview: null,
+      summary,
+      originalPrompt: userMessage,
+      source: 'assistant-response',
+    };
+  }
+
+  _isReviewDocPath(relPath) {
+    const fileName = path.basename(relPath || '');
+    return /^prd.*\.md$/i.test(fileName) || /^plan.*\.md$/i.test(fileName);
+  }
+
+  _pickReviewDocPath(matches) {
+    for (const m of matches || []) {
+      const p = m?.[1];
+      if (p && this._isReviewDocPath(p)) return p;
+    }
     return null;
+  }
+
+  async _summarizeReviewFromAssistant(userMessage, assistantContent) {
+    return this._summarizeReviewDoc(
+      userMessage,
+      `Assistant response summary:\n${assistantContent.slice(0, 12000)}`
+    );
   }
 
   async _summarizeReviewDoc(userMessage, markdownDoc) {

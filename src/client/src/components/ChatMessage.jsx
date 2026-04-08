@@ -310,7 +310,13 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
             )}
             <details className="mt-2">
               <summary className="text-[11px] text-surface-400 cursor-pointer">Open markdown preview</summary>
-              <pre className="mt-1 p-2 bg-surface-950/80 rounded border border-surface-700/20 text-[11px] font-mono text-surface-300 overflow-x-auto max-h-56 overflow-y-auto">{review.docPreview}</pre>
+              {review.docPreview ? (
+                <pre className="mt-1 p-2 bg-surface-950/80 rounded border border-surface-700/20 text-[11px] font-mono text-surface-300 overflow-x-auto max-h-56 overflow-y-auto">{review.docPreview}</pre>
+              ) : (
+                <div className="mt-1 p-2 rounded border border-surface-700/20 text-[11px] text-surface-400">
+                  Preview unavailable from filesystem path in this workspace. You can still approve execution.
+                </div>
+              )}
             </details>
             <div className="mt-2 flex items-center gap-2">
               <button
