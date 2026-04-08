@@ -384,8 +384,13 @@ RULES:
 
         if (result.success) {
           // ── Success: format and finalize ──
-          const cleanedContent = await this._cleanContent(result.displayOutput);
-          const finalContent = await this._maybeAttachReferencedMarkdown(projectId, cleanedContent, mode);
+          const finalContent = await this._cleanContent(result.displayOutput);
+          const reviewMeta = await this._analyzeResponseForReview({
+            projectId,
+            userMessage: message,
+            assistantContent: finalContent,
+            mode,
+          });
           const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
 
           // Complete the job
@@ -402,6 +407,7 @@ RULES:
               jobId: job.id,
               rawOutput: rawForDisplay.slice(-8000),
               attempts: attempt,
+              ...(reviewMeta ? { review: reviewMeta } : {}),
             },
           });
 
@@ -415,7 +421,13 @@ RULES:
             message: {
               ...streamingMsg,
               content: finalContent,
-              metadata: { tool, jobId: job.id, rawOutput: rawForDisplay.slice(-8000), attempts: attempt },
+              metadata: {
+                tool,
+                jobId: job.id,
+                rawOutput: rawForDisplay.slice(-8000),
+                attempts: attempt,
+                ...(reviewMeta ? { review: reviewMeta } : {}),
+              },
             },
           });
 
@@ -803,23 +815,22 @@ RULES:
       .replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`');
   }
 
-  async _maybeAttachReferencedMarkdown(projectId, content, mode) {
-    if (mode !== 'plan' || !content) return content;
+  async _analyzeResponseForReview({ projectId, userMessage, assistantContent, mode }) {
+    if (!assistantContent) return null;
 
-    const mdMatches = Array.from(content.matchAll(/\b([\w./-]+\.md)\b/g));
-    if (mdMatches.length === 0) return content;
+    const hasPlanSignals = mode === 'plan' || /\b(PRD|plan|tasks added|phases?)\b/i.test(assistantContent);
+    if (!hasPlanSignals) return null;
+
+    const mdMatches = Array.from(assistantContent.matchAll(/\b([\w./-]+\.md)\b/g));
+    if (mdMatches.length === 0) return null;
 
     const { default: Project } = await import('./models/Project.js');
     const project = Project.findById(projectId);
-    if (!project?.folderPath) return content;
-
-    const seen = new Set();
-    let enriched = content;
+    if (!project?.folderPath) return null;
 
     for (const m of mdMatches) {
       const relPath = m[1];
-      if (!relPath || seen.has(relPath)) continue;
-      seen.add(relPath);
+      if (!relPath) continue;
 
       const projectRoot = path.resolve(project.folderPath);
       const absPath = path.resolve(projectRoot, relPath);
@@ -831,13 +842,37 @@ RULES:
         const md = fs.readFileSync(absPath, 'utf-8');
         if (!md || md.trim().length === 0) continue;
 
-        const preview = md.length > 12000 ? `${md.slice(0, 12000)}\n\n... (truncated)` : md;
-        enriched += `\n\n---\n\n### Referenced Document: ${relPath}\n\n${preview}`;
-        break; // include first valid document only
+        const summary = await this._summarizeReviewDoc(userMessage, md);
+        return {
+          type: 'prd-review',
+          docPath: relPath,
+          docPreview: md.length > 12000 ? `${md.slice(0, 12000)}\n\n... (truncated)` : md,
+          summary,
+          originalPrompt: userMessage,
+        };
       } catch {}
     }
 
-    return enriched;
+    return null;
+  }
+
+  async _summarizeReviewDoc(userMessage, markdownDoc) {
+    try {
+      const prompt = `You are reviewing a product/planning document for a coding agent workflow.\n\nUser request:\n${(userMessage || '').slice(0, 1000)}\n\nDocument:\n${markdownDoc.slice(0, 12000)}\n\nReturn JSON only with this exact shape:\n{\n  "title": "short title",\n  "highlights": ["bullet", "bullet", "bullet"],\n  "risks": ["risk", "risk"],\n  "readyToExecute": true\n}`;
+      const res = await llmProvider.generateResponse(prompt, { maxTokens: 600, temperature: 0.1 });
+      const text = (res?.response || '').trim();
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      const parsed = JSON.parse(match[0]);
+      return {
+        title: parsed.title || 'Plan Review',
+        highlights: Array.isArray(parsed.highlights) ? parsed.highlights.slice(0, 5) : [],
+        risks: Array.isArray(parsed.risks) ? parsed.risks.slice(0, 5) : [],
+        readyToExecute: !!parsed.readyToExecute,
+      };
+    } catch {
+      return null;
+    }
   }
 
   _cleanRawOutput(cleanOutput) {

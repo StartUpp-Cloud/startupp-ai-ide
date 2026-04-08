@@ -654,8 +654,10 @@ class TerminalServer {
           projectId: payload.projectId,
           sessionId: chatSessionId,
           role: 'system',
-          content: '🔁 Retrying last response with latest instructions...',
-          metadata: { retry: true },
+          content: payload.executeReviewedPlan
+            ? '✅ Plan approved. Executing with latest instructions...'
+            : '🔁 Re-evaluating response with latest instructions...',
+          metadata: { retry: true, executeReviewedPlan: !!payload.executeReviewedPlan },
         });
         this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: retryMsg });
         this.broadcast({ type: 'chat-message', message: retryMsg });

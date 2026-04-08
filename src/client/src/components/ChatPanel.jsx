@@ -551,7 +551,7 @@ function ChatSessionContent({
     }
   }, [projectId, sessionId]);
 
-  const handleRetryMessage = useCallback((targetMessage) => {
+  const handleRetryMessage = useCallback((targetMessage, options = {}) => {
     if (!targetMessage || !projectId || !sessionId) return;
 
     const all = [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -560,8 +560,12 @@ function ChatSessionContent({
 
     // Retry using the user prompt that led to this response
     const priorUser = [...all.slice(0, idx)].reverse().find(m => m.role === 'user');
-    const retryContent = (priorUser?.content || targetMessage.content || '').trim();
+    let retryContent = (priorUser?.content || targetMessage.content || '').trim();
     if (!retryContent) return;
+
+    if (options.executeReviewedPlan && targetMessage?.metadata?.review?.docPath) {
+      retryContent += `\n\nApproved. Execute the plan from ${targetMessage.metadata.review.docPath}. Start implementation now.`;
+    }
 
     if (wsRef?.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
@@ -572,6 +576,8 @@ function ChatSessionContent({
         mode,
         tool,
         targetMessageId: targetMessage.id,
+        review: targetMessage?.metadata?.review || null,
+        executeReviewedPlan: !!options.executeReviewedPlan,
       }));
       setAgentBusy(true);
     }

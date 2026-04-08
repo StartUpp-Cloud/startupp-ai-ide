@@ -200,6 +200,7 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const rawOutput = message.metadata?.rawOutput;
   const plan = message.metadata?.plan;
   const suggestions = message.metadata?.suggestions;
+  const review = message.metadata?.review;
 
   // Suggestion buttons: render as a row of clickable chips
   if (suggestions && message.metadata?.hidden) {
@@ -234,6 +235,12 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const handleRetry = () => {
     if (typeof onRetry === 'function') {
       onRetry(message);
+    }
+  };
+
+  const handleApproveReview = () => {
+    if (typeof onRetry === 'function') {
+      onRetry(message, { executeReviewedPlan: true });
     }
   };
 
@@ -290,6 +297,36 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
           <pre className="mt-1 p-2 bg-surface-950/80 rounded border border-surface-700/20 text-[11px] font-mono text-surface-400 overflow-x-auto max-h-48 overflow-y-auto">
             {rawOutput}
           </pre>
+        )}
+
+        {review?.type === 'prd-review' && (
+          <div className="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-2">
+            <div className="text-[11px] text-emerald-300 font-medium">Review Document: {review.docPath}</div>
+            {review.summary?.title && <div className="text-xs text-surface-200 mt-1 font-medium">{review.summary.title}</div>}
+            {Array.isArray(review.summary?.highlights) && review.summary.highlights.length > 0 && (
+              <ul className="mt-1 text-xs text-surface-300 list-disc ml-4">
+                {review.summary.highlights.map((h, i) => <li key={i}>{h}</li>)}
+              </ul>
+            )}
+            <details className="mt-2">
+              <summary className="text-[11px] text-surface-400 cursor-pointer">Open markdown preview</summary>
+              <pre className="mt-1 p-2 bg-surface-950/80 rounded border border-surface-700/20 text-[11px] font-mono text-surface-300 overflow-x-auto max-h-56 overflow-y-auto">{review.docPreview}</pre>
+            </details>
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                onClick={handleApproveReview}
+                className="px-2 py-1 rounded border border-emerald-500/50 text-[11px] text-emerald-200 hover:bg-emerald-500/10 transition-colors"
+              >
+                Approve & Execute
+              </button>
+              <button
+                onClick={handleRetry}
+                className="px-2 py-1 rounded border border-surface-600/60 text-[11px] text-surface-300 hover:text-surface-100 hover:border-primary-500/50 hover:bg-primary-500/10 transition-colors"
+              >
+                Re-evaluate
+              </button>
+            </div>
+          </div>
         )}
 
         {(message.role === 'agent' || message.role === 'error') && (
