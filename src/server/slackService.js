@@ -33,6 +33,9 @@ const channelToProject = new Map();
 /** projectId → channelId */
 const projectToChannel = new Map();
 
+/** message event de-duplication cache (channel:ts -> seenAt) */
+const processedSlackEvents = new Map();
+
 /**
  * broadcastFn injected by terminalServer so we can push Slack-originated
  * messages into the normal chat pipeline.
@@ -165,6 +168,11 @@ const slackService = {
         return;
       }
 
+      if (!_markIfFirstEvent(message.channel, message.ts)) {
+        console.log('[SlackService] ⏭️ Duplicate message event ignored');
+        return;
+      }
+
       const channelId = message.channel;
       const projectId = channelToProject.get(channelId);
       console.log('[SlackService] Channel mapping check:', {
@@ -222,6 +230,12 @@ const slackService = {
         console.log('[SlackService] ❌ Event filtered (subtype or bot_id)');
         return;
       }
+
+      if (!_markIfFirstEvent(event.channel, event.ts)) {
+        console.log('[SlackService] ⏭️ Duplicate event ignored');
+        return;
+      }
+
       if (!event.thread_ts || event.thread_ts === event.ts) {
         console.log('[SlackService] ⏭️ Event is top-level, skipping (handled by message listener)');
         return; // top-level handled above
@@ -349,6 +363,29 @@ function _rebuildMaps(channelMap) {
 function _linkSession(chatSessionId, channelId, threadTs) {
   threadToSession.set(threadTs, chatSessionId);
   sessionToThread.set(chatSessionId, { channelId, threadTs });
+}
+
+function _markIfFirstEvent(channelId, ts) {
+  if (!channelId || !ts) return true;
+
+  const now = Date.now();
+  const key = `${channelId}:${ts}`;
+  const ttlMs = 5 * 60 * 1000;
+  const seenAt = processedSlackEvents.get(key);
+
+  if (seenAt && now - seenAt < ttlMs) {
+    return false;
+  }
+
+  processedSlackEvents.set(key, now);
+
+  if (processedSlackEvents.size > 1000) {
+    for (const [k, t] of processedSlackEvents.entries()) {
+      if (now - t >= ttlMs) processedSlackEvents.delete(k);
+    }
+  }
+
+  return true;
 }
 
 async function _createSessionFromSlack(projectId, message) {

@@ -406,8 +406,6 @@ class ChatStore {
     try {
       const msg = this._getMessage(projectId, sessionId, messageId);
       if (msg?.metadata?.jobId) {
-        const fs = require('fs');
-        const path = require('path');
         const jobOutputPath = path.join(__dirname, '../../data/jobs', `${msg.metadata.jobId}.output`);
         if (fs.existsSync(jobOutputPath)) {
           const jobOutput = fs.readFileSync(jobOutputPath, 'utf-8');

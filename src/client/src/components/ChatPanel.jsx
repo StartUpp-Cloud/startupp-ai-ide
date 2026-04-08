@@ -248,6 +248,16 @@ function ChatSessionContent({
       if (msg.sessionId && msg.sessionId !== sessionId) return;
 
       switch (msg.type) {
+        case 'chat-message':
+          if (msg.message?.sessionId === sessionId && msg.message?.id) {
+            knownIdsRef.current.add(msg.message.id);
+            setMessages(prev => {
+              const filtered = prev.filter(m => m.id !== msg.message.id);
+              return [...filtered, msg.message];
+            });
+          }
+          break;
+
         case 'chat-message-stream-start':
           setStreamingMessage({
             id: msg.messageId,

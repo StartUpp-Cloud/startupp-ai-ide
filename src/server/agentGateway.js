@@ -18,6 +18,7 @@ import { chatStore } from './chatStore.js';
 import { agentShellPool } from './agentShellPool.js';
 import { jobManager } from './jobManager.js';
 import { getDB } from './db.js';
+import fs from 'fs';
 
 class AgentGateway extends EventEmitter {
   constructor() {
@@ -84,7 +85,6 @@ class AgentGateway extends EventEmitter {
   _buildContentWithAttachments(content, attachments) {
     if (!attachments || attachments.length === 0) return content;
 
-    const fs = require('fs');
     const parts = [content];
 
     // Categorize attachments
