@@ -832,6 +832,10 @@ RULES:
       const relPath = m[1];
       if (!relPath) continue;
 
+      const fileName = path.basename(relPath || '');
+      const isReviewDoc = /^prd.*\.md$/i.test(fileName) || /^plan.*\.md$/i.test(fileName);
+      if (!isReviewDoc) continue;
+
       const projectRoot = path.resolve(project.folderPath);
       const absPath = path.resolve(projectRoot, relPath);
       const relative = path.relative(projectRoot, absPath);
