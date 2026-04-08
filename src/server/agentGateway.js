@@ -19,12 +19,14 @@ import { agentShellPool } from './agentShellPool.js';
 import { jobManager } from './jobManager.js';
 import { getDB } from './db.js';
 import fs from 'fs';
+import path from 'path';
 
 class AgentGateway extends EventEmitter {
   constructor() {
     super();
     this._running = new Map();
     this._cliSessions = new Map();
+    this._activeShellSessions = new Map();
   }
 
   // ── Entry point ──
@@ -74,6 +76,7 @@ class AgentGateway extends EventEmitter {
     } catch (error) {
       this._addErrorMessage(projectId, sessionId, `Error: ${error.message}`, broadcastFn);
     } finally {
+      this._activeShellSessions.delete(sessionId);
       this._running.delete(sessionId);
       broadcastFn({ type: 'agent-status', projectId, sessionId, busy: false });
     }
@@ -381,7 +384,8 @@ RULES:
 
         if (result.success) {
           // ── Success: format and finalize ──
-          const finalContent = await this._cleanContent(result.displayOutput);
+          const cleanedContent = await this._cleanContent(result.displayOutput);
+          const finalContent = await this._maybeAttachReferencedMarkdown(projectId, cleanedContent, mode);
           const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
 
           // Complete the job
@@ -511,6 +515,7 @@ RULES:
     try {
       const sess = await agentShellPool.getSession(projectId, chatSessionId || 'shell');
       shellSessionId = sess.sessionId;
+      if (chatSessionId) this._activeShellSessions.set(chatSessionId, shellSessionId);
       if (sess.isNew) await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
       return { success: false, error: `Failed to start shell: ${err.message}` };
@@ -798,6 +803,43 @@ RULES:
       .replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`');
   }
 
+  async _maybeAttachReferencedMarkdown(projectId, content, mode) {
+    if (mode !== 'plan' || !content) return content;
+
+    const mdMatches = Array.from(content.matchAll(/\b([\w./-]+\.md)\b/g));
+    if (mdMatches.length === 0) return content;
+
+    const { default: Project } = await import('./models/Project.js');
+    const project = Project.findById(projectId);
+    if (!project?.folderPath) return content;
+
+    const seen = new Set();
+    let enriched = content;
+
+    for (const m of mdMatches) {
+      const relPath = m[1];
+      if (!relPath || seen.has(relPath)) continue;
+      seen.add(relPath);
+
+      const projectRoot = path.resolve(project.folderPath);
+      const absPath = path.resolve(projectRoot, relPath);
+      const relative = path.relative(projectRoot, absPath);
+      if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
+
+      try {
+        if (!fs.existsSync(absPath)) continue;
+        const md = fs.readFileSync(absPath, 'utf-8');
+        if (!md || md.trim().length === 0) continue;
+
+        const preview = md.length > 12000 ? `${md.slice(0, 12000)}\n\n... (truncated)` : md;
+        enriched += `\n\n---\n\n### Referenced Document: ${relPath}\n\n${preview}`;
+        break; // include first valid document only
+      } catch {}
+    }
+
+    return enriched;
+  }
+
   _cleanRawOutput(cleanOutput) {
     return cleanOutput.split('\n')
       .filter(l => {
@@ -1070,6 +1112,15 @@ RULES:
   abort(sessionId) {
     const entry = this._running.get(sessionId);
     if (entry) entry.aborted = true;
+
+    const shellSessionId = this._activeShellSessions.get(sessionId);
+    if (shellSessionId) {
+      try { agentShellPool.write(shellSessionId, '\u0003'); } catch {}
+      // Sometimes tools ignore the first interrupt while flushing output.
+      setTimeout(() => {
+        try { agentShellPool.write(shellSessionId, '\u0003'); } catch {}
+      }, 150);
+    }
   }
 
   _waitForOutput(sessionId, ctx, quietMs = 3000) {

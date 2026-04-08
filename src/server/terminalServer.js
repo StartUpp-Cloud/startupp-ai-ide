@@ -635,6 +635,55 @@ class TerminalServer {
         break;
       }
 
+      case 'chat-retry': {
+        const { chatStore } = await import('./chatStore.js');
+        const { agentGateway } = await import('./agentGateway.js');
+
+        chatStore.migrateIfNeeded(payload.projectId);
+        const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
+        this.attachToChatSession(ws, chatSessionId);
+
+        const retryContent = (payload.content || '').trim();
+        if (!retryContent) {
+          this.sendError(ws, 'Retry content is required');
+          break;
+        }
+
+        // Optional marker message to show user-initiated regeneration
+        const retryMsg = chatStore.addMessage({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          role: 'system',
+          content: '🔁 Retrying last response with latest instructions...',
+          metadata: { retry: true },
+        });
+        this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: retryMsg });
+        this.broadcast({ type: 'chat-message', message: retryMsg });
+
+        agentGateway.handleTask({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          content: retryContent,
+          attachments: [],
+          mode: payload.mode,
+          tool: payload.tool || 'claude',
+          broadcastFn: (data) => {
+            this.broadcastToChatSession(chatSessionId, data);
+            this.broadcast(data);
+          },
+        }).catch(err => {
+          const errMsg = chatStore.addMessage({
+            projectId: payload.projectId,
+            sessionId: chatSessionId,
+            role: 'error',
+            content: `Retry failed: ${err.message}`,
+          });
+          this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: errMsg });
+          this.broadcast({ type: 'chat-message', message: errMsg });
+        });
+        break;
+      }
+
       case 'chat-approve-plan': {
         const { agentGateway } = await import('./agentGateway.js');
         agentGateway.executePlan({
@@ -655,7 +704,8 @@ class TerminalServer {
         const { agentGateway } = await import('./agentGateway.js');
         // Abort by session ID (supports parallel sessions)
         agentGateway.abort(payload.sessionId || payload.projectId);
-        this.broadcast({ type: 'agent-status', projectId: payload.projectId, busy: false });
+        this.broadcastToChatSession(payload.sessionId, { type: 'agent-status', projectId: payload.projectId, sessionId: payload.sessionId, busy: false });
+        this.broadcast({ type: 'agent-status', projectId: payload.projectId, sessionId: payload.sessionId, busy: false });
         break;
       }
 

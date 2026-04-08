@@ -189,7 +189,7 @@ function renderMarkdown(text) {
   return elements;
 }
 
-export default function ChatMessage({ message, wsRef, projectId, onSend }) {
+export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry }) {
   const [showRaw, setShowRaw] = useState(false);
   const style = ROLE_STYLES[message.role] || ROLE_STYLES.agent;
   const Icon = style.icon;
@@ -228,6 +228,12 @@ export default function ChatMessage({ message, wsRef, projectId, onSend }) {
         projectId: projectId || message.projectId,
         steps: plan,
       }));
+    }
+  };
+
+  const handleRetry = () => {
+    if (typeof onRetry === 'function') {
+      onRetry(message);
     }
   };
 
@@ -284,6 +290,18 @@ export default function ChatMessage({ message, wsRef, projectId, onSend }) {
           <pre className="mt-1 p-2 bg-surface-950/80 rounded border border-surface-700/20 text-[11px] font-mono text-surface-400 overflow-x-auto max-h-48 overflow-y-auto">
             {rawOutput}
           </pre>
+        )}
+
+        {(message.role === 'agent' || message.role === 'error') && (
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              onClick={handleRetry}
+              className="px-2 py-1 rounded border border-surface-600/60 text-[11px] text-surface-300 hover:text-surface-100 hover:border-primary-500/50 hover:bg-primary-500/10 transition-colors"
+              title="Retry this response"
+            >
+              Retry
+            </button>
+          </div>
         )}
       </div>
     </div>

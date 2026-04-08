@@ -551,6 +551,32 @@ function ChatSessionContent({
     }
   }, [projectId, sessionId]);
 
+  const handleRetryMessage = useCallback((targetMessage) => {
+    if (!targetMessage || !projectId || !sessionId) return;
+
+    const all = [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const idx = all.findIndex(m => m.id === targetMessage.id);
+    if (idx < 0) return;
+
+    // Retry using the user prompt that led to this response
+    const priorUser = [...all.slice(0, idx)].reverse().find(m => m.role === 'user');
+    const retryContent = (priorUser?.content || targetMessage.content || '').trim();
+    if (!retryContent) return;
+
+    if (wsRef?.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'chat-retry',
+        projectId,
+        sessionId,
+        content: retryContent,
+        mode,
+        tool,
+        targetMessageId: targetMessage.id,
+      }));
+      setAgentBusy(true);
+    }
+  }, [messages, projectId, sessionId, wsRef, mode, tool]);
+
   // Prepare display messages
   const sortedMessages = useMemo(() =>
     [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()),
@@ -621,7 +647,7 @@ function ChatSessionContent({
           </div>
         ) : (
           displayMessages.map(msg => (
-            <ChatMessage key={msg.id} message={msg} wsRef={wsRef} projectId={projectId} onSend={handleSend} />
+            <ChatMessage key={msg.id} message={msg} wsRef={wsRef} projectId={projectId} onSend={handleSend} onRetry={handleRetryMessage} />
           ))
         )}
 
