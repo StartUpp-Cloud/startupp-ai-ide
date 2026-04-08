@@ -847,12 +847,10 @@ RULES:
       if (!this._isReviewDocPath(relPath)) continue;
 
       const projectRoot = path.resolve(project.folderPath);
-      const absPath = path.resolve(projectRoot, relPath);
-      const relative = path.relative(projectRoot, absPath);
-      if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      const absPath = this._resolveReviewDocPath(projectRoot, relPath);
+      if (!absPath) continue;
 
       try {
-        if (!fs.existsSync(absPath)) continue;
         const md = fs.readFileSync(absPath, 'utf-8');
         if (!md || md.trim().length === 0) continue;
 
@@ -890,6 +888,24 @@ RULES:
       const p = m?.[1];
       if (p && this._isReviewDocPath(p)) return p;
     }
+    return null;
+  }
+
+  _resolveReviewDocPath(projectRoot, relPath) {
+    const normalized = (relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!normalized) return null;
+
+    const segments = normalized.split('/').filter(Boolean);
+    if (segments.length === 0) return null;
+
+    for (let i = 0; i < segments.length; i++) {
+      const candidateRel = segments.slice(i).join('/');
+      const candidateAbs = path.resolve(projectRoot, candidateRel);
+      const relative = path.relative(projectRoot, candidateAbs);
+      if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      if (fs.existsSync(candidateAbs)) return candidateAbs;
+    }
+
     return null;
   }
 
