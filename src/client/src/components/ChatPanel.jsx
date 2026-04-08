@@ -252,7 +252,20 @@ function ChatSessionContent({
           if (msg.message?.sessionId === sessionId && msg.message?.id) {
             knownIdsRef.current.add(msg.message.id);
             setMessages(prev => {
-              const filtered = prev.filter(m => m.id !== msg.message.id);
+              const filtered = prev.filter(m => {
+                if (m.id === msg.message.id) return false;
+                // Replace optimistic pending user message once server echoes real one
+                if (
+                  msg.message.role === 'user' &&
+                  m.role === 'user' &&
+                  typeof m.id === 'string' &&
+                  m.id.startsWith('pending-') &&
+                  m.content === msg.message.content
+                ) {
+                  return false;
+                }
+                return true;
+              });
               return [...filtered, msg.message];
             });
           }
