@@ -44,7 +44,7 @@ let inboundHandler = null;
 
 function _readSettings() {
   const db = getDB();
-  return db.data.slackSettings || { enabled: false, botToken: '', appToken: '', channelMap: {} };
+  return db.data.slackSettings || { enabled: false, botToken: '', appToken: '', channelMap: {}, defaultTool: 'claude' };
 }
 
 async function _writeSettings(settings) {
@@ -69,17 +69,19 @@ const slackService = {
       botToken: s.botToken ? '***configured***' : '',
       appToken: s.appToken ? '***configured***' : '',
       channelMap: s.channelMap || {},
+      defaultTool: s.defaultTool || 'claude',
     };
   },
 
   /** Persist tokens + channel map.  Restarts the bot if already running. */
   async updateSettings(updates) {
     const current = _readSettings();
-    const merged = {
-      ...current,
-      ...updates,
-      channelMap: { ...current.channelMap, ...updates.channelMap },
-    };
+      const merged = {
+        ...current,
+        ...updates,
+        channelMap: { ...current.channelMap, ...updates.channelMap },
+        defaultTool: updates.defaultTool || current.defaultTool || 'claude',
+      };
     await _writeSettings(merged);
 
     // Rebuild in-memory maps
@@ -132,53 +134,106 @@ const slackService = {
 
     _rebuildMaps(settings.channelMap || {});
 
+    console.log('[SlackService] Channel mappings loaded:', {
+      channelToProject: Array.from(channelToProject.entries()),
+      projectToChannel: Array.from(projectToChannel.entries()),
+    });
+
     slackApp = new SlackApp({
       token: settings.botToken,
       appToken: settings.appToken,
       socketMode: true,
-      // Avoid noisy logs in production
-      logLevel: 'WARN',
+      // Temporarily set to DEBUG to see Slack events
+      logLevel: 'DEBUG',
     });
 
     // ── Handle channel messages (not in a thread) → new session ──
     slackApp.message(async ({ message, say }) => {
+      console.log('[SlackService] 🔔 MESSAGE RECEIVED:', {
+        channel: message.channel,
+        text: message.text?.substring(0, 50),
+        user: message.user,
+        subtype: message.subtype,
+        bot_id: message.bot_id,
+        thread_ts: message.thread_ts,
+        ts: message.ts,
+      });
+
       // Ignore bot's own messages, edits, and sub-typed events
-      if (message.subtype || message.bot_id) return;
+      if (message.subtype || message.bot_id) {
+        console.log('[SlackService] ❌ Message filtered (subtype or bot_id)');
+        return;
+      }
 
       const channelId = message.channel;
       const projectId = channelToProject.get(channelId);
-      if (!projectId) return; // Channel not mapped
+      console.log('[SlackService] Channel mapping check:', {
+        channelId,
+        projectId,
+        allMappings: Array.from(channelToProject.entries()),
+      });
+
+      if (!projectId) {
+        console.log('[SlackService] ❌ Channel not mapped to any project');
+        return; // Channel not mapped
+      }
 
       // If message is already in a thread, handle as thread reply
       if (message.thread_ts && message.thread_ts !== message.ts) {
+        console.log('[SlackService] → Routing to thread reply handler');
         await _handleThreadReply(message, projectId);
         return;
       }
 
       // New top-level message → create a session and reply in a thread
+      console.log('[SlackService] ✅ Creating new session for message');
       const sessionId = await _createSessionFromSlack(projectId, message);
+      await _postAck(message);
 
       // Send to agent pipeline
       if (inboundHandler) {
+        console.log('[SlackService] → Dispatching to agent pipeline');
         inboundHandler({
           projectId,
           sessionId,
           content: message.text || '',
           mode: 'agent',
-          tool: 'claude',
+          tool: settings.defaultTool || 'claude',
           source: 'slack',
         });
+      } else {
+        console.log('[SlackService] ⚠️ No inbound handler registered!');
       }
     });
 
     // ── Handle thread replies → existing session ──
     slackApp.event('message', async ({ event }) => {
-      if (event.subtype || event.bot_id) return;
-      if (!event.thread_ts || event.thread_ts === event.ts) return; // top-level handled above
+      console.log('[SlackService] 🔔 EVENT RECEIVED:', {
+        type: event.type,
+        channel: event.channel,
+        text: event.text?.substring(0, 50),
+        subtype: event.subtype,
+        bot_id: event.bot_id,
+        thread_ts: event.thread_ts,
+        ts: event.ts,
+      });
+
+      if (event.subtype || event.bot_id) {
+        console.log('[SlackService] ❌ Event filtered (subtype or bot_id)');
+        return;
+      }
+      if (!event.thread_ts || event.thread_ts === event.ts) {
+        console.log('[SlackService] ⏭️ Event is top-level, skipping (handled by message listener)');
+        return; // top-level handled above
+      }
 
       const projectId = channelToProject.get(event.channel);
-      if (!projectId) return;
+      if (!projectId) {
+        console.log('[SlackService] ❌ Event channel not mapped');
+        return;
+      }
 
+      console.log('[SlackService] ✅ Handling thread reply');
       await _handleThreadReply(event, projectId);
     });
 
@@ -323,14 +378,28 @@ async function _handleThreadReply(event, projectId) {
   }
 
   if (inboundHandler) {
+    await _postAck(event);
     inboundHandler({
       projectId,
       sessionId,
       content: event.text || '',
       mode: 'agent',
-      tool: 'claude',
+      tool: _readSettings().defaultTool || 'claude',
       source: 'slack',
     });
+  }
+}
+
+async function _postAck(messageOrEvent) {
+  if (!slackApp) return;
+  try {
+    await slackApp.client.chat.postMessage({
+      channel: messageOrEvent.channel,
+      thread_ts: messageOrEvent.thread_ts || messageOrEvent.ts,
+      text: 'Got it - working on this now.',
+    });
+  } catch (err) {
+    console.warn('[SlackService] Failed to post ack:', err.message);
   }
 }
 

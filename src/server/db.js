@@ -45,7 +45,7 @@ const defaultData = {
   schedules: [],
   skills: [],
   sessionHistory: [],
-  slackSettings: { enabled: false, botToken: '', appToken: '', channelMap: {} },
+  slackSettings: { enabled: false, botToken: '', appToken: '', channelMap: {}, defaultTool: 'claude' },
   safetySettings: { ...defaultSafetySettings },
   profile: {
     name: '',
@@ -81,7 +81,8 @@ export async function initDB() {
   if (!db.data.schedules) db.data.schedules = [];
   if (!db.data.skills) db.data.skills = [];
   if (!db.data.sessionHistory) db.data.sessionHistory = [];
-  if (!db.data.slackSettings) db.data.slackSettings = { enabled: false, botToken: '', appToken: '', channelMap: {} };
+  if (!db.data.slackSettings) db.data.slackSettings = { enabled: false, botToken: '', appToken: '', channelMap: {}, defaultTool: 'claude' };
+  if (!db.data.slackSettings.defaultTool) db.data.slackSettings.defaultTool = 'claude';
   if (!db.data.safetySettings) db.data.safetySettings = { ...defaultSafetySettings };
   if (!db.data.profile) db.data.profile = { name: '', role: '', tone: 'concise', preferences: '', codeStyle: '', languages: '', setupComplete: false };
   await db.write();

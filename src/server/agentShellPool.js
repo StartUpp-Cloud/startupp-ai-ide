@@ -70,7 +70,7 @@ class AgentShellPool extends EventEmitter {
     });
     this.outputBuffers.set(result.sessionId, '');
     // Track reverse mapping: shell session -> chat session info
-    this.shellToChat.set(result.sessionId, { projectId, chatSessionId: tool });
+    this.shellToChat.set(result.sessionId, { projectId, chatSessionId: tool === 'shell' ? null : tool });
 
     if (tool && tool !== 'shell') {
       setTimeout(() => {

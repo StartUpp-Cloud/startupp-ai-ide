@@ -646,6 +646,11 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   const [openTabs, setOpenTabs] = useState([]);
   const [showSessionList, setShowSessionList] = useState(false);
   const sessionListRef = useRef(null);
+  const sessionsRef = useRef([]);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -690,6 +695,34 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         setActiveSessionId(null);
         setOpenTabs([]);
       });
+  }, [projectId]);
+
+  // Keep session list in sync so server-created sessions (e.g. Slack) appear automatically
+  useEffect(() => {
+    if (!projectId) return;
+
+    const syncSessions = async () => {
+      try {
+        const r = await fetch(`/api/projects/${projectId}/chat/sessions`);
+        const data = await r.json();
+        const latest = data.sessions || [];
+        const prev = sessionsRef.current;
+
+        const prevIds = new Set(prev.map(s => s.id));
+        const newSessions = latest.filter(s => !prevIds.has(s.id));
+
+        if (newSessions.length > 0) {
+          const newest = newSessions[0];
+          setOpenTabs(prevTabs => (prevTabs.includes(newest.id) ? prevTabs : [newest.id, ...prevTabs]));
+          setActiveSessionId(newest.id);
+        }
+
+        setSessions(latest);
+      } catch {}
+    };
+
+    const interval = setInterval(syncSessions, 2000);
+    return () => clearInterval(interval);
   }, [projectId]);
 
   // Session actions

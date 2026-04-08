@@ -82,10 +82,12 @@ class TerminalServer {
       }
     }
 
-    // Mirror agent/assistant/error messages to Slack thread
-    if (slackService.connected && message?.type === 'chat-message' && message.message) {
-      const msg = message.message;
-      if ((msg.role === 'agent' || msg.role === 'assistant' || msg.role === 'error') && msg.content && msg.projectId) {
+    // Mirror final agent/assistant/error output to Slack thread
+    if (slackService.connected) {
+      const isDirectChatMessage = message?.type === 'chat-message' && message.message;
+      const isStreamComplete = message?.type === 'chat-message-stream-complete' && message.message;
+      const msg = (isDirectChatMessage || isStreamComplete) ? message.message : null;
+      if ((msg?.role === 'agent' || msg?.role === 'assistant' || msg?.role === 'error') && msg?.content && msg?.projectId) {
         slackService.postToThread(msg.projectId, chatSessionId, msg.content).catch(() => {});
       }
     }

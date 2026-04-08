@@ -121,6 +121,7 @@ export default function SlackSetupPanel({ isOpen, onClose, projects }) {
   // Channel mapping inputs
   const [selectedProject, setSelectedProject] = useState('');
   const [channelId, setChannelId] = useState('');
+  const [defaultTool, setDefaultTool] = useState('claude');
 
   useEffect(() => {
     if (isOpen) {
@@ -134,6 +135,7 @@ export default function SlackSetupPanel({ isOpen, onClose, projects }) {
       const res = await fetch('/api/slack/settings');
       const data = await res.json();
       setSettings(data);
+      setDefaultTool(data.defaultTool || 'claude');
     } catch {}
   };
 
@@ -167,6 +169,23 @@ export default function SlackSetupPanel({ isOpen, onClose, projects }) {
       setBotToken('');
       setAppToken('');
       flash('Tokens saved');
+    } catch (err) {
+      flash(err.message, 'error');
+    }
+    setLoading(false);
+  };
+
+  const saveDefaultTool = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/slack/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ defaultTool }),
+      });
+      if (!res.ok) throw new Error((await res.json()).message);
+      await fetchSettings();
+      flash(`Slack default tool set to ${defaultTool}`);
     } catch (err) {
       flash(err.message, 'error');
     }
@@ -300,9 +319,12 @@ export default function SlackSetupPanel({ isOpen, onClose, projects }) {
               status={status}
               botToken={botToken}
               appToken={appToken}
+              defaultTool={defaultTool}
               onBotTokenChange={setBotToken}
               onAppTokenChange={setAppToken}
+              onDefaultToolChange={setDefaultTool}
               onSave={saveTokens}
+              onSaveDefaultTool={saveDefaultTool}
               onToggle={toggleConnection}
               loading={loading}
             />
@@ -385,7 +407,7 @@ function GuideTab() {
 
 // ─── Connect Tab ────────────────────────────────────────────────────────────
 
-function ConnectTab({ settings, status, botToken, appToken, onBotTokenChange, onAppTokenChange, onSave, onToggle, loading }) {
+function ConnectTab({ settings, status, botToken, appToken, defaultTool, onBotTokenChange, onAppTokenChange, onDefaultToolChange, onSave, onSaveDefaultTool, onToggle, loading }) {
   const hasTokens = settings?.botToken === '***configured***' && settings?.appToken === '***configured***';
 
   return (
@@ -421,6 +443,30 @@ function ConnectTab({ settings, status, botToken, appToken, onBotTokenChange, on
             {loading ? <Loader size={14} className="animate-spin" /> : 'Save Tokens'}
           </button>
           {hasTokens && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle size={12} /> Configured</span>}
+        </div>
+      </div>
+
+      <div className="border-t border-surface-700 pt-4">
+        <h3 className="text-base font-semibold text-surface-100 mb-2">Slack AI Tool</h3>
+        <div className="flex items-center gap-2">
+          <select
+            value={defaultTool}
+            onChange={(e) => onDefaultToolChange(e.target.value)}
+            className="bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5 text-sm text-surface-200 focus:outline-none focus:border-primary-500"
+          >
+            <option value="claude">Claude</option>
+            <option value="copilot">Copilot</option>
+            <option value="aider">Aider</option>
+            <option value="gemini">Gemini</option>
+            <option value="shell">Shell</option>
+          </select>
+          <button
+            onClick={onSaveDefaultTool}
+            disabled={loading}
+            className="px-3 py-1.5 text-sm font-medium bg-primary-500/20 hover:bg-primary-500/30 border border-primary-500/30 text-surface-200 rounded-lg transition-colors disabled:opacity-40"
+          >
+            Save Tool
+          </button>
         </div>
       </div>
 
