@@ -44,7 +44,7 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     const { projectId, sessionId } = req.params;
     const { name } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
-    chatStore.renameSession(projectId, sessionId, name.trim());
+    chatStore.renameSession(projectId, sessionId, name.trim(), { manual: true });
     res.json({ renamed: true });
   } catch (error) {
     res.status(500).json({ error: error.message });

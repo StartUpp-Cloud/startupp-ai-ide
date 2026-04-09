@@ -1265,6 +1265,12 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               borderRadius: visibleTabIds.length > 1 ? 8 : 0,
             }}
           >
+            {visibleTabIds.length > 1 && visibleTabIds.includes(tabId) && (
+              <div className="px-2 py-1 border-b border-surface-700/40 bg-surface-850/70 text-[11px] text-surface-300 truncate flex items-center gap-1.5">
+                <MessageCircle size={10} className="text-primary-400 flex-shrink-0" />
+                <span className="truncate">{sessions.find(s => s.id === tabId)?.name || 'Chat'}</span>
+              </div>
+            )}
             <ChatSessionContent
               projectId={projectId}
               sessionId={tabId}

@@ -90,6 +90,7 @@ class ChatStore {
       name: name || `Chat ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
       createdAt: new Date().toISOString(),
       messageCount: 0,
+      manualName: false,
     };
     const sessions = this._readIndex(projectId);
     sessions.push(session);
@@ -197,11 +198,12 @@ class ChatStore {
   /**
    * Rename a session.
    */
-  renameSession(projectId, sessionId, name) {
+  renameSession(projectId, sessionId, name, opts = {}) {
     const sessions = this._readIndex(projectId);
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
       session.name = name;
+      if (opts.manual === true) session.manualName = true;
       this._writeIndex(projectId, sessions);
     }
   }

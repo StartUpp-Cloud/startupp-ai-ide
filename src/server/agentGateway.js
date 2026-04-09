@@ -1162,6 +1162,8 @@ RULES:
     if (!chatSessionId) return;
     const cliState = this._cliSessions.get(chatSessionId);
     if (cliState?.messageCount > 0) return;
+    const sessionMeta = chatStore.getSession(projectId, chatSessionId);
+    if (sessionMeta?.manualName) return;
     try {
       const result = await llmProvider.generateResponse(
         `Generate a short title (3-6 words) for a chat session starting with this message. Just the title, no quotes.\n\nMessage: "${userMessage.slice(0, 200)}"`,
