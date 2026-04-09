@@ -1267,9 +1267,20 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             }}
           >
             {visibleTabIds.length > 1 && visibleTabIds.includes(tabId) && (
-              <div className="px-2 py-1 border-b border-surface-700/40 bg-surface-850/70 text-[11px] text-surface-300 truncate flex items-center gap-1.5">
+              <div className="px-2 py-1 border-b border-surface-700/40 bg-surface-850/70 text-[11px] text-surface-300 flex items-center gap-1.5 group/pane-hdr">
                 <MessageCircle size={10} className="text-primary-400 flex-shrink-0" />
-                <span className="truncate">{sessions.find(s => s.id === tabId)?.name || 'Chat'}</span>
+                <span className="truncate flex-1">{sessions.find(s => s.id === tabId)?.name || 'Chat'}</span>
+                <button
+                  onClick={(e) => togglePin(tabId, e)}
+                  className={`p-0.5 rounded flex-shrink-0 transition-all opacity-0 group-hover/pane-hdr:opacity-100 ${
+                    sessions.find(s => s.id === tabId)?.pinned
+                      ? 'text-amber-400 opacity-100'
+                      : 'text-surface-500 hover:text-amber-400'
+                  }`}
+                  title={sessions.find(s => s.id === tabId)?.pinned ? 'Unpin session' : 'Pin session'}
+                >
+                  <Pin size={9} className={sessions.find(s => s.id === tabId)?.pinned ? '-rotate-45' : ''} />
+                </button>
               </div>
             )}
             <ChatSessionContent
