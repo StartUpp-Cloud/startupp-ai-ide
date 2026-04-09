@@ -1133,23 +1133,24 @@ RULES:
     } else {
       fullMessage = message;
     }
-    const escaped = fullMessage.replace(/'/g, "'\\''");
+    const encoded = Buffer.from(fullMessage, 'utf8').toString('base64');
+    const promptArg = `\"$(printf %s '${encoded}' | base64 -d)\"`;
 
     switch (tool) {
       case 'claude': {
-        let cmd = `claude -p '${escaped}' --output-format stream-json --verbose --dangerously-skip-permissions`;
+        let cmd = `claude -p ${promptArg} --output-format stream-json --verbose --dangerously-skip-permissions`;
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
         return cmd;
       }
       case 'copilot': {
-        let cmd = `copilot -p '${escaped}' --output-format json`;
+        let cmd = `copilot -p ${promptArg} --output-format json`;
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
         return cmd;
       }
       case 'aider':
-        return `aider --message '${escaped}' --yes`;
+        return `aider --message ${promptArg} --yes`;
       case 'gemini':
-        return `gemini -p '${escaped}'`;
+        return `gemini -p ${promptArg}`;
       case 'shell':
       default:
         return message;
