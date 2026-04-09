@@ -21,7 +21,7 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function ChatInput({ mode, projectId, onSend, onSearch, disabled = false, busy = false }) {
+export default function ChatInput({ mode, projectId, onSend, onSearch, disabled = false, busy = false, isVisible = true }) {
   const [text, setText] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -30,12 +30,27 @@ export default function ChatInput({ mode, projectId, onSend, onSearch, disabled 
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
+  const resizeTextarea = () => {
     const el = textareaRef.current;
-    if (!el) return;
+    if (!el || !isVisible) return;
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 200) + 'px';
-  }, [text]);
+  };
+
+  useEffect(() => {
+    resizeTextarea();
+  }, [text, isVisible]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el || !isVisible) return;
+
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => resizeTextarea());
+    observer.observe(el);
+
+    return () => observer.disconnect();
+  }, [isVisible]);
 
   const handleSend = () => {
     if ((!text.trim() && attachments.length === 0) || disabled) return;

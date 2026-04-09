@@ -719,6 +719,7 @@ function ChatSessionContent({
         onSend={handleSend}
         onSearch={handleSearch}
         busy={agentBusy}
+        isVisible={isVisible}
       />
     </div>
   );
