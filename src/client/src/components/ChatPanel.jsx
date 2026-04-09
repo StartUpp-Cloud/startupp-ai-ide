@@ -171,15 +171,27 @@ function ChatSessionContent({
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
 
   const messagesEndRef = useRef(null);
+  const scrollContainerRef = useRef(null);
   const knownIdsRef = useRef(new Set());
   const busyClearRef = useRef(false);
   const streamingChunksRef = useRef('');
   const prevMessageCountRef = useRef(0);
   const isInitialLoadRef = useRef(true);
 
+  // Scroll the messages container to the bottom directly — more reliable than
+  // scrollIntoView() which can be defeated by overflow:hidden ancestors.
+  const scrollToBottom = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
   // Load messages on mount
   useEffect(() => {
     if (!projectId || !sessionId) return;
+
+    // Reset scroll state for fresh load
+    isInitialLoadRef.current = true;
+    prevMessageCountRef.current = 0;
 
     setLoading(true);
     fetch(`/api/projects/${projectId}/chat?limit=100&sessionId=${sessionId}`)
@@ -414,33 +426,29 @@ function ChatSessionContent({
     const prevCount = prevMessageCountRef.current;
 
     if (isInitialLoadRef.current && currentCount > 0) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      scrollToBottom();
       isInitialLoadRef.current = false;
     } else if (currentCount > prevCount && prevCount > 0) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      scrollToBottom();
     }
 
     prevMessageCountRef.current = currentCount;
-  }, [messages, isVisible]);
+  }, [messages, isVisible, scrollToBottom]);
 
   // Scroll to bottom when becoming visible
   useEffect(() => {
     if (isVisible) {
-      const timer = setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
-      }, 50);
+      const timer = setTimeout(scrollToBottom, 50);
       return () => clearTimeout(timer);
     }
-  }, [isVisible]);
+  }, [isVisible, scrollToBottom]);
 
   // Ensure visible sessions jump to latest when switching projects
   useEffect(() => {
     if (!isVisible) return;
-    const timer = setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
-    }, 80);
+    const timer = setTimeout(scrollToBottom, 80);
     return () => clearTimeout(timer);
-  }, [projectSwitchKey, isVisible]);
+  }, [projectSwitchKey, isVisible, scrollToBottom]);
 
   // Poll for new messages (runs even when hidden)
   useEffect(() => {
@@ -652,7 +660,7 @@ function ChatSessionContent({
       )}
 
       {/* Messages */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }} className="px-1 py-4">
+      <div ref={scrollContainerRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }} className="px-1 py-4">
         {loading ? (
           <div className="flex items-center justify-center h-full">
             <Loader size={22} className="animate-spin text-surface-600" />
@@ -711,8 +719,6 @@ function ChatSessionContent({
 
         <div ref={messagesEndRef} />
       </div>
-
-      {/* Input */}
       <ChatInput
         mode={mode}
         projectId={projectId}
