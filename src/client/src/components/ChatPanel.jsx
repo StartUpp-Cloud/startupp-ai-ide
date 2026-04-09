@@ -160,6 +160,7 @@ function ChatSessionContent({
   mode,
   tool,
   isVisible,
+  projectSwitchKey,
   onSessionUpdate,
 }) {
   const [messages, setMessages] = useState([]);
@@ -431,6 +432,15 @@ function ChatSessionContent({
       return () => clearTimeout(timer);
     }
   }, [isVisible]);
+
+  // Ensure visible sessions jump to latest when switching projects
+  useEffect(() => {
+    if (!isVisible) return;
+    const timer = setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [projectSwitchKey, isVisible]);
 
   // Poll for new messages (runs even when hidden)
   useEffect(() => {
@@ -722,13 +732,19 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
+  const [splitCount, setSplitCount] = useState(1);
   const [showSessionList, setShowSessionList] = useState(false);
   const sessionListRef = useRef(null);
   const sessionsRef = useRef([]);
+  const [projectSwitchKey, setProjectSwitchKey] = useState(0);
 
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    if (projectId) setProjectSwitchKey(k => k + 1);
+  }, [projectId]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -971,6 +987,22 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
 
   const closedSessions = sortedSessions.filter(s => !openTabs.includes(s.id));
   const openTabSessions = openTabs.map(id => sessions.find(s => s.id === id)).filter(Boolean);
+  const visibleTabIds = useMemo(() => {
+    const ordered = [activeSessionId, ...openTabs.filter(id => id !== activeSessionId)].filter(Boolean);
+    return ordered.slice(0, Math.min(Math.max(splitCount, 1), 4));
+  }, [activeSessionId, openTabs, splitCount]);
+
+  const gridStyle = useMemo(() => {
+    const count = visibleTabIds.length;
+    if (count <= 1) {
+      return { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' };
+    }
+    if (count === 2) {
+      return { gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr' };
+    }
+    // 3-4 panes: 2x2 grid for readability
+    return { gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr' };
+  }, [visibleTabIds.length]);
 
   if (!projectId) {
     return (
@@ -1070,6 +1102,23 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         </div>
 
         <div className="flex items-center gap-0.5 px-1 border-l border-surface-700/30 flex-shrink-0">
+          <div className="flex items-center gap-0.5 mr-1 border-r border-surface-700/30 pr-1">
+            {[1, 2, 3, 4].map(n => (
+              <button
+                key={n}
+                onClick={() => setSplitCount(n)}
+                className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                  splitCount === n
+                    ? 'bg-primary-500/20 text-primary-300 border border-primary-500/30'
+                    : 'text-surface-500 hover:text-surface-200 hover:bg-surface-700/50 border border-transparent'
+                }`}
+                title={`Show ${n} pane${n > 1 ? 's' : ''}`}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+
           <div className="relative" ref={sessionListRef}>
             <button
               onClick={() => setShowSessionList(!showSessionList)}
@@ -1180,24 +1229,40 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         </div>
       </div>
 
-      {/* Render ALL open sessions - use absolute positioning to avoid layout conflicts */}
-      <div style={{ position: 'relative', flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}>
+      {/* Render ALL open sessions; visible ones in split grid, hidden ones stay mounted */}
+      <div
+        style={{
+          position: 'relative',
+          flex: '1 1 0%',
+          minHeight: 0,
+          overflow: 'hidden',
+          display: 'grid',
+          gap: visibleTabIds.length > 1 ? 8 : 0,
+          padding: visibleTabIds.length > 1 ? 8 : 0,
+          ...gridStyle,
+        }}
+      >
         {openTabs.map(tabId => (
           <div
             key={tabId}
             style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
+              position: visibleTabIds.includes(tabId) ? 'relative' : 'absolute',
+              top: visibleTabIds.includes(tabId) ? 'auto' : 0,
+              left: visibleTabIds.includes(tabId) ? 'auto' : 0,
+              right: visibleTabIds.includes(tabId) ? 'auto' : 0,
+              bottom: visibleTabIds.includes(tabId) ? 'auto' : 0,
+              width: visibleTabIds.includes(tabId) ? 'auto' : 0,
+              height: visibleTabIds.includes(tabId) ? 'auto' : 0,
               display: 'flex',
               flexDirection: 'column',
               overflow: 'hidden',
-              visibility: tabId === activeSessionId ? 'visible' : 'hidden',
-              pointerEvents: tabId === activeSessionId ? 'auto' : 'none',
-              zIndex: tabId === activeSessionId ? 1 : 0,
+              visibility: visibleTabIds.includes(tabId) ? 'visible' : 'hidden',
+              pointerEvents: visibleTabIds.includes(tabId) ? 'auto' : 'none',
+              zIndex: visibleTabIds.includes(tabId) ? 1 : 0,
               backgroundColor: '#0d1117',
+              minHeight: 0,
+              border: visibleTabIds.length > 1 ? '1px solid rgba(71,85,105,0.35)' : 'none',
+              borderRadius: visibleTabIds.length > 1 ? 8 : 0,
             }}
           >
             <ChatSessionContent
@@ -1206,7 +1271,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               wsRef={wsRef}
               mode={mode}
               tool={tool}
-              isVisible={tabId === activeSessionId}
+              isVisible={visibleTabIds.includes(tabId)}
+              projectSwitchKey={projectSwitchKey}
               onSessionUpdate={handleSessionUpdate}
             />
           </div>
