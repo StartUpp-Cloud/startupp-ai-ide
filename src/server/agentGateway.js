@@ -63,9 +63,8 @@ class AgentGateway extends EventEmitter {
       const isCapable = provider !== 'ollama';
 
       if (mode === 'plan') {
-        // Plan mode: always send to tool with plan instructions, never auto-execute
-        this._addProgressMessage(projectId, sessionId, `Asking ${tool} to create a plan...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, fullContent, tool, broadcastFn, ctx, 'plan');
+        // Plan mode: multi-loop review (plan → critic → optional 3rd pass)
+        await this._executePlanWithReview(projectId, sessionId, fullContent, tool, broadcastFn, ctx);
       } else if (isCapable) {
         // Agent mode + capable LLM: smart routing
         await this._smartRoute(projectId, sessionId, fullContent, mode, tool, broadcastFn, ctx);
@@ -1167,6 +1166,10 @@ RULES:
     // Mode instruction
     if (mode === 'plan') {
       parts.push('\nMODE: PLAN — You are in planning mode. Do NOT make any changes to files or run any commands that modify the codebase.\n\nYou are acting as a Chief Technology Officer. Your job is to identify the best solution given the full context of this project.\n- Present only the most viable options — omit approaches that are unlikely to work given the current stack, constraints, or scale.\n- Prioritize scalability, performance, and maintainability in every recommendation.\n- Use the full context available from this project (codebase, architecture, conventions, dependencies) to present an informed solution.\n- Follow the user\'s instructions precisely.\n- Do not execute anything. Present your analysis and recommendation clearly, then wait for explicit approval before any changes are made.');
+    } else if (mode === 'plan-review') {
+      // Internal review loops — persona is embedded in the message itself.
+      // Only inject CLAUDE.md instruction and project context, no mode override.
+      parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
     } else {
       parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done');
     }
@@ -1243,6 +1246,228 @@ RULES:
       const name = result.response.trim().slice(0, 50);
       if (name) chatStore.renameSession(projectId, chatSessionId, name);
     } catch {}
+  }
+
+  // ── Multi-loop plan execution ──
+
+  /**
+   * Run one internal plan loop silently (no streaming to user).
+   * Creates an ephemeral shell session, runs the CLI tool, cleans up, and returns
+   * the response text — or null on failure.
+   */
+  async _runPlanPhase(projectId, message, tool, ctx, mode = 'plan') {
+    const tempSessionId = `_plan-internal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const noop = () => {};
+    try {
+      const result = await this._attemptCliTool(
+        projectId, tempSessionId, message, tool, noop, ctx, 1, mode, {}
+      );
+      if (result.success) {
+        return await this._cleanContent(result.displayOutput);
+      }
+      console.warn(`[agentGateway] Plan phase (${mode}) failed: ${result.error}`);
+      return null;
+    } finally {
+      // Clean up the ephemeral shell + CLI session state
+      const shellId = this._activeShellSessions.get(tempSessionId);
+      if (shellId) {
+        try { agentShellPool.killSession(shellId); } catch {}
+      }
+      this._activeShellSessions.delete(tempSessionId);
+      this._cliSessions.delete(tempSessionId);
+    }
+  }
+
+  /**
+   * Ask the local LLM whether a third plan review pass is warranted.
+   * Returns true if yes, false otherwise.
+   */
+  async _shouldRunThirdPlanLoop(planText, critiqueText) {
+    try {
+      const result = await llmProvider.generateResponse(
+        `You are evaluating a technical plan that has gone through two iterations.
+
+FIRST ITERATION (original plan):
+${planText.slice(0, 1500)}
+
+SECOND ITERATION (reviewed & improved plan):
+${critiqueText.slice(0, 1500)}
+
+Does the second iteration still have significant gaps in any of these areas:
+correctness, code quality, best practices, security, scalability, error handling, or testing strategy?
+
+Reply with exactly one word: YES or NO.`,
+        { maxTokens: 10, temperature: 0.1 }
+      );
+      return result.response.trim().toUpperCase().startsWith('YES');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Multi-loop plan orchestration:
+   *   Loop 1 — CTO creates the plan
+   *   Loop 2 — Independent critic reviews it and rewrites gaps
+   *   Gate   — Local LLM decides if a third pass is needed
+   *   Loop 3 — Senior architect finalises with reinforced quality prompts (optional)
+   *
+   * Progress messages keep the user informed throughout. Only the final
+   * synthesised plan is shown as the agent response.
+   */
+  async _executePlanWithReview(projectId, sessionId, userMessage, tool, broadcastFn, ctx) {
+    // Create a streaming placeholder visible to the user from the start
+    const streamingMsg = chatStore.createStreamingMessage({
+      projectId,
+      sessionId,
+      role: 'agent',
+      initialContent: `Planning with ${tool}...`,
+      metadata: { tool, streaming: true, planMode: true },
+    });
+    broadcastFn({
+      type: 'chat-message-stream-start',
+      projectId,
+      sessionId,
+      messageId: streamingMsg.id,
+    });
+
+    let finalText = null;
+    let loopsCompleted = 0;
+
+    try {
+      // ── Loop 1: CTO plan ──
+      this._addProgressMessage(projectId, sessionId,
+        `Analyzing your request and creating a plan...`,
+        broadcastFn, null, { transient: true });
+
+      const planText = await this._runPlanPhase(projectId, userMessage, tool, ctx, 'plan');
+      if (ctx.aborted) throw new Error('Aborted');
+      if (!planText) throw new Error('Plan loop returned no output');
+
+      finalText = planText;
+      loopsCompleted = 1;
+
+      // ── Loop 2: Independent critic ──
+      this._addProgressMessage(projectId, sessionId,
+        `Reviewing the plan for gaps, edge cases, and improvements...`,
+        broadcastFn, null, { transient: true });
+
+      const critiqueMessage =
+        `You are an independent technical reviewer — a different system from the one that created this plan.\n` +
+        `Your job is to:\n` +
+        `- Identify every gap, incorrect assumption, missing edge case, security concern, and scalability issue\n` +
+        `- Check for best practice violations specific to this tech stack\n` +
+        `- Rewrite it as a complete, production-ready plan that addresses every issue found\n` +
+        `- Do NOT make any file changes — only produce a written plan\n\n` +
+        `Plan to review:\n---\n${planText}\n---`;
+
+      const critiqueText = await this._runPlanPhase(projectId, critiqueMessage, tool, ctx, 'plan-review');
+      if (ctx.aborted) throw new Error('Aborted');
+
+      if (critiqueText) {
+        finalText = critiqueText;
+        loopsCompleted = 2;
+      }
+
+      // ── Gate: should we run a third pass? ──
+      if (critiqueText) {
+        this._addProgressMessage(projectId, sessionId,
+          `Evaluating plan quality...`,
+          broadcastFn, null, { transient: true });
+
+        const needsLoop3 = await this._shouldRunThirdPlanLoop(planText, critiqueText);
+
+        if (needsLoop3 && !ctx.aborted) {
+          this._addProgressMessage(projectId, sessionId,
+            `Running final quality review for best practices, correctness, and security...`,
+            broadcastFn, null, { transient: true });
+
+          const loop3Message =
+            `You are a senior technical architect performing a final quality pass on a plan that has already been through two review cycles.\n` +
+            `Focus on: correctness, code quality, best practices for this specific stack, ` +
+            `security, error handling, testing strategy, performance, observability, and deployment concerns.\n` +
+            `Use all available resources — read relevant files, check dependencies, and research current best practices if needed.\n` +
+            `Produce the definitive final plan: complete, accurate, consistent, and ready to hand to a developer.\n\n` +
+            `Plan to finalise:\n---\n${critiqueText}\n---`;
+
+          const loop3Text = await this._runPlanPhase(projectId, loop3Message, tool, ctx, 'plan-review');
+          if (loop3Text && !ctx.aborted) {
+            finalText = loop3Text;
+            loopsCompleted = 3;
+          }
+        }
+      }
+
+      // ── Finalise ──
+      const reviewMeta = await this._analyzeResponseForReview({
+        projectId,
+        userMessage,
+        assistantContent: finalText,
+        mode: 'plan',
+      });
+
+      chatStore.finalizeStreamingMessage({
+        projectId,
+        sessionId,
+        messageId: streamingMsg.id,
+        finalContent: finalText,
+        metadata: {
+          tool,
+          planLoops: loopsCompleted,
+          ...(reviewMeta ? { review: reviewMeta } : {}),
+        },
+      });
+
+      broadcastFn({
+        type: 'chat-message-stream-complete',
+        projectId,
+        sessionId,
+        messageId: streamingMsg.id,
+        message: {
+          ...streamingMsg,
+          content: finalText,
+          metadata: {
+            tool,
+            planLoops: loopsCompleted,
+            ...(reviewMeta ? { review: reviewMeta } : {}),
+          },
+        },
+      });
+
+      const changed = chatStore.markSessionUnread(projectId, sessionId);
+      if (changed) {
+        broadcastFn({ type: 'session-unread', projectId, sessionId, hasUnread: true });
+      }
+
+      this._persistContext(projectId, sessionId, userMessage, finalText);
+
+    } catch (err) {
+      if (err.message !== 'Aborted') {
+        console.error('[agentGateway] Plan review loop failed:', err.message);
+      }
+
+      const errorContent = finalText || `Planning failed: ${err.message}`;
+
+      chatStore.finalizeStreamingMessage({
+        projectId,
+        sessionId,
+        messageId: streamingMsg.id,
+        finalContent: errorContent,
+        metadata: { tool, planLoops: loopsCompleted, error: !finalText },
+      });
+
+      broadcastFn({
+        type: 'chat-message-stream-complete',
+        projectId,
+        sessionId,
+        messageId: streamingMsg.id,
+        message: {
+          ...streamingMsg,
+          content: errorContent,
+          metadata: { tool, planLoops: loopsCompleted },
+        },
+      });
+    }
   }
 
   // ── Plan execution ──
