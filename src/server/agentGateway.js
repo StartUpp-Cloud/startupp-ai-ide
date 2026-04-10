@@ -1166,7 +1166,7 @@ RULES:
 
     // Mode instruction
     if (mode === 'plan') {
-      parts.push('\nMODE: PLAN — You are in planning mode. Do NOT make any changes to files or run any commands that modify the codebase. Instead:\n- Analyze the request thoroughly\n- Create a detailed step-by-step plan\n- List files that would need to change\n- Explain the approach and trade-offs\n- Wait for explicit approval before making any changes');
+      parts.push('\nMODE: PLAN — You are in planning mode. Do NOT make any changes to files or run any commands that modify the codebase.\n\nYou are acting as a Chief Technology Officer. Your job is to identify the best solution given the full context of this project.\n- Present only the most viable options — omit approaches that are unlikely to work given the current stack, constraints, or scale.\n- Prioritize scalability, performance, and maintainability in every recommendation.\n- Use the full context available from this project (codebase, architecture, conventions, dependencies) to present an informed solution.\n- Follow the user\'s instructions precisely.\n- Do not execute anything. Present your analysis and recommendation clearly, then wait for explicit approval before any changes are made.');
     } else {
       parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done');
     }
