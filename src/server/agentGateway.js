@@ -17,6 +17,7 @@ import { llmProvider } from './llmProvider.js';
 import { chatStore } from './chatStore.js';
 import { agentShellPool } from './agentShellPool.js';
 import { jobManager } from './jobManager.js';
+import { skillManager } from './skillManager.js';
 import { getDB } from './db.js';
 import fs from 'fs';
 import path from 'path';
@@ -1181,6 +1182,10 @@ RULES:
     // Project rules
     const rules = this._getProjectRules(projectId);
     if (rules) parts.push(`\n${rules}`);
+
+    // Active skills
+    const skillContext = skillManager.buildSkillContext(projectId);
+    if (skillContext) parts.push(`\n${skillContext}`);
 
     return parts.join('\n');
   }
