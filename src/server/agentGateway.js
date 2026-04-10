@@ -64,14 +64,14 @@ class AgentGateway extends EventEmitter {
 
       if (mode === 'plan') {
         // Plan mode: always send to tool with plan instructions, never auto-execute
-        this._addProgressMessage(projectId, sessionId, `Asking ${tool} to create a plan...`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `Asking ${tool} to create a plan...`, broadcastFn, null, { transient: true });
         await this._sendToCliTool(projectId, sessionId, fullContent, tool, broadcastFn, ctx, 'plan');
       } else if (isCapable) {
         // Agent mode + capable LLM: smart routing
         await this._smartRoute(projectId, sessionId, fullContent, mode, tool, broadcastFn, ctx);
       } else {
         // Agent mode + Ollama: everything goes to the CLI tool
-        this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn, null, { transient: true });
         await this._sendToCliTool(projectId, sessionId, fullContent, tool, broadcastFn, ctx, 'agent');
       }
     } catch (error) {
@@ -251,22 +251,22 @@ RULES:
       const body = response.slice(response.indexOf('\n') + 1).trim();
 
       if (firstLine.startsWith('ANSWER')) {
-        this._addProgressMessage(projectId, sessionId, `Analyzing your question — I can answer this directly.`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `Analyzing your question — I can answer this directly.`, broadcastFn, null, { transient: true });
         this._addAgentMessage(projectId, sessionId, body || response, broadcastFn, { tool: 'local' });
 
       } else if (firstLine.startsWith('COMMAND')) {
         const cmd = body;
         const looksValid = cmd && !cmd.includes('[') && !cmd.includes('NEEDS') && cmd.length < 200;
         if (looksValid) {
-          this._addProgressMessage(projectId, sessionId, `Running shell command: \`${cmd}\``, broadcastFn);
+          this._addProgressMessage(projectId, sessionId, `Running shell command: \`${cmd}\``, broadcastFn, null, { transient: true });
           await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx);
         } else {
-          this._addProgressMessage(projectId, sessionId, `This needs ${tool} — delegating your request...`, broadcastFn);
+          this._addProgressMessage(projectId, sessionId, `This needs ${tool} — delegating your request...`, broadcastFn, null, { transient: true });
           await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
         }
 
       } else if (firstLine.startsWith('DELEGATE')) {
-        this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn, null, { transient: true });
         await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
 
       } else {
@@ -274,12 +274,12 @@ RULES:
         if (!isGarbage && response.length < 500 && !response.includes('```')) {
           this._addAgentMessage(projectId, sessionId, response, broadcastFn, { tool: 'local' });
         } else {
-          this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn);
+          this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
           await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
         }
       }
     } catch (err) {
-      this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn);
+      this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
       await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
     }
   }
@@ -614,7 +614,7 @@ RULES:
 
     this._addProgressMessage(projectId, chatSessionId,
       isFollowUp ? `↻ Continuing conversation with ${tool}...` : `→ Asking ${tool}...`,
-      broadcastFn);
+      broadcastFn, null, { transient: true });
 
     agentShellPool.write(shellSessionId, cmd + '\n');
 
@@ -1712,8 +1712,22 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
     return null;
   }
 
-  _addProgressMessage(projectId, sessionId, content, broadcastFn, tasks = null) {
+  _addProgressMessage(projectId, sessionId, content, broadcastFn, tasks = null, { transient = false } = {}) {
     // sessionId is now passed explicitly to avoid concurrency issues
+    if (transient) {
+      // Broadcast only — do not persist to disk so the message never appears in history.
+      // The client already renders these via the transient streamingMessage overlay.
+      const msg = {
+        id: `progress-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        sessionId,
+        role: 'progress',
+        content,
+        createdAt: new Date().toISOString(),
+        metadata: { tasks, live: true },
+      };
+      broadcastFn({ type: 'chat-progress', projectId, message: msg });
+      return;
+    }
     const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks, live: true } });
     broadcastFn({ type: 'chat-progress', projectId, message: msg });
   }
