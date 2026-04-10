@@ -20,6 +20,7 @@ import { jobManager } from './jobManager.js';
 import { getDB } from './db.js';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 
 class AgentGateway extends EventEmitter {
   constructor() {
@@ -56,7 +57,7 @@ class AgentGateway extends EventEmitter {
       this._autoNameSession(projectId, sessionId, content);
 
       // Build content with attachments context
-      const fullContent = this._buildContentWithAttachments(content, attachments);
+      const fullContent = await this._buildContentWithAttachments(content, attachments, projectId);
 
       const provider = llmProvider.getSettings().provider;
       const isCapable = provider !== 'ollama';
@@ -83,9 +84,11 @@ class AgentGateway extends EventEmitter {
   }
 
   /**
-   * Build content string with attachments context
+   * Build content string with attachments context.
+   * For containerized projects, copies binary files (images, PDFs) into the
+   * container so Claude can read them at their container-internal path.
    */
-  _buildContentWithAttachments(content, attachments) {
+  async _buildContentWithAttachments(content, attachments, projectId) {
     if (!attachments || attachments.length === 0) return content;
 
     const parts = [content];
@@ -102,12 +105,19 @@ class AgentGateway extends EventEmitter {
       !imageAttachments.includes(a) && !textAttachments.includes(a) && !pdfAttachments.includes(a)
     );
 
-    // For images, note they are attached (Claude Code will handle them via file path)
+    // Resolve paths — for containerised projects copy files in and use container paths
+    const resolvePath = await this._resolveAttachmentPaths(
+      [...imageAttachments, ...pdfAttachments, ...otherAttachments],
+      projectId
+    );
+
+    // Images: tell Claude to read them from their resolved path
     if (imageAttachments.length > 0) {
-      parts.push('\n\n[Attached images: ' + imageAttachments.map(a => a.path).join(', ') + ']');
+      const paths = imageAttachments.map(a => resolvePath.get(a.path) || a.path);
+      parts.push('\n\n[Attached images: ' + paths.join(', ') + ']');
     }
 
-    // For text files, include content inline if small enough
+    // Text files: read on the host (server always has access) and inline the content
     for (const att of textAttachments) {
       if (att.size < 50000 && att.path) {
         try {
@@ -121,17 +131,77 @@ class AgentGateway extends EventEmitter {
       }
     }
 
-    // For PDFs, note the path
+    // PDFs
     if (pdfAttachments.length > 0) {
-      parts.push('\n\n[Attached PDFs: ' + pdfAttachments.map(a => a.path).join(', ') + ']');
+      const paths = pdfAttachments.map(a => resolvePath.get(a.path) || a.path);
+      parts.push('\n\n[Attached PDFs: ' + paths.join(', ') + ']');
     }
 
-    // For other files
+    // Other files
     if (otherAttachments.length > 0) {
-      parts.push('\n\n[Other attachments: ' + otherAttachments.map(a => a.path).join(', ') + ']');
+      const paths = otherAttachments.map(a => resolvePath.get(a.path) || a.path);
+      parts.push('\n\n[Other attachments: ' + paths.join(', ') + ']');
     }
 
     return parts.join('');
+  }
+
+  /**
+   * For each attachment path, return the path Claude should use.
+   * - Non-containerised project → original host path (unchanged).
+   * - Containerised project → copy the file into /workspace/.uploads/ inside
+   *   the container and return the container-internal path.
+   *
+   * Returns a Map<hostPath, resolvedPath>.
+   */
+  async _resolveAttachmentPaths(attachments, projectId) {
+    const result = new Map();
+    if (!attachments.length || !projectId) return result;
+
+    let containerName = null;
+    let workDir = '/workspace';
+
+    try {
+      const { default: Project } = await import('./models/Project.js');
+      const project = Project.findById(projectId);
+      containerName = project?.containerName || null;
+      if (containerName) {
+        const { containerManager } = await import('./containerManager.js');
+        workDir = containerManager.getWorkDir(containerName) || '/workspace';
+      }
+    } catch {}
+
+    if (!containerName) {
+      // No container — host paths are directly accessible
+      for (const att of attachments) {
+        if (att.path) result.set(att.path, att.path);
+      }
+      return result;
+    }
+
+    // Ensure upload staging dir exists inside the container
+    const uploadDir = `${workDir}/.uploads`;
+    try {
+      execSync(`docker exec ${containerName} mkdir -p ${uploadDir}`, { stdio: 'pipe' });
+    } catch (err) {
+      console.warn(`[agentGateway] Could not create container upload dir: ${err.message}`);
+    }
+
+    for (const att of attachments) {
+      if (!att.path) continue;
+      const filename = path.basename(att.path);
+      const containerPath = `${uploadDir}/${filename}`;
+      try {
+        execSync(`docker cp '${att.path}' '${containerName}:${containerPath}'`, { stdio: 'pipe' });
+        result.set(att.path, containerPath);
+        console.log(`[agentGateway] Copied attachment into container: ${containerPath}`);
+      } catch (err) {
+        console.warn(`[agentGateway] Failed to copy ${filename} to container: ${err.message}`);
+        result.set(att.path, att.path); // fall back to host path
+      }
+    }
+
+    return result;
   }
 
   // ── Smart routing (capable local LLM) ──
