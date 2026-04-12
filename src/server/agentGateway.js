@@ -1387,6 +1387,8 @@ Reply with exactly one word: YES or NO.`,
       }
 
       // ── Gate: should we run a third pass? ──
+      // (ephemeral loop — independent additional critic, no codebase access needed)
+      let latestCritique = critiqueText;
       if (critiqueText) {
         this._addProgressMessage(projectId, sessionId,
           `Evaluating plan quality...`,
@@ -1396,24 +1398,55 @@ Reply with exactly one word: YES or NO.`,
 
         if (needsLoop3 && !ctx.aborted) {
           this._addProgressMessage(projectId, sessionId,
-            `Running final quality review for best practices, correctness, and security...`,
+            `Running additional quality review for best practices, correctness, and security...`,
             broadcastFn, null, { transient: true });
 
           const loop3Message =
-            `You are a senior technical architect performing a final quality pass on a plan that has already been through two review cycles.\n` +
-            `Focus on: correctness, code quality, best practices for this specific stack, ` +
-            `security, error handling, testing strategy, performance, observability, and deployment concerns.\n` +
-            `Use all available resources — read relevant files, check dependencies, and research current best practices if needed.\n` +
-            `Produce the definitive final plan: complete, accurate, consistent, and ready to hand to a developer.\n\n` +
-            `Plan to finalise:\n---\n${critiqueText}\n---`;
+            `You are a senior technical architect performing an additional quality pass on a plan that has already been through one review cycle.\n` +
+            `Focus specifically on: correctness, best practices for this stack, security, error handling, testing strategy, performance, and deployment concerns.\n` +
+            `Identify any remaining gaps or issues and list them clearly.\n` +
+            `Do NOT produce a final plan — only output a concise list of remaining issues and recommended corrections.\n\n` +
+            `Plan to review:\n---\n${critiqueText}\n---`;
 
           const loop3Text = await this._runPlanPhase(projectId, loop3Message, tool, ctx, 'plan-review');
           if (loop3Text && !ctx.aborted) {
-            finalText = loop3Text;
+            latestCritique = `${critiqueText}\n\n--- Additional review pass ---\n${loop3Text}`;
             loopsCompleted = 3;
-            // Show the finalised plan immediately after loop 3
-            this._addProgressMessage(projectId, sessionId, loop3Text, broadcastFn, null, { transient: true });
+            this._addProgressMessage(projectId, sessionId,
+              `Additional issues found — synthesizing into final plan...`,
+              broadcastFn, null, { transient: true });
           }
+        }
+      }
+
+      // ── Synthesis: produce the final coherent plan in the pinned session ──
+      // Runs with --resume so Claude has full codebase context from Loop 1.
+      // It verifies critique findings against actual code, then produces ONE
+      // self-contained, definitive plan as the final deliverable.
+      if (latestCritique && !ctx.aborted) {
+        this._addProgressMessage(projectId, sessionId,
+          `Synthesizing all findings into the final plan...`,
+          broadcastFn, null, { transient: true });
+
+        const synthesisMessage =
+          `An independent technical review of your plan has been completed. Here are the findings:\n\n` +
+          `--- INDEPENDENT REVIEW ---\n${latestCritique}\n---\n\n` +
+          `Using your full knowledge of this codebase:\n` +
+          `1. For each critique point, verify it against the actual code — call out any that are factually incorrect\n` +
+          `2. Incorporate every valid finding into the plan\n` +
+          `3. Produce the FINAL, DEFINITIVE, COMPLETE plan as a standalone document\n` +
+          `   - Do NOT reference "the original plan" or "the review" — write the plan as if it were the only document\n` +
+          `   - Include all context, phases, schemas, endpoints, migration scripts, and code patterns needed\n` +
+          `   - A developer must be able to start implementing directly from this document alone\n` +
+          `4. Do NOT make any file changes`;
+
+        const synthesisText = await this._runPlanPhase(
+          projectId, synthesisMessage, tool, ctx, 'plan', sessionId
+        );
+        if (synthesisText && !ctx.aborted) {
+          finalText = synthesisText;
+          loopsCompleted += 1; // count synthesis as an extra pass
+          this._addProgressMessage(projectId, sessionId, synthesisText, broadcastFn, null, { transient: true });
         }
       }
 
