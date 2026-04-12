@@ -1257,15 +1257,18 @@ RULES:
 
   /**
    * Run one internal plan loop silently (no streaming to user).
-   * Creates an ephemeral shell session, runs the CLI tool, cleans up, and returns
-   * the response text — or null on failure.
+   *
+   * When `pinnedSessionId` is provided the real chat session ID is used so the
+   * Claude CLI session is preserved for Agent mode to resume later.
+   * When omitted an ephemeral session is created and cleaned up on exit.
    */
-  async _runPlanPhase(projectId, message, tool, ctx, mode = 'plan') {
-    const tempSessionId = `_plan-internal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  async _runPlanPhase(projectId, message, tool, ctx, mode = 'plan', pinnedSessionId = null) {
+    const isEphemeral = !pinnedSessionId;
+    const sessionId = pinnedSessionId || `_plan-internal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const noop = () => {};
     try {
       const result = await this._attemptCliTool(
-        projectId, tempSessionId, message, tool, noop, ctx, 1, mode, {}
+        projectId, sessionId, message, tool, noop, ctx, 1, mode, {}
       );
       if (result.success) {
         return await this._cleanContent(result.displayOutput);
@@ -1273,13 +1276,16 @@ RULES:
       console.warn(`[agentGateway] Plan phase (${mode}) failed: ${result.error}`);
       return null;
     } finally {
-      // Clean up the ephemeral shell + CLI session state
-      const shellId = this._activeShellSessions.get(tempSessionId);
-      if (shellId) {
-        try { agentShellPool.killSession(shellId); } catch {}
+      if (isEphemeral) {
+        // Clean up ephemeral shell + CLI session state
+        const shellId = this._activeShellSessions.get(sessionId);
+        if (shellId) {
+          try { agentShellPool.killSession(shellId); } catch {}
+        }
+        this._activeShellSessions.delete(sessionId);
+        this._cliSessions.delete(sessionId);
       }
-      this._activeShellSessions.delete(tempSessionId);
-      this._cliSessions.delete(tempSessionId);
+      // For pinned (real) sessions, leave _cliSessions intact so Agent mode can --resume
     }
   }
 
@@ -1341,16 +1347,20 @@ Reply with exactly one word: YES or NO.`,
 
     try {
       // ── Loop 1: CTO plan ──
+      // Use the real sessionId so the Claude CLI session is shared with Agent mode.
       this._addProgressMessage(projectId, sessionId,
         `Analyzing your request and creating a plan...`,
         broadcastFn, null, { transient: true });
 
-      const planText = await this._runPlanPhase(projectId, userMessage, tool, ctx, 'plan');
+      const planText = await this._runPlanPhase(projectId, userMessage, tool, ctx, 'plan', sessionId);
       if (ctx.aborted) throw new Error('Aborted');
       if (!planText) throw new Error('Plan loop returned no output');
 
       finalText = planText;
       loopsCompleted = 1;
+
+      // Show the plan to the user immediately after loop 1
+      this._addProgressMessage(projectId, sessionId, planText, broadcastFn, null, { transient: true });
 
       // ── Loop 2: Independent critic ──
       this._addProgressMessage(projectId, sessionId,
@@ -1372,6 +1382,8 @@ Reply with exactly one word: YES or NO.`,
       if (critiqueText) {
         finalText = critiqueText;
         loopsCompleted = 2;
+        // Show the reviewed plan immediately after loop 2
+        this._addProgressMessage(projectId, sessionId, critiqueText, broadcastFn, null, { transient: true });
       }
 
       // ── Gate: should we run a third pass? ──
@@ -1399,6 +1411,8 @@ Reply with exactly one word: YES or NO.`,
           if (loop3Text && !ctx.aborted) {
             finalText = loop3Text;
             loopsCompleted = 3;
+            // Show the finalised plan immediately after loop 3
+            this._addProgressMessage(projectId, sessionId, loop3Text, broadcastFn, null, { transient: true });
           }
         }
       }
