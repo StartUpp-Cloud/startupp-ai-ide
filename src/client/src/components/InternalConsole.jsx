@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader } from 'lucide-react';
+import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 
 // WebSocket reconnection configuration
@@ -13,14 +13,27 @@ const WS_CONFIG = {
   heartbeatTimeout: 60000,
 };
 
+const MIN_HEIGHT = 80;
+const MAX_HEIGHT = 800;
+const DEFAULT_HEIGHT = 180;
+
+function getStoredHeight() {
+  try {
+    const v = parseInt(localStorage.getItem('internalConsoleHeight'), 10);
+    if (v >= MIN_HEIGHT && v <= MAX_HEIGHT) return v;
+  } catch {}
+  return DEFAULT_HEIGHT;
+}
+
 /**
  * InternalConsole — a real interactive shell terminal for the selected project.
  * Opens its own WebSocket + PTY session independently from the chat system.
- * Includes visibility-aware reconnection for stability.
+ * Includes visibility-aware reconnection for stability and a drag-to-resize handle.
  */
 export default function InternalConsole({ projectId }) {
   const [open, setOpen] = useState(true);
   const [connected, setConnected] = useState(false);
+  const [consoleHeight, setConsoleHeight] = useState(getStoredHeight);
   const termRef = useRef(null);
   const xtermRef = useRef(null);
   const fitRef = useRef(null);
@@ -28,6 +41,39 @@ export default function InternalConsole({ projectId }) {
   const sessionIdRef = useRef(null);
   const prevProjectIdRef = useRef(null);
   const mountedRef = useRef(true);
+
+  // Drag-to-resize state
+  const dragRef = useRef({ active: false, startY: 0, startHeight: 0 });
+
+  const handleResizeMouseDown = useCallback((e) => {
+    e.preventDefault();
+    dragRef.current = { active: true, startY: e.clientY, startHeight: consoleHeight };
+
+    const onMouseMove = (moveEvent) => {
+      if (!dragRef.current.active) return;
+      // Dragging up increases height (console grows upward)
+      const delta = dragRef.current.startY - moveEvent.clientY;
+      const newHeight = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, dragRef.current.startHeight + delta));
+      setConsoleHeight(newHeight);
+      // Refit xterm during drag for live feedback
+      try { fitRef.current?.fit(); } catch {}
+    };
+
+    const onMouseUp = () => {
+      dragRef.current.active = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      // Persist and final fit
+      setConsoleHeight(h => {
+        try { localStorage.setItem('internalConsoleHeight', String(h)); } catch {}
+        return h;
+      });
+      setTimeout(() => { try { fitRef.current?.fit(); } catch {} }, 50);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [consoleHeight]);
 
   // Create xterm + WS + session when opened
   useEffect(() => {
@@ -224,8 +270,16 @@ export default function InternalConsole({ projectId }) {
     };
   }, [open, projectId]);
 
+  // Refit xterm when height changes (after drag)
+  useEffect(() => {
+    if (open && fitRef.current) {
+      try { fitRef.current.fit(); } catch {}
+    }
+  }, [consoleHeight, open]);
+
   return (
     <div className="border-t border-surface-700 flex-shrink-0">
+      {/* Toggle button */}
       <button
         onClick={() => setOpen(!open)}
         className={`flex items-center gap-2 w-full px-3 py-1.5 text-xs transition-colors ${
@@ -245,9 +299,22 @@ export default function InternalConsole({ projectId }) {
         <span className="flex-1" />
         {open ? <ChevronDown size={12} /> : <ChevronUp size={14} className="text-primary-400" />}
       </button>
+
       {open && (
         <>
-          <div ref={termRef} style={{ height: 180 }} className="bg-[#0d1117]" />
+          {/* Drag-to-resize handle */}
+          <div
+            onMouseDown={handleResizeMouseDown}
+            className="flex items-center justify-center h-2 bg-surface-800 hover:bg-surface-700 cursor-ns-resize border-b border-surface-700/50 group select-none"
+            title="Drag to resize console"
+          >
+            <GripHorizontal size={12} className="text-surface-600 group-hover:text-surface-400 transition-colors" />
+          </div>
+
+          {/* Terminal canvas */}
+          <div ref={termRef} style={{ height: consoleHeight }} className="bg-[#0d1117]" />
+
+          {/* AI command builder */}
           <CommandBuilder
             onRun={(cmd) => {
               if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {

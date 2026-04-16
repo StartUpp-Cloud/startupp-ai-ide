@@ -864,6 +864,17 @@ RULES:
         // Other errors can be retried
         return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
       }
+    } else if (tool === 'opencode') {
+      const parsed = this._parseOpencodeJsonOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+      if (parsed.sessionId) {
+        const newState = { cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
+        this._cliSessions.set(chatSessionId, newState);
+        chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
+      }
+      if (parsed.isError) {
+        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+      }
     } else {
       displayOutput = this._extractToolResponse(cleanOutput, cmd);
     }
@@ -1036,6 +1047,7 @@ RULES:
         if (t.startsWith('{"type"')) return false;
         if (t.startsWith('claude -p')) return false;
         if (t.startsWith('copilot -p')) return false;
+        if (t.startsWith('opencode run')) return false;
         if (t.startsWith('aider ')) return false;
         // Filter out preamble content that gets echoed
         if (t.startsWith('> MODE:')) return false;
@@ -1184,6 +1196,8 @@ RULES:
       parts.push('IMPORTANT: Read CLAUDE.md and always follow all rules established there.');
     } else if (tool === 'copilot') {
       parts.push('IMPORTANT: Follow all project conventions and rules established in the repository.');
+    } else if (tool === 'opencode') {
+      parts.push('IMPORTANT: Read CLAUDE.md (if present) and always follow all project conventions and rules established there.');
     } else if (tool === 'aider') {
       parts.push('Follow all project conventions.');
     }
@@ -1232,6 +1246,8 @@ RULES:
         args += ` --reasoning-effort ${this._quoteCliArg(assistantSettings.effort)}`;
       } else if (tool === 'claude') {
         args += ` --effort ${this._quoteCliArg(assistantSettings.effort)}`;
+      } else if (tool === 'opencode') {
+        args += ` --variant ${this._quoteCliArg(assistantSettings.effort)}`;
       }
     }
 
@@ -1271,6 +1287,12 @@ RULES:
         let cmd = `copilot -p ${promptArg} --output-format json`;
         cmd += this._buildToolOptionArgs(tool, assistantSettings);
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
+        return cmd;
+      }
+      case 'opencode': {
+        let cmd = `opencode run ${promptArg} --format json --dangerously-skip-permissions`;
+        cmd += this._buildToolOptionArgs(tool, assistantSettings);
+        if (cliState?.cliSessionId) cmd += ` --session '${cliState.cliSessionId}'`;
         return cmd;
       }
       case 'aider':
@@ -1923,6 +1945,52 @@ NEEDS_USER`,
     return { text, sessionId, isError, errorType };
   }
 
+  /**
+   * Parse opencode --format json output.
+   * Events are newline-delimited JSON objects. Each carries a `sessionID` field.
+   * Text content arrives in events with `type === "text"` via `part.text`.
+   */
+  _parseOpencodeJsonOutput(cleanOutput, cmd) {
+    let text = '';
+    let sessionId = null;
+    let isError = false;
+    const textParts = [];
+
+    for (const line of cleanOutput.split('\n')) {
+      const idx = line.indexOf('{');
+      if (idx < 0) continue;
+      try {
+        const json = JSON.parse(line.slice(idx));
+        // Extract session ID from any event (always present)
+        if (json.sessionID && !sessionId) sessionId = json.sessionID;
+        // Collect text parts
+        if (json.type === 'text' && json.part?.text) {
+          textParts.push(json.part.text);
+        }
+        // Detect error events
+        if (json.type === 'error' || json.part?.type === 'error') {
+          isError = true;
+          const errMsg = json.part?.message || json.message || json.error || '';
+          if (errMsg) textParts.push(`\n\n**Error:** ${errMsg}`);
+        }
+      } catch {}
+    }
+
+    text = textParts.join('');
+
+    if (!text) {
+      text = this._extractToolResponse(cleanOutput, cmd);
+    }
+
+    if (!text || text.length < 10) {
+      text = sessionId
+        ? '⚠️ Response received but could not be parsed. OpenCode may still be processing.'
+        : '⚠️ No response received from OpenCode. Please try again.';
+    }
+
+    return { text, sessionId, isError };
+  }
+
   _extractToolResponse(cleanOutput, cmd) {
     let lines = cleanOutput.split('\n');
 
@@ -1964,6 +2032,7 @@ NEEDS_USER`,
       if (t.includes('--dangerously-skip-permissions')) return false;
       if (t.includes("claude -p '")) return false;
       if (t.includes("copilot -p '")) return false;
+      if (t.includes("opencode run '")) return false;
       return true;
     });
 
