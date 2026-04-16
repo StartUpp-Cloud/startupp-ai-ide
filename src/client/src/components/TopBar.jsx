@@ -14,14 +14,7 @@ import ModeToggle from './ModeToggle';
 import LLMSettingsPanel from './LLMSettingsPanel';
 import WelcomeGuide from './WelcomeGuide';
 import SlackSetupPanel from './SlackSetupPanel';
-
-const CLI_TOOLS = [
-  { id: 'claude', name: 'Claude', color: 'text-orange-400', context: 'Full conversation memory via --resume' },
-  { id: 'copilot', name: 'Copilot', color: 'text-blue-400', context: 'Full conversation memory via --resume' },
-  { id: 'aider', name: 'Aider', color: 'text-green-400', context: 'Context from git history + repo map' },
-  { id: 'gemini', name: 'Gemini', color: 'text-cyan-400', context: 'Per-message context' },
-  { id: 'shell', name: 'Shell only', color: 'text-surface-400', context: 'Direct shell commands' },
-];
+import { CLI_TOOLS } from '../utils/sessionAssistantOptions';
 
 export default function TopBar({
   selectedProject,
@@ -92,6 +85,7 @@ export default function TopBar({
         <div className="relative" ref={toolMenuRef}>
           <button
             onClick={() => setShowToolMenu(!showToolMenu)}
+            title="Default assistant for new sessions"
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium hover:bg-surface-750 transition-colors"
           >
             <span className={activeTool.color}>{activeTool.name}</span>

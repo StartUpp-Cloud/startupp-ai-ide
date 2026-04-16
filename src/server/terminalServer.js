@@ -14,6 +14,7 @@ import { orchestrator } from './orchestrator.js';
 import { activityFeed } from './activityFeed.js';
 import { agentShellPool } from './agentShellPool.js';
 import { slackService } from './slackService.js';
+import { mergeSessionAssistantSettings } from './sessionSettings.js';
 
 class TerminalServer {
   constructor() {
@@ -130,6 +131,11 @@ class TerminalServer {
       const { agentGateway } = await import('./agentGateway.js');
 
       chatStore.migrateIfNeeded(projectId);
+      const sessionMeta = chatStore.getSession(projectId, sessionId);
+      const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, { tool }, {
+        tool: sessionMeta?.tool || tool || 'claude',
+      });
+      chatStore.updateSessionMeta(projectId, sessionId, assistantSettings);
 
       // Persist user message
       const userMsg = chatStore.addMessage({
@@ -137,7 +143,7 @@ class TerminalServer {
         sessionId,
         role: 'user',
         content,
-        metadata: { mode, source: 'slack' },
+        metadata: { mode, source: 'slack', ...assistantSettings },
       });
 
       // Broadcast to UI clients watching this session
@@ -151,7 +157,9 @@ class TerminalServer {
         content,
         attachments: [],
         mode: mode || 'agent',
-        tool: tool || 'claude',
+        tool: assistantSettings.tool,
+        model: assistantSettings.model,
+        effort: assistantSettings.effort,
         broadcastFn: (data) => {
           this.broadcastToChatSession(sessionId, data);
           this.broadcast(data);
@@ -580,6 +588,11 @@ class TerminalServer {
         // Ensure session exists
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
+        const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
+          tool: sessionMeta?.tool || payload.tool || 'claude',
+        });
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, assistantSettings);
 
         // Attach client to this chat session for isolated communication
         this.attachToChatSession(ws, chatSessionId);
@@ -598,7 +611,7 @@ class TerminalServer {
           sessionId: chatSessionId,
           role: 'user',
           content: displayContent,
-          metadata: { mode: payload.mode, attachments },
+          metadata: { mode: payload.mode, attachments, ...assistantSettings },
         });
 
         // Broadcast to all clients attached to this chat session
@@ -615,7 +628,9 @@ class TerminalServer {
           content: payload.content,
           attachments,
           mode: payload.mode,
-          tool: payload.tool || 'claude',
+          tool: assistantSettings.tool,
+          model: assistantSettings.model,
+          effort: assistantSettings.effort,
           broadcastFn: (data) => {
             // Broadcast to chat session clients first (isolated)
             this.broadcastToChatSession(chatSessionId, data);
@@ -641,6 +656,11 @@ class TerminalServer {
 
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
+        const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
+          tool: sessionMeta?.tool || payload.tool || 'claude',
+        });
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, assistantSettings);
         this.attachToChatSession(ws, chatSessionId);
 
         const retryContent = (payload.content || '').trim();
@@ -668,7 +688,9 @@ class TerminalServer {
           content: retryContent,
           attachments: [],
           mode: payload.mode,
-          tool: payload.tool || 'claude',
+          tool: assistantSettings.tool,
+          model: assistantSettings.model,
+          effort: assistantSettings.effort,
           broadcastFn: (data) => {
             this.broadcastToChatSession(chatSessionId, data);
             this.broadcast(data);
@@ -1549,6 +1571,10 @@ class TerminalServer {
 
       // Ensure CLI session ID is stored
       chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId });
+      const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
+      const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+        tool: sessionMeta?.tool || 'claude',
+      });
 
       // Ask Claude to check on the status
       const followUpPrompt = 'What is the status of the background agents or tasks you were working on? If they completed, please summarize the results. If they are still running, let me know.';
@@ -1560,7 +1586,9 @@ class TerminalServer {
         sessionId: chatSessionId,
         content: followUpPrompt,
         mode: 'agent',
-        tool: 'claude',
+        tool: assistantSettings.tool,
+        model: assistantSettings.model,
+        effort: assistantSettings.effort,
         broadcastFn: (msg) => {
           this.broadcastToChatSession(chatSessionId, msg);
           this.broadcast(msg);
@@ -1611,6 +1639,10 @@ class TerminalServer {
 
       // Ensure the CLI session ID is stored in the chat session
       chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: job.cliSessionId });
+      const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
+      const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+        tool: sessionMeta?.tool || job.tool || 'claude',
+      });
 
       // Send a follow-up prompt to check on the interrupted work
       const followUpPrompt = 'Connection was interrupted. Please summarize what you were working on and its current status. If there were any pending tasks or agents, check their status and complete any remaining work.';
@@ -1623,7 +1655,9 @@ class TerminalServer {
         sessionId: chatSessionId,
         content: followUpPrompt,
         mode: 'agent',
-        tool: job.tool || 'claude',
+        tool: assistantSettings.tool,
+        model: assistantSettings.model,
+        effort: assistantSettings.effort,
         broadcastFn: (msg) => {
           this.broadcastToChatSession(chatSessionId, msg);
           this.broadcast(msg);

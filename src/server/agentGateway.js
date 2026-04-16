@@ -19,6 +19,7 @@ import { agentShellPool } from './agentShellPool.js';
 import { jobManager } from './jobManager.js';
 import { skillManager } from './skillManager.js';
 import { getDB } from './db.js';
+import { supportsSessionEffortSelection, supportsSessionModelSelection } from './sessionSettings.js';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
@@ -31,23 +32,38 @@ class AgentGateway extends EventEmitter {
     this._activeShellSessions = new Map();
   }
 
+  resetSession(sessionId) {
+    if (!sessionId) return;
+    this._cliSessions.delete(sessionId);
+  }
+
   // ── Entry point ──
 
-  async handleTask({ projectId, sessionId = null, content, attachments = [], mode, tool = 'claude', broadcastFn }) {
+  async handleTask({
+    projectId,
+    sessionId = null,
+    content,
+    attachments = [],
+    mode,
+    tool = 'claude',
+    model = null,
+    effort = null,
+    broadcastFn,
+  }) {
     const existing = this._running.get(sessionId);
     if (existing && existing.queue) {
       existing.queue = existing.queue.then(() =>
-        this._executeTask({ projectId, sessionId, content, attachments, mode, tool, broadcastFn })
+        this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn })
       );
       return existing.queue;
     }
 
-    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, broadcastFn });
+    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn });
     this._running.set(sessionId, { aborted: false, startedAt: Date.now(), queue: promise });
     return promise;
   }
 
-  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, broadcastFn }) {
+  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, model, effort, broadcastFn }) {
     const ctx = { aborted: false, startedAt: Date.now() };
     this._running.set(sessionId, { ...ctx, queue: this._running.get(sessionId)?.queue });
 
@@ -62,17 +78,18 @@ class AgentGateway extends EventEmitter {
 
       const provider = llmProvider.getSettings().provider;
       const isCapable = provider !== 'ollama';
+      const assistantSettings = { model, effort };
 
       if (mode === 'plan') {
         // Plan mode: multi-loop review (plan → critic → optional 3rd pass)
-        await this._executePlanWithReview(projectId, sessionId, fullContent, tool, broadcastFn, ctx);
+        await this._executePlanWithReview(projectId, sessionId, fullContent, tool, assistantSettings, broadcastFn, ctx);
       } else if (isCapable) {
         // Agent mode + capable LLM: smart routing
-        await this._smartRoute(projectId, sessionId, fullContent, mode, tool, broadcastFn, ctx);
+        await this._smartRoute(projectId, sessionId, fullContent, mode, tool, assistantSettings, broadcastFn, ctx);
       } else {
         // Agent mode + Ollama: everything goes to the CLI tool
         this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, fullContent, tool, broadcastFn, ctx, 'agent');
+        await this._sendToCliTool(projectId, sessionId, fullContent, tool, assistantSettings, broadcastFn, ctx, 'agent');
       }
     } catch (error) {
       this._addErrorMessage(projectId, sessionId, `Error: ${error.message}`, broadcastFn);
@@ -206,7 +223,7 @@ class AgentGateway extends EventEmitter {
 
   // ── Smart routing (capable local LLM) ──
 
-  async _smartRoute(projectId, sessionId, content, mode, tool, broadcastFn, ctx) {
+  async _smartRoute(projectId, sessionId, content, mode, tool, assistantSettings, broadcastFn, ctx) {
     // Build rich context for the local LLM
     const context = this._buildContext(projectId, sessionId, content);
 
@@ -262,12 +279,12 @@ RULES:
           await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx);
         } else {
           this._addProgressMessage(projectId, sessionId, `This needs ${tool} — delegating your request...`, broadcastFn, null, { transient: true });
-          await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
+          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode);
         }
 
       } else if (firstLine.startsWith('DELEGATE')) {
         this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
+        await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode);
 
       } else {
         const isGarbage = response.includes('NEEDS_USER') || response.includes('[') || response.length < 10;
@@ -275,12 +292,12 @@ RULES:
           this._addAgentMessage(projectId, sessionId, response, broadcastFn, { tool: 'local' });
         } else {
           this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
-          await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
+          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode);
         }
       }
     } catch (err) {
       this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
-      await this._sendToCliTool(projectId, sessionId, content, tool, broadcastFn, ctx, mode);
+      await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode);
     }
   }
 
@@ -381,7 +398,7 @@ RULES:
    * - JOB PERSISTENCE: Full operation tracked via JobManager for reliability
    * - STREAMING PERSISTENCE: Saves response chunks to disk as they arrive
    */
-  async _sendToCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, mode = 'agent') {
+  async _sendToCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, mode = 'agent') {
     const MAX_ATTEMPTS = 3;
 
     // Create a streaming message placeholder BEFORE starting
@@ -434,7 +451,7 @@ RULES:
 
     try {
       for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
-        const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode, {
+        const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode, {
           job, // Pass job for output recording
           // Callback to persist chunks as they arrive (for recovery)
           // NOTE: Raw chunks are saved to disk but NOT broadcast to client
@@ -589,7 +606,7 @@ RULES:
    * @param {Object} streamOpts.job - Job for tracking (managed by JobManager)
    * @param {Function} streamOpts.onChunk - Callback for each output chunk (for persistence)
    */
-  async _attemptCliTool(projectId, chatSessionId, message, tool, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
+  async _attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
     const { job, onChunk } = streamOpts;
 
     // Get or create shell session
@@ -609,7 +626,7 @@ RULES:
     }
 
     const cliState = this._cliSessions.get(chatSessionId);
-    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode);
+    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode, assistantSettings);
     const isFollowUp = !!(cliState?.cliSessionId);
 
     this._addProgressMessage(projectId, chatSessionId,
@@ -729,7 +746,14 @@ RULES:
               `🔄 All background agents completed. Getting final summary...`,
               broadcastFn);
             // Send a follow-up prompt to Claude to process the results
-            const followUpCmd = this._buildToolCommand(tool, 'All background agents have completed. Please summarize the results and let me know what was done.', chatSessionId, projectId, mode);
+            const followUpCmd = this._buildToolCommand(
+              tool,
+              'All background agents have completed. Please summarize the results and let me know what was done.',
+              chatSessionId,
+              projectId,
+              mode,
+              assistantSettings,
+            );
             agentShellPool.write(shellSessionId, followUpCmd + '\n');
             resultEventSeen = false; // Reset to wait for the new result
           }
@@ -1192,7 +1216,29 @@ RULES:
 
   // ── Command building ──
 
-  _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent') {
+  _quoteCliArg(value) {
+    return `'${String(value).replace(/'/g, `'\\''`)}'`;
+  }
+
+  _buildToolOptionArgs(tool, assistantSettings = {}) {
+    let args = '';
+
+    if (supportsSessionModelSelection(tool) && assistantSettings?.model) {
+      args += ` --model ${this._quoteCliArg(assistantSettings.model)}`;
+    }
+
+    if (supportsSessionEffortSelection(tool) && assistantSettings?.effort) {
+      if (tool === 'copilot') {
+        args += ` --reasoning-effort ${this._quoteCliArg(assistantSettings.effort)}`;
+      } else if (tool === 'claude') {
+        args += ` --effort ${this._quoteCliArg(assistantSettings.effort)}`;
+      }
+    }
+
+    return args;
+  }
+
+  _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}) {
     let cliState = this._cliSessions.get(chatSessionId);
     if (!cliState?.cliSessionId && chatSessionId && projectId) {
       const stored = chatStore.getSession(projectId, chatSessionId);
@@ -1217,11 +1263,13 @@ RULES:
     switch (tool) {
       case 'claude': {
         let cmd = `claude -p ${promptArg} --output-format stream-json --verbose --dangerously-skip-permissions`;
+        cmd += this._buildToolOptionArgs(tool, assistantSettings);
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
         return cmd;
       }
       case 'copilot': {
         let cmd = `copilot -p ${promptArg} --output-format json`;
+        cmd += this._buildToolOptionArgs(tool, assistantSettings);
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
         return cmd;
       }
@@ -1262,13 +1310,13 @@ RULES:
    * Claude CLI session is preserved for Agent mode to resume later.
    * When omitted an ephemeral session is created and cleaned up on exit.
    */
-  async _runPlanPhase(projectId, message, tool, ctx, mode = 'plan', pinnedSessionId = null) {
+  async _runPlanPhase(projectId, message, tool, assistantSettings, ctx, mode = 'plan', pinnedSessionId = null) {
     const isEphemeral = !pinnedSessionId;
     const sessionId = pinnedSessionId || `_plan-internal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const noop = () => {};
     try {
       const result = await this._attemptCliTool(
-        projectId, sessionId, message, tool, noop, ctx, 1, mode, {}
+        projectId, sessionId, message, tool, assistantSettings, noop, ctx, 1, mode, {}
       );
       if (result.success) {
         return await this._cleanContent(result.displayOutput);
@@ -1326,7 +1374,7 @@ Reply with exactly one word: YES or NO.`,
    * Progress messages keep the user informed throughout. Only the final
    * synthesised plan is shown as the agent response.
    */
-  async _executePlanWithReview(projectId, sessionId, userMessage, tool, broadcastFn, ctx) {
+  async _executePlanWithReview(projectId, sessionId, userMessage, tool, assistantSettings, broadcastFn, ctx) {
     // Create a streaming placeholder visible to the user from the start
     const streamingMsg = chatStore.createStreamingMessage({
       projectId,
@@ -1352,7 +1400,7 @@ Reply with exactly one word: YES or NO.`,
         `Analyzing your request and creating a plan...`,
         broadcastFn, null, { transient: true });
 
-      const planText = await this._runPlanPhase(projectId, userMessage, tool, ctx, 'plan', sessionId);
+      const planText = await this._runPlanPhase(projectId, userMessage, tool, assistantSettings, ctx, 'plan', sessionId);
       if (ctx.aborted) throw new Error('Aborted');
       if (!planText) throw new Error('Plan loop returned no output');
 
@@ -1376,7 +1424,7 @@ Reply with exactly one word: YES or NO.`,
         `- Do NOT make any file changes — only produce a written plan\n\n` +
         `Plan to review:\n---\n${planText}\n---`;
 
-      const critiqueText = await this._runPlanPhase(projectId, critiqueMessage, tool, ctx, 'plan-review');
+      const critiqueText = await this._runPlanPhase(projectId, critiqueMessage, tool, assistantSettings, ctx, 'plan-review');
       if (ctx.aborted) throw new Error('Aborted');
 
       if (critiqueText) {
@@ -1408,7 +1456,7 @@ Reply with exactly one word: YES or NO.`,
             `Do NOT produce a final plan — only output a concise list of remaining issues and recommended corrections.\n\n` +
             `Plan to review:\n---\n${critiqueText}\n---`;
 
-          const loop3Text = await this._runPlanPhase(projectId, loop3Message, tool, ctx, 'plan-review');
+          const loop3Text = await this._runPlanPhase(projectId, loop3Message, tool, assistantSettings, ctx, 'plan-review');
           if (loop3Text && !ctx.aborted) {
             latestCritique = `${critiqueText}\n\n--- Additional review pass ---\n${loop3Text}`;
             loopsCompleted = 3;
@@ -1441,7 +1489,7 @@ Reply with exactly one word: YES or NO.`,
           `4. Do NOT make any file changes`;
 
         const synthesisText = await this._runPlanPhase(
-          projectId, synthesisMessage, tool, ctx, 'plan', sessionId
+          projectId, synthesisMessage, tool, assistantSettings, ctx, 'plan', sessionId
         );
         if (synthesisText && !ctx.aborted) {
           finalText = synthesisText;
@@ -1524,7 +1572,7 @@ Reply with exactly one word: YES or NO.`,
 
   // ── Plan execution ──
 
-  async executePlan({ projectId, sessionId = null, steps, tool = 'claude', broadcastFn }) {
+  async executePlan({ projectId, sessionId = null, steps, tool = 'claude', model = null, effort = null, broadcastFn }) {
     const ctx = { aborted: false, startedAt: Date.now() };
     this._running.set(sessionId, { ...ctx, queue: null });
 
@@ -1536,7 +1584,7 @@ Reply with exactly one word: YES or NO.`,
           status: j < i ? 'done' : j === i ? 'running' : 'pending',
         }));
         this._addProgressMessage(projectId, sessionId, `Step ${i + 1}/${steps.length}: ${steps[i].title}`, broadcastFn, tasks);
-        await this._sendToCliTool(projectId, sessionId, steps[i].prompt, tool, broadcastFn, ctx);
+        await this._sendToCliTool(projectId, sessionId, steps[i].prompt, tool, { model, effort }, broadcastFn, ctx);
         if (ctx.aborted) break;
       }
       if (!ctx.aborted) {

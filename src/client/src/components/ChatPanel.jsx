@@ -2,6 +2,14 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
 import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check } from 'lucide-react';
+import {
+  CLI_TOOLS,
+  getToolConfig,
+  getToolEffortOptions,
+  getToolModelOptions,
+  supportsEffortSelection,
+  supportsModelSelection,
+} from '../utils/sessionAssistantOptions';
 
 /**
  * Format job progress for display
@@ -149,6 +157,74 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
   );
 }
 
+function SessionAssistantControls({ session, defaultTool, disabled = false, onUpdate }) {
+  const effectiveTool = session?.tool || defaultTool || 'claude';
+  const selectedModel = session?.model || '';
+  const selectedEffort = session?.effort || '';
+  const modelOptions = getToolModelOptions(effectiveTool, selectedModel);
+  const effortOptions = getToolEffortOptions(effectiveTool);
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-surface-700/40 bg-surface-850/40">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="text-[10px] uppercase tracking-wide text-surface-500">Assistant</span>
+        <select
+          value={effectiveTool}
+          disabled={disabled}
+          onChange={(e) => onUpdate({ tool: e.target.value, model: '', effort: '' })}
+          className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50"
+        >
+          {CLI_TOOLS.map((toolOption) => (
+            <option key={toolOption.id} value={toolOption.id}>
+              {toolOption.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {supportsModelSelection(effectiveTool) && (
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[10px] uppercase tracking-wide text-surface-500">Model</span>
+          <select
+            value={selectedModel}
+            disabled={disabled}
+            onChange={(e) => onUpdate({ model: e.target.value })}
+            className="max-w-[220px] bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50"
+          >
+            {modelOptions.map((option) => (
+              <option key={option.value || '__default__'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {supportsEffortSelection(effectiveTool) && (
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[10px] uppercase tracking-wide text-surface-500">Effort</span>
+          <select
+            value={selectedEffort}
+            disabled={disabled}
+            onChange={(e) => onUpdate({ effort: e.target.value })}
+            className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50"
+          >
+            {effortOptions.map((option) => (
+              <option key={option.value || '__default__'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div className="ml-auto text-[10px] text-surface-500 truncate">
+        {getToolConfig(effectiveTool).context}
+      </div>
+    </div>
+  );
+}
+
 /**
  * Individual session content - manages its own state independently.
  * Stays mounted when hidden to preserve scroll position and continue receiving updates.
@@ -159,9 +235,11 @@ function ChatSessionContent({
   wsRef,
   mode,
   tool,
+  session,
   isVisible,
   projectSwitchKey,
   onSessionUpdate,
+  onUpdateSessionConfig,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -507,6 +585,11 @@ function ChatSessionContent({
     return () => clearInterval(poll);
   }, [projectId, sessionId]);
 
+  const effectiveTool = session?.tool || tool || 'claude';
+  const sessionModel = session?.model || '';
+  const sessionEffort = session?.effort || '';
+  const settingsDisabled = agentBusy || Boolean(streamingMessage) || recoveryStatus.active;
+
   // Send message handler
   const handleSend = useCallback((content, attachments = []) => {
     if (!projectId || !sessionId) return;
@@ -523,7 +606,7 @@ function ChatSessionContent({
       sessionId,
       role: 'user',
       content: displayContent,
-      metadata: { mode, attachments },
+      metadata: { mode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null },
       createdAt: new Date().toISOString(),
     };
     setMessages(prev => [...prev, optimistic]);
@@ -544,7 +627,9 @@ function ChatSessionContent({
           url: a.url,
         })),
         mode,
-        tool,
+        tool: effectiveTool,
+        model: sessionModel || null,
+        effort: sessionEffort || null,
       }));
     } else {
       setAgentBusy(false);
@@ -556,7 +641,7 @@ function ChatSessionContent({
         createdAt: new Date().toISOString(),
       }]);
     }
-  }, [projectId, sessionId, mode, tool, wsRef]);
+  }, [projectId, sessionId, mode, wsRef, effectiveTool, sessionModel, sessionEffort]);
 
   const handleSearch = useCallback(async (query) => {
     if (!query || !projectId) { setSearchResults(null); return; }
@@ -592,14 +677,16 @@ function ChatSessionContent({
         sessionId,
         content: retryContent,
         mode,
-        tool,
+        tool: effectiveTool,
+        model: sessionModel || null,
+        effort: sessionEffort || null,
         targetMessageId: targetMessage.id,
         review: targetMessage?.metadata?.review || null,
         executeReviewedPlan: !!options.executeReviewedPlan,
       }));
       setAgentBusy(true);
     }
-  }, [messages, projectId, sessionId, wsRef, mode, tool]);
+  }, [messages, projectId, sessionId, wsRef, mode, effectiveTool, sessionModel, sessionEffort]);
 
   // Prepare display messages
   const sortedMessages = useMemo(() =>
@@ -658,6 +745,13 @@ function ChatSessionContent({
           {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} found
         </div>
       )}
+
+      <SessionAssistantControls
+        session={session}
+        defaultTool={tool}
+        disabled={settingsDisabled}
+        onUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
+      />
 
       {/* Messages */}
       <div ref={scrollContainerRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }} className="px-1 py-4">
@@ -833,7 +927,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       const r = await fetch(`/api/projects/${projectId}/chat/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: '{}'
+        body: JSON.stringify({ tool })
       });
       const session = await r.json();
       setSessions(prev => [session, ...prev]);
@@ -841,7 +935,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       setActiveSessionId(session.id);
       setShowSessionList(false);
     } catch {}
-  }, [projectId]);
+  }, [projectId, tool]);
 
   const deleteSession = useCallback(async (sessionId) => {
     if (!projectId) return;
@@ -909,6 +1003,37 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       s.id === sessionId ? { ...s, ...updates } : s
     ));
   }, []);
+
+  const updateSessionAssistantConfig = useCallback(async (sessionId, updates) => {
+    if (!projectId) return;
+
+    const previous = sessionsRef.current.find((session) => session.id === sessionId);
+    if (!previous) return;
+
+    const optimistic = { ...previous, ...updates };
+    setSessions((prev) => prev.map((session) => (
+      session.id === sessionId ? optimistic : session
+    )));
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to update session settings');
+      if (data.session) {
+        setSessions((prev) => prev.map((session) => (
+          session.id === sessionId ? data.session : session
+        )));
+      }
+    } catch {
+      setSessions((prev) => prev.map((session) => (
+        session.id === sessionId ? previous : session
+      )));
+    }
+  }, [projectId]);
 
   // Pin/unpin a session
   const togglePin = useCallback(async (sessionId, e) => {
@@ -1295,9 +1420,11 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               wsRef={wsRef}
               mode={mode}
               tool={tool}
+              session={sessions.find(s => s.id === tabId)}
               isVisible={visibleTabIds.includes(tabId)}
               projectSwitchKey={projectSwitchKey}
               onSessionUpdate={handleSessionUpdate}
+              onUpdateSessionConfig={updateSessionAssistantConfig}
             />
           </div>
         ))}

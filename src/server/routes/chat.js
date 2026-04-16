@@ -1,7 +1,13 @@
 import express from 'express';
 import { chatStore } from '../chatStore.js';
+import { agentGateway } from '../agentGateway.js';
+import { mergeSessionAssistantSettings, resolveSessionAssistantSettings } from '../sessionSettings.js';
 
 const router = express.Router();
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
 
 // GET /api/projects/:projectId/chat/sessions — List all sessions
 router.get('/:projectId/chat/sessions', (req, res) => {
@@ -20,7 +26,10 @@ router.post('/:projectId/chat/sessions', (req, res) => {
   try {
     const { projectId } = req.params;
     const { name } = req.body;
-    const session = chatStore.createSession(projectId, name || null);
+    const assistantSettings = resolveSessionAssistantSettings(req.body, {
+      tool: 'claude',
+    });
+    const session = chatStore.createSession(projectId, name || null, assistantSettings);
     res.status(201).json(session);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -38,14 +47,43 @@ router.delete('/:projectId/chat/sessions/:sessionId', (req, res) => {
   }
 });
 
-// PATCH /api/projects/:projectId/chat/sessions/:sessionId — Rename a session
+// PATCH /api/projects/:projectId/chat/sessions/:sessionId — Update session metadata
 router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
   try {
     const { projectId, sessionId } = req.params;
-    const { name } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
-    chatStore.renameSession(projectId, sessionId, name.trim(), { manual: true });
-    res.json({ renamed: true });
+    const session = chatStore.getSession(projectId, sessionId);
+    if (!session) return res.status(404).json({ error: 'session not found' });
+
+    const updates = {};
+    const wantsName = hasOwn(req.body, 'name');
+    const wantsAssistantSettings = ['tool', 'model', 'effort'].some((field) => hasOwn(req.body, field));
+
+    if (!wantsName && !wantsAssistantSettings) {
+      return res.status(400).json({ error: 'No supported session fields were provided' });
+    }
+
+    if (wantsName) {
+      if (!req.body.name?.trim()) return res.status(400).json({ error: 'name is required' });
+      updates.name = req.body.name.trim();
+      updates.manualName = true;
+    }
+
+    if (wantsAssistantSettings) {
+      const nextAssistantSettings = mergeSessionAssistantSettings(session, req.body, {
+        tool: session.tool || 'claude',
+      });
+      const previousTool = session.tool || 'claude';
+
+      Object.assign(updates, nextAssistantSettings);
+
+      if (session.cliSessionId && nextAssistantSettings.tool !== previousTool) {
+        updates.cliSessionId = null;
+        agentGateway.resetSession(sessionId);
+      }
+    }
+
+    chatStore.updateSessionMeta(projectId, sessionId, updates);
+    res.json({ session: chatStore.getSession(projectId, sessionId) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

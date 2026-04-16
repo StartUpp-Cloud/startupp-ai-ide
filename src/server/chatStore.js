@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import { createMessage, serialize, deserialize } from './models/ChatMessage.js';
+import { resolveSessionAssistantSettings } from './sessionSettings.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CHAT_DIR = path.join(__dirname, '../../data/chat');
@@ -84,13 +85,17 @@ class ChatStore {
    * Create a new chat session for a project.
    * Returns the new session object.
    */
-  createSession(projectId, name = null) {
+  createSession(projectId, name = null, assistantSettings = {}) {
+    const resolvedAssistant = resolveSessionAssistantSettings(assistantSettings, {
+      tool: 'claude',
+    });
     const session = {
       id: uuidv4(),
       name: name || `Chat ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
       createdAt: new Date().toISOString(),
       messageCount: 0,
       manualName: false,
+      ...resolvedAssistant,
     };
     const sessions = this._readIndex(projectId);
     sessions.push(session);

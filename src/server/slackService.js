@@ -393,7 +393,9 @@ async function _createSessionFromSlack(projectId, message) {
   chatStore.migrateIfNeeded(projectId);
 
   const userName = message.user ? `<@${message.user}>` : 'Slack user';
-  const session = chatStore.createSession(projectId, `Slack: ${userName}`);
+  const session = chatStore.createSession(projectId, `Slack: ${userName}`, {
+    tool: _readSettings().defaultTool || 'claude',
+  });
 
   _linkSession(session.id, message.channel, message.ts);
 
@@ -409,7 +411,9 @@ async function _handleThreadReply(event, projectId) {
     // Create a new session and link it.
     const { chatStore } = await import('./chatStore.js');
     chatStore.migrateIfNeeded(projectId);
-    const session = chatStore.createSession(projectId, 'Slack (resumed)');
+    const session = chatStore.createSession(projectId, 'Slack (resumed)', {
+      tool: _readSettings().defaultTool || 'claude',
+    });
     sessionId = session.id;
     _linkSession(sessionId, event.channel, threadTs);
   }
