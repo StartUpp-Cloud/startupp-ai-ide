@@ -842,7 +842,9 @@ RULES:
       const parsed = this._parseJsonToolOutput(cleanOutput, cmd);
       displayOutput = parsed.text;
       if (parsed.sessionId) {
-        const newState = { cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
+        // Preserve lastSkillHash so skill-change detection works across messages
+        const prevState = this._cliSessions.get(chatSessionId);
+        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
         this._cliSessions.set(chatSessionId, newState);
         chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
       }
@@ -868,7 +870,9 @@ RULES:
       const parsed = this._parseOpencodeJsonOutput(cleanOutput, cmd);
       displayOutput = parsed.text;
       if (parsed.sessionId) {
-        const newState = { cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
+        // Preserve lastSkillHash so skill-change detection works across messages
+        const prevState = this._cliSessions.get(chatSessionId);
+        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
         this._cliSessions.set(chatSessionId, newState);
         chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
       }
@@ -1266,10 +1270,23 @@ RULES:
     }
 
     const isFirstMessage = !cliState?.cliSessionId;
+
+    // Compute a lightweight skill hash to detect mid-session changes
+    const skillContext = skillManager.buildSkillContext(projectId);
+    const skillHash = skillContext
+      ? String(skillContext.length) + '|' + skillContext.slice(0, 64)
+      : '';
+
     let fullMessage;
     if (isFirstMessage) {
       const preamble = this._buildFirstMessagePreamble(tool, projectId, mode);
       fullMessage = preamble + '\n\n---\n\n' + message;
+      // Record the skill hash so we can detect changes on future messages
+      this._cliSessions.set(chatSessionId, { ...(cliState || {}), lastSkillHash: skillHash });
+    } else if (skillContext && cliState?.lastSkillHash !== skillHash) {
+      // Skills changed since the session started — re-inject them before the user's message
+      fullMessage = `[Note: Your active skills have been updated. Apply the following going forward:]\n${skillContext}\n\n---\n\n${message}`;
+      this._cliSessions.set(chatSessionId, { ...cliState, lastSkillHash: skillHash });
     } else {
       fullMessage = message;
     }

@@ -125,15 +125,16 @@ class TerminalServer {
       this.broadcast({ type: 'agent-shell-output', sessionId, data, projectId, chatSessionId });
     });
 
-    // Register Slack inbound handler — Slack messages enter the same chat pipeline
+      // Register Slack inbound handler — Slack messages enter the same chat pipeline
     slackService.onInboundMessage(async ({ projectId, sessionId, content, mode, tool }) => {
       const { chatStore } = await import('./chatStore.js');
       const { agentGateway } = await import('./agentGateway.js');
 
       chatStore.migrateIfNeeded(projectId);
       const sessionMeta = chatStore.getSession(projectId, sessionId);
-      const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, { tool }, {
-        tool: sessionMeta?.tool || tool || 'claude',
+      // sessionMeta (persisted via PATCH) is authoritative — only use Slack tool as fallback
+      const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+        tool: tool || 'claude',
       });
       chatStore.updateSessionMeta(projectId, sessionId, assistantSettings);
 
@@ -589,8 +590,12 @@ class TerminalServer {
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
         const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
-        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
-          tool: sessionMeta?.tool || payload.tool || 'claude',
+        // sessionMeta (persisted via PATCH) is authoritative for tool/model/effort.
+        // Only use payload values as fallback for sessions not yet configured.
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+          tool: payload.tool || 'claude',
+          model: payload.model,
+          effort: payload.effort,
         });
         chatStore.updateSessionMeta(payload.projectId, chatSessionId, assistantSettings);
 
@@ -657,8 +662,11 @@ class TerminalServer {
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
         const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
-        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
-          tool: sessionMeta?.tool || payload.tool || 'claude',
+        // sessionMeta (persisted via PATCH) is authoritative for tool/model/effort.
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+          tool: payload.tool || 'claude',
+          model: payload.model,
+          effort: payload.effort,
         });
         chatStore.updateSessionMeta(payload.projectId, chatSessionId, assistantSettings);
         this.attachToChatSession(ws, chatSessionId);
