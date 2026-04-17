@@ -912,7 +912,25 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           setActiveSessionId(newest.id);
         }
 
-        setSessions(latest);
+        // Merge server data into local state.
+        // Server is authoritative for metadata (messageCount, hasUnread, name),
+        // but we preserve local tool/model/effort to avoid clobbering optimistic
+        // updates that are still in-flight (PATCH sent but response not yet back).
+        setSessions(prev => {
+          const localMap = new Map(prev.map(s => [s.id, s]));
+          return latest.map(serverSession => {
+            const local = localMap.get(serverSession.id);
+            if (!local) return serverSession; // brand-new session from server
+            return {
+              ...serverSession,
+              // Keep local assistant settings — they're set via PATCH and confirmed
+              // by the PATCH response handler; the background poll must not overwrite them.
+              tool: local.tool,
+              model: local.model,
+              effort: local.effort,
+            };
+          });
+        });
       } catch {}
     };
 
