@@ -1859,24 +1859,48 @@ NEEDS_USER`,
   _parseJsonToolOutput(cleanOutput, cmd) {
     let text = '';
     let sessionId = null;
+
+    // Strategy 1a: Claude format — {"type":"result", "session_id":"...", "result":"..."}
     const jsonMatch = cleanOutput.match(/\{"type"\s*:\s*"result"[^]*?"session_id"\s*:\s*"([^"]+)"[^]*?"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
     if (jsonMatch) {
       sessionId = jsonMatch[1];
       text = jsonMatch[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
     }
+
+    // Strategy 1b: Copilot format — {"type":"result", "sessionId":"...", "exitCode":0}
+    // Session ID uses camelCase; response text is in separate assistant.message events
+    if (!sessionId) {
+      const copilotResultMatch = cleanOutput.match(/\{"type"\s*:\s*"result"[^]*?"sessionId"\s*:\s*"([^"]+)"/);
+      if (copilotResultMatch) {
+        sessionId = copilotResultMatch[1];
+      }
+    }
+
     // Strategy 2: scan ALL JSON lines (stream-json produces many — result is last)
     if (!sessionId || !text) {
+      let lastAssistantMessage = null;
       for (const line of cleanOutput.split('\n')) {
         const idx = line.indexOf('{');
         if (idx >= 0) {
           try {
             const json = JSON.parse(line.slice(idx));
+            // Claude format: session_id / result fields at top level
             if (json.session_id) sessionId = json.session_id;
             if (json.result) text = json.result;
             if (json.type === 'result' && json.result) text = json.result;
+            // Copilot format: sessionId (camelCase) in result events
+            if (json.type === 'result' && json.sessionId) sessionId = json.sessionId;
+            // Copilot format: response text in assistant.message events (data.content)
+            if (json.type === 'assistant.message' && json.data?.content) {
+              lastAssistantMessage = json.data.content;
+            }
             // Don't break — keep scanning for later events that have the final result
           } catch {}
         }
+      }
+      // Use assistant.message content if no result text was found (Copilot format)
+      if (!text && lastAssistantMessage) {
+        text = lastAssistantMessage;
       }
     }
     if (!text) {
@@ -2015,7 +2039,7 @@ NEEDS_USER`,
     // The command echo ends when we see the first JSON event from stream-json
     const firstJsonIdx = lines.findIndex(l => {
       const t = l.trim();
-      return t.startsWith('{') && (t.includes('"type"') || t.includes('"session_id"'));
+      return t.startsWith('{') && (t.includes('"type"') || t.includes('"session_id"') || t.includes('"sessionId"'));
     });
 
     if (firstJsonIdx > 0) {
@@ -2042,7 +2066,7 @@ NEEDS_USER`,
     lines = lines.filter(l => {
       const t = l.trim();
       if (t.startsWith('{"type"')) return false;
-      if (t.startsWith('{') && t.includes('"session_id"')) return false;
+      if (t.startsWith('{') && (t.includes('"session_id"') || t.includes('"sessionId"'))) return false;
       // Skip lines that look like command echo (start with > or contain command args)
       if (t.startsWith('> ')) return false; // All echoed preamble lines start with >
       if (t.includes('--output-format')) return false;
