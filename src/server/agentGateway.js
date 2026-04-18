@@ -1065,6 +1065,7 @@ RULES:
         // Filter out command-line arguments that get echoed
         if (t.includes('--output-format stream-json')) return false;
         if (t.includes('--dangerously-skip-permissions')) return false;
+        if (t.includes('--yolo')) return false;
         if (t.includes('--verbose')) return false;
         if (t.includes("--resume '")) return false;
         // Filter out shell prompts
@@ -1301,7 +1302,7 @@ RULES:
         return cmd;
       }
       case 'copilot': {
-        let cmd = `copilot -p ${promptArg} --output-format json`;
+        let cmd = `copilot -p ${promptArg} --output-format json --yolo`;
         cmd += this._buildToolOptionArgs(tool, assistantSettings);
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
         return cmd;
@@ -2071,6 +2072,7 @@ NEEDS_USER`,
       if (t.startsWith('> ')) return false; // All echoed preamble lines start with >
       if (t.includes('--output-format')) return false;
       if (t.includes('--dangerously-skip-permissions')) return false;
+      if (t.includes('--yolo')) return false;
       if (t.includes("claude -p '")) return false;
       if (t.includes("copilot -p '")) return false;
       if (t.includes("opencode run '")) return false;

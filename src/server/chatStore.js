@@ -607,6 +607,7 @@ class ChatStore {
       // Filter out command-line arguments
       if (t.includes('--output-format')) return false;
       if (t.includes('--dangerously-skip-permissions')) return false;
+      if (t.includes('--yolo')) return false;
       if (t.includes('--verbose')) return false;
       if (t.includes("--resume '")) return false;
       return true;
