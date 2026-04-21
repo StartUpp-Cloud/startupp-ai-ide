@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
-import { MessageSquare, Loader, Plus, ChevronDown, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check } from 'lucide-react';
 import {
   CLI_TOOLS,
   getToolConfig,
@@ -256,11 +256,29 @@ function ChatSessionContent({
   const prevMessageCountRef = useRef(0);
   const isInitialLoadRef = useRef(true);
 
+  // Scroll position tracking for jump buttons
+  const [showJumpBottom, setShowJumpBottom] = useState(false);
+  const [showJumpTop, setShowJumpTop] = useState(false);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const distFromTop = el.scrollTop;
+    setShowJumpBottom(distFromBottom > 300);
+    setShowJumpTop(distFromTop > 300);
+  }, []);
+
   // Scroll the messages container to the bottom directly — more reliable than
   // scrollIntoView() which can be defeated by overflow:hidden ancestors.
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
+  const scrollToTop = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (el) el.scrollTop = 0;
   }, []);
 
   // Load messages on mount
@@ -594,6 +612,38 @@ function ChatSessionContent({
   const handleSend = useCallback((content, attachments = []) => {
     if (!projectId || !sessionId) return;
 
+    // ── /logs command: capture logs from container and share with agent ──
+    const logsMatch = content.match(/^\/logs\s*(.*)?$/i);
+    if (logsMatch) {
+      const filePath = (logsMatch[1] || '').trim();
+      const instruction = filePath
+        ? `User requested logs from \`${filePath}\`. Analyze and continue.`
+        : 'User shared recent terminal output. Analyze and continue.';
+
+      // Show optimistic message
+      setMessages(prev => [...prev, {
+        id: 'pending-' + Date.now(),
+        projectId,
+        sessionId,
+        role: 'user',
+        content: filePath ? `📋 Capturing logs from \`${filePath}\`...` : '📋 Sharing terminal output...',
+        metadata: { source: 'log-capture' },
+        createdAt: new Date().toISOString(),
+      }]);
+      setAgentBusy(true);
+
+      if (wsRef?.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'chat-capture-logs',
+          projectId,
+          sessionId,
+          filePath: filePath || undefined,
+          instruction,
+        }));
+      }
+      return;
+    }
+
     let displayContent = content;
     if (attachments.length > 0) {
       const attachmentList = attachments.map(a => `📎 ${a.name}`).join('\n');
@@ -754,7 +804,7 @@ function ChatSessionContent({
       />
 
       {/* Messages */}
-      <div ref={scrollContainerRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }} className="px-1 py-4">
+      <div ref={scrollContainerRef} onScroll={handleScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }} className="px-1 py-4">
         {loading ? (
           <div className="flex items-center justify-center h-full">
             <Loader size={22} className="animate-spin text-surface-600" />
@@ -813,6 +863,29 @@ function ChatSessionContent({
 
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Jump to top / bottom floating buttons */}
+      <div className="relative">
+        {showJumpTop && (
+          <button
+            onClick={scrollToTop}
+            className="absolute -top-10 right-3 z-10 w-7 h-7 rounded-full bg-surface-700/90 border border-surface-600/50 text-surface-300 hover:text-surface-100 hover:bg-surface-600 flex items-center justify-center shadow-lg transition-all"
+            title="Jump to top"
+          >
+            <ChevronUp size={14} />
+          </button>
+        )}
+        {showJumpBottom && (
+          <button
+            onClick={scrollToBottom}
+            className="absolute -top-10 left-3 z-10 w-7 h-7 rounded-full bg-primary-600/90 border border-primary-500/50 text-white hover:bg-primary-500 flex items-center justify-center shadow-lg transition-all"
+            title="Jump to bottom"
+          >
+            <ChevronDown size={14} />
+          </button>
+        )}
+      </div>
+
       <ChatInput
         mode={mode}
         projectId={projectId}
@@ -829,7 +902,7 @@ function ChatSessionContent({
  * Main ChatPanel - manages sessions/tabs and renders all open sessions.
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
-export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true }) {
+export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange }) {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -846,6 +919,18 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   useEffect(() => {
     if (projectId) setProjectSwitchKey(k => k + 1);
   }, [projectId]);
+
+  // Scroll to bottom when this panel becomes the active project
+  useEffect(() => {
+    if (isActive) setProjectSwitchKey(k => k + 1);
+  }, [isActive]);
+
+  // Notify parent of active session changes (used by InternalConsole sharing)
+  useEffect(() => {
+    if (isActive && activeSessionId) {
+      onActiveSessionChange?.(activeSessionId);
+    }
+  }, [isActive, activeSessionId, onActiveSessionChange]);
 
   // Close dropdown on outside click
   useEffect(() => {

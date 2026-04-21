@@ -478,6 +478,7 @@ RULES:
             assistantContent: finalContent,
             mode,
           });
+          const logContext = this._detectLogRequest(finalContent);
           const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
 
           // Complete the job
@@ -495,6 +496,7 @@ RULES:
               rawOutput: rawForDisplay.slice(-8000),
               attempts: attempt,
               ...(reviewMeta ? { review: reviewMeta } : {}),
+              ...(logContext ? { logContext } : {}),
             },
           });
 
@@ -514,6 +516,7 @@ RULES:
                 rawOutput: rawForDisplay.slice(-8000),
                 attempts: attempt,
                 ...(reviewMeta ? { review: reviewMeta } : {}),
+                ...(logContext ? { logContext } : {}),
               },
             },
           });
@@ -987,6 +990,36 @@ RULES:
     };
   }
 
+  /**
+   * Detect if the agent's response indicates it wants to see logs or output.
+   * Returns a logContext object with hints, or null.
+   */
+  _detectLogRequest(content) {
+    if (!content) return null;
+
+    const patterns = [
+      { regex: /\b(?:check|inspect|view|see|look at|examine|review|read)\b.{0,30}\b(?:logs?|output|console|terminal|stderr|stdout)\b/i, type: 'generic' },
+      { regex: /\btail\s+-[fFn]/i, type: 'tail' },
+      { regex: /\b(?:error|stack\s*trace|traceback|exception)\b.{0,20}\b(?:log|output|console)\b/i, type: 'error-log' },
+      { regex: /\bI\s+(?:would need|need|want)\s+to\s+(?:see|check|view|inspect)\b.{0,30}\b(?:log|output|terminal)/i, type: 'need-logs' },
+      { regex: /\b(?:can you|could you|please)\s+(?:share|show|provide|paste)\b.{0,30}\b(?:log|output|terminal|console)/i, type: 'ask-logs' },
+      { regex: /\b(?:docker\s+logs|journalctl|pm2\s+logs|npm\s+run.*logs)\b/i, type: 'command' },
+    ];
+
+    // Extract file paths mentioned with log-related context
+    const fileHints = [];
+    const fileMatch = content.match(/(?:log|output)\s+(?:file|at|in|from)\s+[`"]?([/\w.-]+)[`"]?/i);
+    if (fileMatch) fileHints.push(fileMatch[1]);
+
+    for (const { regex, type } of patterns) {
+      if (regex.test(content)) {
+        return { detected: true, type, fileHints };
+      }
+    }
+
+    return null;
+  }
+
   _isReviewDocPath(relPath) {
     const fileName = path.basename(relPath || '');
     return /^prd.*\.md$/i.test(fileName) || /^plan.*\.md$/i.test(fileName);
@@ -1215,7 +1248,7 @@ RULES:
       // Only inject CLAUDE.md instruction and project context, no mode override.
       parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
     } else {
-      parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done');
+      parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done\n- IMPORTANT: Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops). Complete your task with the information available in a single pass and report results immediately.');
     }
 
     // Profile

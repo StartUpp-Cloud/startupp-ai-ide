@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal } from 'lucide-react';
+import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal, Share2 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 
 // WebSocket reconnection configuration
@@ -30,10 +30,11 @@ function getStoredHeight() {
  * Opens its own WebSocket + PTY session independently from the chat system.
  * Includes visibility-aware reconnection for stability and a drag-to-resize handle.
  */
-export default function InternalConsole({ projectId }) {
+export default function InternalConsole({ projectId, chatWsRef, activeChatSessionId }) {
   const [open, setOpen] = useState(true);
   const [connected, setConnected] = useState(false);
   const [consoleHeight, setConsoleHeight] = useState(getStoredHeight);
+  const [shareStatus, setShareStatus] = useState(null); // null | 'sending' | 'sent'
   const termRef = useRef(null);
   const xtermRef = useRef(null);
   const fitRef = useRef(null);
@@ -41,6 +42,50 @@ export default function InternalConsole({ projectId }) {
   const sessionIdRef = useRef(null);
   const prevProjectIdRef = useRef(null);
   const mountedRef = useRef(true);
+
+  /**
+   * Capture the visible terminal buffer text (last N lines).
+   */
+  const captureTerminalOutput = useCallback((maxLines = 200) => {
+    const xterm = xtermRef.current;
+    if (!xterm) return '';
+
+    const buffer = xterm.buffer.active;
+    const totalRows = buffer.length;
+    const startRow = Math.max(0, totalRows - maxLines);
+    const lines = [];
+
+    for (let i = startRow; i < totalRows; i++) {
+      const line = buffer.getLine(i);
+      if (line) lines.push(line.translateToString(true));
+    }
+
+    // Trim trailing empty lines
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+    return lines.join('\n');
+  }, []);
+
+  /**
+   * Share terminal output to the active chat session.
+   */
+  const handleShareToAgent = useCallback(() => {
+    const ws = chatWsRef?.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !projectId || !activeChatSessionId) return;
+
+    const content = captureTerminalOutput();
+    if (!content.trim()) return;
+
+    setShareStatus('sending');
+    ws.send(JSON.stringify({
+      type: 'chat-share-terminal',
+      projectId,
+      sessionId: activeChatSessionId,
+      content,
+    }));
+
+    setShareStatus('sent');
+    setTimeout(() => setShareStatus(null), 2000);
+  }, [chatWsRef, projectId, activeChatSessionId, captureTerminalOutput]);
 
   // Drag-to-resize state
   const dragRef = useRef({ active: false, startY: 0, startHeight: 0 });
@@ -299,6 +344,21 @@ export default function InternalConsole({ projectId }) {
         <span className="flex-1" />
         {open ? <ChevronDown size={12} /> : <ChevronUp size={14} className="text-primary-400" />}
       </button>
+      {open && connected && activeChatSessionId && (
+        <button
+          onClick={(e) => { e.stopPropagation(); handleShareToAgent(); }}
+          disabled={shareStatus === 'sending'}
+          className={`flex items-center gap-1 px-2 py-1 text-[10px] transition-colors border-b border-surface-700/50 ${
+            shareStatus === 'sent'
+              ? 'text-green-400 bg-green-500/10'
+              : 'text-surface-400 hover:text-primary-300 hover:bg-surface-800 bg-surface-850/50'
+          }`}
+          title="Share terminal output with the AI agent"
+        >
+          <Share2 size={10} />
+          {shareStatus === 'sent' ? 'Shared!' : 'Share to Agent'}
+        </button>
+      )}
 
       {open && (
         <>

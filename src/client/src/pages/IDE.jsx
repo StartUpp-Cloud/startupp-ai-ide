@@ -89,6 +89,9 @@ export default function IDE() {
   // Unread session counts per project: { projectId: count }
   const [unreadCounts, setUnreadCounts] = useState({});
 
+  // Active chat session ID (exposed by ChatPanel for InternalConsole sharing)
+  const [activeChatSessionId, setActiveChatSessionId] = useState(null);
+
   // Plan execution state (shared with TopBar)
   const [executionId, setExecutionId] = useState(null);
   const [planRunning, setPlanRunning] = useState(false);
@@ -507,6 +510,7 @@ export default function IDE() {
                   mode={agentMode}
                   tool={selectedTool}
                   isActive={projectId === selectedProjectId}
+                  onActiveSessionChange={projectId === selectedProjectId ? setActiveChatSessionId : undefined}
                 />
               </div>
             ))}
@@ -519,7 +523,7 @@ export default function IDE() {
               </div>
             )}
           </div>
-          <InternalConsole projectId={selectedProjectId} wsRef={chatWsRef} />
+          <InternalConsole projectId={selectedProjectId} chatWsRef={chatWsRef} activeChatSessionId={activeChatSessionId} />
         </div>
 
         {/* Right resizer */}

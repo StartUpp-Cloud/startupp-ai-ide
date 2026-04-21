@@ -741,6 +741,162 @@ class TerminalServer {
         break;
       }
 
+      // ── Log sharing: inject terminal output or container logs into chat ──
+      case 'chat-share-terminal': {
+        // Option A: User shares their InternalConsole output as context
+        const { chatStore } = await import('./chatStore.js');
+        const { agentGateway } = await import('./agentGateway.js');
+
+        const chatSessionId = payload.sessionId;
+        const terminalContent = (payload.content || '').trim();
+        if (!terminalContent || !payload.projectId || !chatSessionId) {
+          this.sendError(ws, 'Missing terminal content or session info');
+          break;
+        }
+
+        const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+          tool: payload.tool || 'claude',
+          model: payload.model,
+          effort: payload.effort,
+        });
+
+        this.attachToChatSession(ws, chatSessionId);
+
+        const contextMsg = chatStore.addMessage({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          role: 'user',
+          content: `Here is the recent terminal output for context:\n\n\`\`\`\n${terminalContent}\n\`\`\`\n\n${payload.instruction || 'Please analyze this output and continue.'}`,
+          metadata: { mode: 'agent', source: 'terminal-share', ...assistantSettings },
+        });
+
+        this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: contextMsg });
+        this.broadcast({ type: 'chat-message', message: contextMsg });
+
+        agentGateway.handleTask({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          content: contextMsg.content,
+          attachments: [],
+          mode: 'agent',
+          tool: assistantSettings.tool,
+          model: assistantSettings.model,
+          effort: assistantSettings.effort,
+          broadcastFn: (data) => {
+            this.broadcastToChatSession(chatSessionId, data);
+            this.broadcast(data);
+          },
+        }).catch(err => {
+          const errMsg = chatStore.addMessage({
+            projectId: payload.projectId,
+            sessionId: chatSessionId,
+            role: 'error',
+            content: `Failed to process terminal output: ${err.message}`,
+          });
+          this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: errMsg });
+          this.broadcast({ type: 'chat-message', message: errMsg });
+        });
+        break;
+      }
+
+      case 'chat-capture-logs': {
+        // Option B/C: Capture logs from inside the container and inject into chat
+        const { chatStore } = await import('./chatStore.js');
+        const { agentGateway } = await import('./agentGateway.js');
+        const { containerManager } = await import('./containerManager.js');
+
+        const chatSessionId = payload.sessionId;
+        if (!payload.projectId || !chatSessionId) {
+          this.sendError(ws, 'Missing project or session info');
+          break;
+        }
+
+        const project = Project.findById(payload.projectId);
+        if (!project?.containerName) {
+          this.sendError(ws, 'No container found for this project');
+          break;
+        }
+
+        const filePath = payload.filePath || '';
+        const lines = Math.min(payload.lines || 200, 1000);
+        let logOutput;
+
+        try {
+          if (filePath) {
+            // Capture specific log file
+            logOutput = containerManager.execInContainer(
+              project.containerName,
+              `tail -n ${lines} ${filePath.replace(/"/g, '\\"')}`,
+              { timeout: 10000 },
+            );
+          } else {
+            // Capture recent shell output from the utility terminal scrollback
+            const utilSessions = Array.from(ptyManager.sessions?.entries?.() || [])
+              .filter(([, s]) => s.projectId === payload.projectId && s.role === 'utility');
+            const utilSession = utilSessions[utilSessions.length - 1];
+            if (utilSession) {
+              const scrollback = ptyManager.getScrollback?.(utilSession[0]);
+              logOutput = scrollback
+                ? stripAnsi(scrollback).split('\n').slice(-lines).join('\n')
+                : null;
+            }
+            if (!logOutput) {
+              logOutput = '(No recent terminal output available)';
+            }
+          }
+        } catch (err) {
+          logOutput = `Error capturing logs: ${err.message}`;
+        }
+
+        const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+          tool: payload.tool || 'claude',
+          model: payload.model,
+          effort: payload.effort,
+        });
+
+        this.attachToChatSession(ws, chatSessionId);
+
+        const label = filePath ? `logs from \`${filePath}\`` : 'recent terminal output';
+        const instruction = payload.instruction || 'Please analyze these logs and continue.';
+        const logMsg = chatStore.addMessage({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          role: 'user',
+          content: `Here are the ${label} (last ${lines} lines):\n\n\`\`\`\n${logOutput}\n\`\`\`\n\n${instruction}`,
+          metadata: { mode: 'agent', source: 'log-capture', filePath, ...assistantSettings },
+        });
+
+        this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: logMsg });
+        this.broadcast({ type: 'chat-message', message: logMsg });
+
+        agentGateway.handleTask({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          content: logMsg.content,
+          attachments: [],
+          mode: 'agent',
+          tool: assistantSettings.tool,
+          model: assistantSettings.model,
+          effort: assistantSettings.effort,
+          broadcastFn: (data) => {
+            this.broadcastToChatSession(chatSessionId, data);
+            this.broadcast(data);
+          },
+        }).catch(err => {
+          const errMsg = chatStore.addMessage({
+            projectId: payload.projectId,
+            sessionId: chatSessionId,
+            role: 'error',
+            content: `Failed to process logs: ${err.message}`,
+          });
+          this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: errMsg });
+          this.broadcast({ type: 'chat-message', message: errMsg });
+        });
+        break;
+      }
+
       default:
         this.sendError(ws, `Unknown message type: ${type}`);
     }

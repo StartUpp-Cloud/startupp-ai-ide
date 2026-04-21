@@ -1,4 +1,4 @@
-import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info } from 'lucide-react';
+import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText } from 'lucide-react';
 import { useState, useMemo } from 'react';
 
 const ROLE_STYLES = {
@@ -191,6 +191,8 @@ function renderMarkdown(text) {
 
 export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry }) {
   const [showRaw, setShowRaw] = useState(false);
+  const [logFilePath, setLogFilePath] = useState('');
+  const [showLogInput, setShowLogInput] = useState(false);
   const style = ROLE_STYLES[message.role] || ROLE_STYLES.agent;
   const Icon = style.icon;
   const time = new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -201,6 +203,7 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const plan = message.metadata?.plan;
   const suggestions = message.metadata?.suggestions;
   const review = message.metadata?.review;
+  const logContext = message.metadata?.logContext;
 
   // Suggestion buttons: render as a row of clickable chips
   if (suggestions && message.metadata?.hidden) {
@@ -332,6 +335,78 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
                 Re-evaluate
               </button>
             </div>
+          </div>
+        )}
+
+        {logContext?.detected && (
+          <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-2">
+            <div className="text-[11px] text-amber-300 font-medium mb-1.5">The agent may need additional context</div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                onClick={() => {
+                  if (wsRef?.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                      type: 'chat-capture-logs',
+                      projectId: projectId || message.projectId,
+                      sessionId: message.sessionId,
+                    }));
+                  }
+                }}
+                className="flex items-center gap-1 px-2 py-1 rounded border border-amber-500/40 text-[11px] text-amber-200 hover:bg-amber-500/10 transition-colors"
+              >
+                <Terminal size={10} />
+                Share Terminal Output
+              </button>
+              <button
+                onClick={() => setShowLogInput(!showLogInput)}
+                className="flex items-center gap-1 px-2 py-1 rounded border border-amber-500/40 text-[11px] text-amber-200 hover:bg-amber-500/10 transition-colors"
+              >
+                <FileText size={10} />
+                Capture Log File
+              </button>
+            </div>
+            {showLogInput && (
+              <div className="flex items-center gap-1.5 mt-2">
+                <input
+                  type="text"
+                  value={logFilePath}
+                  onChange={e => setLogFilePath(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && logFilePath.trim()) {
+                      if (wsRef?.current?.readyState === WebSocket.OPEN) {
+                        wsRef.current.send(JSON.stringify({
+                          type: 'chat-capture-logs',
+                          projectId: projectId || message.projectId,
+                          sessionId: message.sessionId,
+                          filePath: logFilePath.trim(),
+                        }));
+                        setLogFilePath('');
+                        setShowLogInput(false);
+                      }
+                    }
+                  }}
+                  placeholder="/var/log/app.log"
+                  className="flex-1 px-2 py-1 bg-surface-900 border border-surface-600 rounded text-[11px] text-surface-200 outline-none focus:border-amber-500/50 font-mono"
+                />
+                <button
+                  onClick={() => {
+                    if (logFilePath.trim() && wsRef?.current?.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({
+                        type: 'chat-capture-logs',
+                        projectId: projectId || message.projectId,
+                        sessionId: message.sessionId,
+                        filePath: logFilePath.trim(),
+                      }));
+                      setLogFilePath('');
+                      setShowLogInput(false);
+                    }
+                  }}
+                  className="px-2 py-1 rounded border border-amber-500/50 text-[11px] text-amber-200 hover:bg-amber-500/10 transition-colors"
+                >
+                  Send
+                </button>
+              </div>
+            )}
           </div>
         )}
 
