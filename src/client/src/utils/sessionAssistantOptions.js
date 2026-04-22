@@ -59,6 +59,18 @@ const MODEL_OPTIONS = {
     { value: 'github-copilot/gemini-3.1-pro-preview', label: 'copilot/gemini-3.1-pro' },
     { value: 'github-copilot/gemini-3-flash-preview', label: 'copilot/gemini-3-flash' },
     { value: 'github-copilot/grok-code-fast-1', label: 'copilot/grok-code-fast-1' },
+    // OpenAI
+    { value: 'openai/gpt-5.4', label: 'gpt-5.4' },
+    { value: 'openai/gpt-5.4-mini', label: 'gpt-5.4-mini' },
+    { value: 'openai/gpt-5.3-codex', label: 'gpt-5.3-codex' },
+    { value: 'openai/gpt-5.2-codex', label: 'gpt-5.2-codex' },
+    { value: 'openai/gpt-5.2', label: 'gpt-5.2' },
+    { value: 'openai/gpt-5.1', label: 'gpt-5.1' },
+    { value: 'openai/gpt-5-mini', label: 'gpt-5-mini' },
+    { value: 'openai/gpt-4.1', label: 'gpt-4.1' },
+    { value: 'openai/gpt-4o', label: 'gpt-4o' },
+    { value: 'openai/o3', label: 'o3' },
+    { value: 'openai/o4-mini', label: 'o4-mini' },
     // DeepSeek
     { value: 'deepseek/deepseek-chat', label: 'deepseek-chat' },
     { value: 'deepseek/deepseek-reasoner', label: 'deepseek-reasoner' },
