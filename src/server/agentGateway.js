@@ -537,10 +537,13 @@ RULES:
         }
 
         if (result.retry && attempt < MAX_ATTEMPTS) {
-          // ── Retry: compaction or context recovery ──
-          this._addProgressMessage(projectId, chatSessionId,
-            `⚠ ${result.retryReason} — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})...`,
-            broadcastFn);
+          // ── Retry: compaction, context recovery, or transient provider error ──
+          const retryLabel = result.retryType === 'codex-transient'
+            ? `🔁 Re-evaluating response with latest instructions...`
+            : result.retryType === 'codex-rate-limit'
+              ? `⏳ Rate limited — waiting before retry (attempt ${attempt + 1}/${MAX_ATTEMPTS})...`
+              : `⚠ ${result.retryReason} — retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})...`;
+          this._addProgressMessage(projectId, chatSessionId, retryLabel, broadcastFn);
 
           if (result.retryType === 'context-lost') {
             this._cliSessions.delete(chatSessionId);
@@ -548,7 +551,11 @@ RULES:
             message = `Context from our conversation:\n${contextSummary}\n\nUser's request: ${message}`;
           }
 
-          await new Promise(r => setTimeout(r, 2000)); // Brief pause before retry
+          // Use longer backoff for rate limits, shorter for transient errors
+          const backoffMs = result.retryType === 'codex-rate-limit' ? 5000
+            : result.retryType === 'codex-transient' ? 3000
+            : 2000;
+          await new Promise(r => setTimeout(r, backoffMs));
           continue;
         }
 
@@ -893,11 +900,13 @@ RULES:
         chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
       }
       if (parsed.isError) {
+        // Codex auth/rate-limit errors are often transient (retry usually works),
+        // so treat them as retryable instead of terminal failures.
         if (parsed.errorType === 'auth') {
-          return { success: false, retry: false, displayOutput, error: displayOutput };
+          return { success: false, retry: true, retryReason: 'Codex transient auth error', retryType: 'codex-transient' };
         }
         if (parsed.errorType === 'rate_limit') {
-          return { success: false, retry: false, displayOutput, error: displayOutput };
+          return { success: false, retry: true, retryReason: 'Codex rate limit', retryType: 'codex-rate-limit' };
         }
         return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
       }
@@ -2163,16 +2172,18 @@ NEEDS_USER`,
         : '⚠️ No response received from Codex. Please try again.';
     }
 
-    // Check for auth/rate errors in raw output if not already detected
-    if (!isError) {
+    // Check for auth/rate errors in raw output if not already detected via JSON events.
+    // Only match if no valid message content was parsed — this avoids false positives
+    // when the assistant's response text happens to mention "401", "rate limit", etc.
+    if (!isError && messageParts.length === 0) {
       if (/authentication.*error|401.*invalid|unauthorized/i.test(cleanOutput)) {
         isError = true;
         errorType = 'auth';
-        text = '🔐 **Authentication failed** — Your OpenAI key or login is invalid.\n\nRun `codex login` to re-authenticate.';
+        text = '🔐 **Authentication failed** — Transient OpenAI error. Retrying automatically...';
       } else if (/429|too many requests|rate.?limit/i.test(cleanOutput)) {
         isError = true;
         errorType = 'rate_limit';
-        text = '⏳ **Rate limit reached** — Too many requests.\n\nPlease wait a moment and try again.';
+        text = '⏳ **Rate limit reached** — Too many requests. Retrying automatically...';
       }
     }
 
