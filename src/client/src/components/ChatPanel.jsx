@@ -159,10 +159,17 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
 
 function SessionAssistantControls({ session, defaultTool, disabled = false, onUpdate }) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
-  const selectedModel = session?.model || '';
-  const selectedEffort = session?.effort || '';
+  const rawModel = session?.model || '';
+  const rawEffort = session?.effort || '';
+
+  // Only show the model/effort if it belongs to this tool's options — prevents
+  // stale values from a previous tool leaking into the dropdown.
+  const toolModels = getToolModelOptions(effectiveTool);
+  const toolEfforts = getToolEffortOptions(effectiveTool);
+  const selectedModel = toolModels.some(o => o.value === rawModel) ? rawModel : '';
+  const selectedEffort = toolEfforts.some(o => o.value === rawEffort) ? rawEffort : '';
   const modelOptions = getToolModelOptions(effectiveTool, selectedModel);
-  const effortOptions = getToolEffortOptions(effectiveTool);
+  const effortOptions = toolEfforts;
 
   return (
     <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-surface-700/40 bg-surface-850/40">
