@@ -763,8 +763,9 @@ RULES:
         }
       }
 
-      // ── Event-driven completion: look for {"type":"result"} ──
-      if (cleanChunk.includes('"type":"result"') || cleanChunk.includes('"type": "result"')) {
+      // ── Event-driven completion: look for {"type":"result"} or Codex {"type":"turn.completed"} ──
+      if (cleanChunk.includes('"type":"result"') || cleanChunk.includes('"type": "result"')
+        || cleanChunk.includes('"type":"turn.completed"') || cleanChunk.includes('"type": "turn.completed"')) {
         resultEventSeen = true;
         // Extract the result text for checking
         const resultMatch = cleanChunk.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
@@ -880,6 +881,24 @@ RULES:
         chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
       }
       if (parsed.isError) {
+        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+      }
+    } else if (tool === 'codex') {
+      const parsed = this._parseCodexJsonOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+      if (parsed.sessionId) {
+        const prevState = this._cliSessions.get(chatSessionId);
+        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
+        this._cliSessions.set(chatSessionId, newState);
+        chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
+      }
+      if (parsed.isError) {
+        if (parsed.errorType === 'auth') {
+          return { success: false, retry: false, displayOutput, error: displayOutput };
+        }
+        if (parsed.errorType === 'rate_limit') {
+          return { success: false, retry: false, displayOutput, error: displayOutput };
+        }
         return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
       }
     } else {
@@ -1236,6 +1255,8 @@ RULES:
       parts.push('IMPORTANT: Follow all project conventions and rules established in the repository.');
     } else if (tool === 'opencode') {
       parts.push('IMPORTANT: Read CLAUDE.md (if present) and always follow all project conventions and rules established there.');
+    } else if (tool === 'codex') {
+      parts.push('IMPORTANT: Follow all project conventions and rules. Read any CLAUDE.md, AGENTS.md, or .codex/ rules files if present.');
     } else if (tool === 'aider') {
       parts.push('Follow all project conventions.');
     }
@@ -1344,6 +1365,17 @@ RULES:
         let cmd = `opencode run ${promptArg} --format json --dangerously-skip-permissions`;
         cmd += this._buildToolOptionArgs(tool, assistantSettings);
         if (cliState?.cliSessionId) cmd += ` --session '${cliState.cliSessionId}'`;
+        return cmd;
+      }
+      case 'codex': {
+        if (cliState?.cliSessionId) {
+          // Resume an existing session with a follow-up prompt
+          let cmd = `codex exec resume '${cliState.cliSessionId}' --json --dangerously-bypass-approvals-and-sandbox ${promptArg}`;
+          cmd += this._buildToolOptionArgs(tool, assistantSettings);
+          return cmd;
+        }
+        let cmd = `codex exec --json --dangerously-bypass-approvals-and-sandbox ${promptArg}`;
+        cmd += this._buildToolOptionArgs(tool, assistantSettings);
         return cmd;
       }
       case 'aider':
@@ -1718,8 +1750,8 @@ Reply with exactly one word: YES or NO.`,
     if (/[$#]\s*$/.test(lastLine) && lastLine.length > 1) return true;
     if (/>\s*$/.test(lastLine) && lastLine.includes(':')) return true;
     // stream-json: final result event marks completion
-    if (lastLine.startsWith('{') && lastLine.includes('"type"') && lastLine.includes('"result"')) {
-      try { const j = JSON.parse(lastLine); if (j.type === 'result') return true; } catch {}
+    if (lastLine.startsWith('{') && lastLine.includes('"type"') && (lastLine.includes('"result"') || lastLine.includes('"turn.completed"'))) {
+      try { const j = JSON.parse(lastLine); if (j.type === 'result' || j.type === 'turn.completed') return true; } catch {}
     }
     return false;
   }
@@ -1884,6 +1916,16 @@ NEEDS_USER`,
           const text = event.delta?.text || event.text || '';
           if (text.length > 20) return `Writing response...`;
         }
+
+        // Codex events
+        if (event.type === 'item.completed' && event.item) {
+          if (event.item.type === 'agent_message') return `Writing response...`;
+          if (event.item.type === 'tool_call') {
+            const name = event.item.name || event.item.tool || '';
+            return `Running: \`${name}\``;
+          }
+        }
+        if (event.type === 'turn.started') return `Thinking...`;
 
       } catch {}
     }
@@ -2064,6 +2106,77 @@ NEEDS_USER`,
     }
 
     return { text, sessionId, isError };
+  }
+
+  /**
+   * Parse Codex CLI --json output (JSONL events).
+   *
+   * Key event types:
+   *   {"type":"thread.started","thread_id":"..."}
+   *   {"type":"turn.started"}
+   *   {"type":"item.completed","item":{"id":"...","type":"agent_message","text":"..."}}
+   *   {"type":"item.completed","item":{"id":"...","type":"tool_call",...}}
+   *   {"type":"turn.completed","usage":{...}}
+   */
+  _parseCodexJsonOutput(cleanOutput, cmd) {
+    let sessionId = null;
+    let isError = false;
+    let errorType = null;
+    const messageParts = [];
+
+    for (const line of cleanOutput.split('\n')) {
+      const idx = line.indexOf('{');
+      if (idx < 0) continue;
+      try {
+        const json = JSON.parse(line.slice(idx));
+
+        // Extract thread_id as session identifier (used for resume)
+        if (json.type === 'thread.started' && json.thread_id) {
+          sessionId = json.thread_id;
+        }
+
+        // Collect agent message text
+        if (json.type === 'item.completed' && json.item?.type === 'agent_message' && json.item?.text) {
+          messageParts.push(json.item.text);
+        }
+
+        // Detect errors
+        if (json.type === 'error') {
+          isError = true;
+          const errMsg = json.message || json.error || '';
+          if (/auth|401|unauthorized/i.test(errMsg)) errorType = 'auth';
+          else if (/429|rate.?limit|too many/i.test(errMsg)) errorType = 'rate_limit';
+          if (errMsg) messageParts.push(`\n\n**Error:** ${errMsg}`);
+        }
+      } catch {}
+    }
+
+    let text = messageParts.join('\n\n');
+
+    if (!text) {
+      text = this._extractToolResponse(cleanOutput, cmd);
+    }
+
+    if (!text || text.length < 10) {
+      text = sessionId
+        ? '⚠️ Response received but could not be parsed. Codex may still be processing.'
+        : '⚠️ No response received from Codex. Please try again.';
+    }
+
+    // Check for auth/rate errors in raw output if not already detected
+    if (!isError) {
+      if (/authentication.*error|401.*invalid|unauthorized/i.test(cleanOutput)) {
+        isError = true;
+        errorType = 'auth';
+        text = '🔐 **Authentication failed** — Your OpenAI key or login is invalid.\n\nRun `codex login` to re-authenticate.';
+      } else if (/429|too many requests|rate.?limit/i.test(cleanOutput)) {
+        isError = true;
+        errorType = 'rate_limit';
+        text = '⏳ **Rate limit reached** — Too many requests.\n\nPlease wait a moment and try again.';
+      }
+    }
+
+    return { text, sessionId, isError, errorType };
   }
 
   _extractToolResponse(cleanOutput, cmd) {

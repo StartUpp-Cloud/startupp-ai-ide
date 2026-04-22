@@ -2,6 +2,7 @@ export const CLI_TOOLS = [
   { id: 'claude', name: 'Claude', color: 'text-orange-400', context: 'Full conversation memory via --resume' },
   { id: 'copilot', name: 'Copilot', color: 'text-blue-400', context: 'Full conversation memory via --resume' },
   { id: 'opencode', name: 'OpenCode', color: 'text-violet-400', context: 'Full conversation memory via --session' },
+  { id: 'codex', name: 'Codex', color: 'text-emerald-400', context: 'Full conversation memory via exec resume' },
   { id: 'aider', name: 'Aider', color: 'text-green-400', context: 'Context from git history + repo map' },
   { id: 'gemini', name: 'Gemini', color: 'text-cyan-400', context: 'Per-message context' },
   { id: 'shell', name: 'Shell only', color: 'text-surface-400', context: 'Direct shell commands' },
@@ -64,6 +65,16 @@ const MODEL_OPTIONS = {
     // OpenCode native
     { value: 'opencode/big-pickle', label: 'opencode/big-pickle' },
     { value: 'opencode/gpt-5-nano', label: 'opencode/gpt-5-nano' },
+  ],
+  codex: [
+    { value: '', label: 'Tool default' },
+    { value: 'gpt-5.4', label: 'gpt-5.4' },
+    { value: 'gpt-5.3-codex', label: 'gpt-5.3-codex' },
+    { value: 'gpt-5.2-codex', label: 'gpt-5.2-codex' },
+    { value: 'gpt-5.2', label: 'gpt-5.2' },
+    { value: 'gpt-5-mini', label: 'gpt-5-mini' },
+    { value: 'o3', label: 'o3' },
+    { value: 'o4-mini', label: 'o4-mini' },
   ],
   copilot: [
     { value: '', label: 'Tool default' },
