@@ -392,10 +392,12 @@ class ContainerManager extends EventEmitter {
    * Also sets OLLAMA_NUM_CTX env var as fallback for direct ollama CLI usage.
    */
   configureOpenCodeOllama(containerName) {
-    // OpenCode provider config for Ollama via OpenAI-compatible API
+    // OpenCode provider config for Ollama via OpenAI-compatible API.
+    // No models list — OpenCode doesn't need pre-declared models when --model is passed
+    // via CLI. Any model installed in Ollama will work with ollama/<model-name>.
     // See: https://opencode.ai/docs/providers/
     const config = {
-      "$schema": "https://opencode.ai/config.json",
+      $schema: "https://opencode.ai/config.json",
       provider: {
         ollama: {
           npm: "@ai-sdk/openai-compatible",
@@ -403,32 +405,18 @@ class ContainerManager extends EventEmitter {
           options: {
             baseURL: "http://host.docker.internal:11434/v1",
           },
-          models: {
-            "qwen2.5-coder:32b": { name: "Qwen 2.5 Coder 32B" },
-            "qwen2.5-coder:14b": { name: "Qwen 2.5 Coder 14B" },
-            "qwen2.5-coder:7b": { name: "Qwen 2.5 Coder 7B" },
-            "deepseek-coder-v2:16b": { name: "DeepSeek Coder V2 16B" },
-            "deepseek-coder-v2:lite": { name: "DeepSeek Coder V2 Lite" },
-            "codellama:34b": { name: "Code Llama 34B" },
-            "codellama:13b": { name: "Code Llama 13B" },
-            "devstral:24b": { name: "Devstral 24B" },
-            "llama3.3:70b": { name: "Llama 3.3 70B" },
-            "llama3.1:8b": { name: "Llama 3.1 8B" },
-            "mistral:7b": { name: "Mistral 7B" },
-            "qwen3:14b": { name: "Qwen 3 14B" },
-          },
         },
       },
     };
-    const configJson = JSON.stringify(config, null, 2).replace(/"/g, '\\"');
+    // Use base64 to safely write JSON — avoids shell variable expansion ($schema, etc.)
+    // and double-escaping from execInContainer wrapping in bash -c "..."
+    const b64 = Buffer.from(JSON.stringify(config, null, 2)).toString('base64');
     try {
-      // Create OpenCode config
       this.execInContainer(
         containerName,
-        `mkdir -p ~/.config/opencode && echo "${configJson}" > ~/.config/opencode/opencode.json`,
+        `mkdir -p ~/.config/opencode && echo '${b64}' | base64 -d > ~/.config/opencode/opencode.json`,
         { timeout: 5000 },
       );
-      // Also add OLLAMA_NUM_CTX to bashrc for direct ollama CLI calls
       this.execInContainer(
         containerName,
         `grep -q OLLAMA_NUM_CTX ~/.bashrc 2>/dev/null || echo 'export OLLAMA_NUM_CTX=32768' >> ~/.bashrc`,
