@@ -1347,8 +1347,11 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
    * - Project rules
    * - Mode instruction (agent vs plan)
    */
-  _buildFirstMessagePreamble(tool, projectId, mode) {
+  _buildFirstMessagePreamble(tool, projectId, mode, assistantSettings = {}) {
     const parts = [];
+
+    // Skip skills for Ollama models — they struggle with tool-use instructions
+    const isOllamaModel = assistantSettings?.model?.startsWith('ollama/') || tool === 'ollama';
 
     // Tool-specific CLAUDE.md instruction
     if (tool === 'claude') {
@@ -1382,9 +1385,11 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
     const rules = this._getProjectRules(projectId);
     if (rules) parts.push(`\n${rules}`);
 
-    // Active skills
-    const skillContext = skillManager.buildSkillContext(projectId);
-    if (skillContext) parts.push(`\n${skillContext}`);
+    // Active skills (skip for Ollama — they output raw JSON instead of using tools)
+    if (!isOllamaModel) {
+      const skillContext = skillManager.buildSkillContext(projectId);
+      if (skillContext) parts.push(`\n${skillContext}`);
+    }
 
     return parts.join('\n');
   }
@@ -1428,15 +1433,19 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
 
     const isFirstMessage = !cliState?.cliSessionId;
 
+    // Skip skills for Ollama models — they struggle with tool-use instructions
+    // and tend to output raw JSON instead of actually using tools
+    const isOllamaModel = assistantSettings?.model?.startsWith('ollama/') || tool === 'ollama';
+
     // Compute a lightweight skill hash to detect mid-session changes
-    const skillContext = skillManager.buildSkillContext(projectId);
+    const skillContext = isOllamaModel ? null : skillManager.buildSkillContext(projectId);
     const skillHash = skillContext
       ? String(skillContext.length) + '|' + skillContext.slice(0, 64)
       : '';
 
     let fullMessage;
     if (isFirstMessage) {
-      const preamble = this._buildFirstMessagePreamble(tool, projectId, mode);
+      const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings);
       fullMessage = preamble + '\n\n---\n\n' + message;
       // Record the skill hash so we can detect changes on future messages
       this._cliSessions.set(chatSessionId, { ...(cliState || {}), lastSkillHash: skillHash });
