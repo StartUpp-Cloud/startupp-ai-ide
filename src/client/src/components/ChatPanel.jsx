@@ -163,9 +163,10 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   const rawEffort = session?.effort || '';
 
   // Dynamic Ollama model loading — queries host + container, shows installed models at top
+  // Also loads for OpenCode since it supports ollama/ provider prefix
   const [ollamaModels, setOllamaModels] = useState(null);
   useEffect(() => {
-    if (effectiveTool !== 'ollama') return;
+    if (effectiveTool !== 'ollama' && effectiveTool !== 'opencode') return;
     // Use project-specific endpoint (merges host + container) if projectId is available
     const url = projectId
       ? `/api/projects/${projectId}/ollama-models`
@@ -175,26 +176,54 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       .then(data => {
         const models = data?.models;
         if (Array.isArray(models) && models.length > 0) {
-          setOllamaModels([
-            { value: '', label: 'Select installed model' },
-            ...models.map(m => ({ value: m.name, label: m.source === 'container' ? `${m.name} ✓` : m.name })),
-          ]);
+          if (effectiveTool === 'ollama') {
+            setOllamaModels([
+              { value: '', label: 'Select installed model' },
+              ...models.map(m => ({ value: m.name, label: m.source === 'container' ? `${m.name} ✓` : m.name })),
+            ]);
+          } else if (effectiveTool === 'opencode') {
+            // For OpenCode, use ollama/ prefix format
+            setOllamaModels(
+              models.map(m => ({
+                value: `ollama/${m.name}`,
+                label: m.source === 'container' ? `ollama/${m.name} ✓` : `ollama/${m.name}`,
+              }))
+            );
+          }
+        } else {
+          setOllamaModels(null);
         }
       })
-      .catch(() => {}); // Fall back to static list silently
+      .catch(() => { setOllamaModels(null); }); // Fall back to static list silently
   }, [effectiveTool, projectId]);
 
   // Only show the model/effort if it belongs to this tool's options — prevents
   // stale values from a previous tool leaking into the dropdown.
-  const toolModels = effectiveTool === 'ollama' && ollamaModels
-    ? ollamaModels
-    : getToolModelOptions(effectiveTool);
+  // For Ollama: use dynamic models if available, otherwise static fallback
+  // For OpenCode: merge static models with dynamic Ollama models (ollama/ prefix)
+  const toolModels = (() => {
+    if (effectiveTool === 'ollama' && ollamaModels) {
+      return ollamaModels;
+    }
+    if (effectiveTool === 'opencode' && ollamaModels && ollamaModels.length > 0) {
+      // Insert Ollama models after "Tool default" option
+      const staticModels = getToolModelOptions(effectiveTool);
+      const ollamaSection = [
+        { value: '', label: '── Ollama (Local) ──', disabled: true },
+        ...ollamaModels,
+        { value: '', label: '── Cloud Providers ──', disabled: true },
+      ];
+      // Insert after first option (Tool default)
+      return [staticModels[0], ...ollamaSection, ...staticModels.slice(1)];
+    }
+    return getToolModelOptions(effectiveTool);
+  })();
   const toolEfforts = getToolEffortOptions(effectiveTool);
   const selectedModel = toolModels.some(o => o.value === rawModel) ? rawModel : '';
   const selectedEffort = toolEfforts.some(o => o.value === rawEffort) ? rawEffort : '';
   const modelOptions = effectiveTool === 'ollama' && ollamaModels
     ? (ollamaModels.some(o => o.value === rawModel) ? ollamaModels : [...ollamaModels, ...(rawModel ? [{ value: rawModel, label: `${rawModel} (current)` }] : [])])
-    : getToolModelOptions(effectiveTool, selectedModel);
+    : (rawModel && !toolModels.some(o => o.value === rawModel) ? [...toolModels, { value: rawModel, label: `${rawModel} (current)` }] : toolModels);
   const effortOptions = toolEfforts;
 
   return (
@@ -224,8 +253,13 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
             onChange={(e) => onUpdate({ model: e.target.value })}
             className="max-w-[220px] bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50"
           >
-            {modelOptions.map((option) => (
-              <option key={option.value || '__default__'} value={option.value}>
+            {modelOptions.map((option, idx) => (
+              <option
+                key={option.value || `__sep_${idx}__`}
+                value={option.value}
+                disabled={option.disabled}
+                style={option.disabled ? { fontWeight: 'bold', color: '#888' } : undefined}
+              >
                 {option.label}
               </option>
             ))}

@@ -188,6 +188,9 @@ class ContainerManager extends EventEmitter {
         stdio: "pipe",
       });
 
+      // Configure OpenCode for Ollama with high context
+      this.configureOpenCodeOllama(containerName);
+
       // Clone repos — supports multiple repos for monorepo/multi-service workspaces
       const repoList = repos.length > 0
         ? repos
@@ -229,6 +232,8 @@ class ContainerManager extends EventEmitter {
         encoding: "utf-8",
         stdio: "pipe",
       });
+      // Ensure OpenCode is configured for Ollama on each start
+      this.configureOpenCodeOllama(containerName);
       return true;
     } catch {
       return false;
@@ -377,6 +382,59 @@ class ContainerManager extends EventEmitter {
       ).trim();
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Configure OpenCode inside the container for Ollama access with high context.
+   * Creates ~/.config/opencode/opencode.json with Ollama provider pointing to host.
+   * Also sets OLLAMA_NUM_CTX env var as fallback for direct ollama CLI usage.
+   */
+  configureOpenCodeOllama(containerName) {
+    // OpenCode provider config for Ollama via OpenAI-compatible API
+    const config = {
+      providers: {
+        ollama: {
+          type: "@ai-sdk/openai-compatible",
+          name: "Ollama (Local)",
+          baseURL: "http://host.docker.internal:11434/v1",
+          // Model-specific context lengths for common coding models
+          models: {
+            "qwen2.5-coder:32b": { contextLength: 65536 },
+            "qwen2.5-coder:14b": { contextLength: 65536 },
+            "qwen2.5-coder:7b": { contextLength: 32768 },
+            "deepseek-coder-v2:16b": { contextLength: 65536 },
+            "deepseek-coder-v2:lite": { contextLength: 32768 },
+            "codellama:34b": { contextLength: 32768 },
+            "codellama:13b": { contextLength: 16384 },
+            "devstral:24b": { contextLength: 65536 },
+            "llama3.3:70b": { contextLength: 32768 },
+            "llama3.1:70b": { contextLength: 32768 },
+            "mistral:7b": { contextLength: 32768 },
+            "mixtral:8x7b": { contextLength: 32768 },
+            "qwen3:30b-a3b": { contextLength: 65536 },
+            "qwen3:14b": { contextLength: 32768 },
+          },
+        },
+      },
+    };
+    const configJson = JSON.stringify(config, null, 2).replace(/"/g, '\\"');
+    try {
+      // Create OpenCode config
+      this.execInContainer(
+        containerName,
+        `mkdir -p ~/.config/opencode && echo "${configJson}" > ~/.config/opencode/opencode.json`,
+        { timeout: 5000 },
+      );
+      // Also add OLLAMA_NUM_CTX to bashrc for direct ollama CLI calls
+      this.execInContainer(
+        containerName,
+        `grep -q OLLAMA_NUM_CTX ~/.bashrc 2>/dev/null || echo 'export OLLAMA_NUM_CTX=32768' >> ~/.bashrc`,
+        { timeout: 5000 },
+      );
+      console.log(`[containerManager] Configured OpenCode for Ollama in ${containerName}`);
+    } catch (err) {
+      console.warn(`[containerManager] Failed to configure OpenCode for Ollama:`, err?.message);
     }
   }
 

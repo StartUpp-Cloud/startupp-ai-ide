@@ -26,6 +26,13 @@ const MODEL_OPTIONS = {
   ],
   opencode: [
     { value: '', label: 'Tool default' },
+    // Ollama (local) — common coding models
+    { value: 'ollama/qwen2.5-coder:32b', label: 'ollama/qwen2.5-coder:32b' },
+    { value: 'ollama/qwen2.5-coder:14b', label: 'ollama/qwen2.5-coder:14b' },
+    { value: 'ollama/qwen2.5-coder:7b', label: 'ollama/qwen2.5-coder:7b' },
+    { value: 'ollama/deepseek-coder-v2:16b', label: 'ollama/deepseek-coder-v2:16b' },
+    { value: 'ollama/codellama:34b', label: 'ollama/codellama:34b' },
+    { value: 'ollama/devstral:24b', label: 'ollama/devstral:24b' },
     // Anthropic
     { value: 'anthropic/claude-opus-4-7', label: 'claude-opus-4-7 (latest)' },
     { value: 'anthropic/claude-opus-4-6', label: 'claude-opus-4-6' },
