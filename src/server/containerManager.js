@@ -270,6 +270,30 @@ class ContainerManager extends EventEmitter {
   }
 
   /**
+   * Recreate a container from an existing project record — volumes are preserved.
+   * Safe to call when you want to apply new Docker flags (networking, env, etc.)
+   * without losing any code or configuration stored in volumes.
+   *
+   * @param {object} project - Full project record from DB (id, name, gitUrl, repos, containerPorts, etc.)
+   */
+  async recreateContainer(project) {
+    const { containerName, id: projectId, name, gitUrl, repos, containerPorts } = project;
+    if (!containerName) throw new Error('Project has no container to recreate');
+
+    // Stop and remove ONLY the container — volumes are left intact
+    try {
+      dockerExec(`docker stop ${containerName}`, { encoding: 'utf-8', stdio: 'pipe' });
+    } catch { /* already stopped */ }
+
+    dockerExec(`docker rm -f ${containerName}`, { encoding: 'utf-8', stdio: 'pipe' });
+
+    // Recreate with the same params — volumes will be reattached by name
+    const ports = Array.isArray(containerPorts) ? containerPorts : [];
+    const result = await this.createContainer({ projectId, name, gitUrl, repos: repos || [], ports });
+    return result;
+  }
+
+  /**
    * Remove a container and its volumes
    */
   removeContainer(containerName) {

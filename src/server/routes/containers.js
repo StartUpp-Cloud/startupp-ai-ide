@@ -3,6 +3,7 @@ import { execSync as rawExecSync } from "child_process";
 import path from "path";
 import os from "os";
 import { containerManager } from "../containerManager.js";
+import { getDB } from "../db.js";
 
 const router = Router();
 
@@ -154,6 +155,29 @@ router.post("/:name/restart", (req, res) => {
         .status(404)
         .json({ error: "Container not found or failed to restart" });
     }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/containers/:name/recreate
+ * Recreate a container from project data — volumes (code + auth) are preserved.
+ * Use this to apply new Docker config (networking, env vars) without losing anything.
+ */
+router.post("/:name/recreate", async (req, res) => {
+  try {
+    const { name } = req.params;
+
+    // Look up the project that owns this container
+    const db = getDB();
+    const project = (db.data.projects || []).find(p => p.containerName === name);
+    if (!project) {
+      return res.status(404).json({ error: "No project found for this container" });
+    }
+
+    const result = await containerManager.recreateContainer(project);
+    res.json({ status: "recreated", container: result.containerName, ...result });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

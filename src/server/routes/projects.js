@@ -250,6 +250,64 @@ router.put("/:id", async (req, res) => {
 });
 
 // DELETE /api/projects/:id - Delete project
+/**
+ * GET /api/projects/:id/ollama-models
+ * Returns merged Ollama model list from both the host and the project's container.
+ * Installed models (reachable from both sides) are listed first, deduplicated.
+ */
+router.get("/:id/ollama-models", async (req, res) => {
+  const { llmProvider } = await import('../llmProvider.js');
+
+  const project = Project.findById(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  // --- Query host Ollama ---
+  let hostModels = [];
+  try {
+    hostModels = await llmProvider.getOllamaModels();
+  } catch { /* host Ollama unreachable */ }
+
+  // --- Query from inside the container ---
+  let containerModels = [];
+  if (project.containerName) {
+    try {
+      const status = containerManager.getContainerStatus(project.containerName);
+      if (status === 'running') {
+        // OLLAMA_HOST is set to host.docker.internal:11434 in every container
+        const raw = containerManager.execInContainer(
+          project.containerName,
+          'curl -s --max-time 5 "$OLLAMA_HOST/api/tags" 2>/dev/null || curl -s --max-time 5 "http://host.docker.internal:11434/api/tags" 2>/dev/null',
+          { timeout: 8000 },
+        );
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed.models)) containerModels = parsed.models;
+        }
+      }
+    } catch { /* container query failed */ }
+  }
+
+  // Merge: prefer container-visible models (they confirm reachability from agent side)
+  // Deduplicate by name, label source
+  const seen = new Set();
+  const merged = [];
+
+  for (const m of containerModels) {
+    if (!seen.has(m.name)) {
+      seen.add(m.name);
+      merged.push({ ...m, source: 'container' });
+    }
+  }
+  for (const m of hostModels) {
+    if (!seen.has(m.name)) {
+      seen.add(m.name);
+      merged.push({ ...m, source: 'host' });
+    }
+  }
+
+  res.json({ models: merged, fromContainer: containerModels.length > 0, fromHost: hostModels.length > 0 });
+});
+
 router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params;

@@ -25,7 +25,8 @@ export default function SystemHealth({ containerName }) {
   // Restart states
   const [restartingServer, setRestartingServer] = useState(false);
   const [restartingContainer, setRestartingContainer] = useState(false);
-  const [confirmRestart, setConfirmRestart] = useState(null); // 'server' | 'container' | null
+  const [recreatingContainer, setRecreatingContainer] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(null); // 'server' | 'container' | 'recreate' | null
 
   useEffect(() => {
     let mounted = true;
@@ -119,6 +120,30 @@ export default function SystemHealth({ containerName }) {
       notify?.(error.message, 'error');
     } finally {
       setRestartingContainer(false);
+    }
+  };
+
+  // Handle container recreate (volumes preserved)
+  const handleRecreateContainer = async () => {
+    if (!containerName) {
+      notify?.('No container associated with this project', 'error');
+      return;
+    }
+
+    setConfirmRestart(null);
+    setRecreatingContainer(true);
+
+    try {
+      const res = await fetch(`/api/containers/${containerName}/recreate`, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to recreate container');
+      }
+      notify?.('Container recreated successfully! Your code and config are intact.', 'success');
+    } catch (error) {
+      notify?.(error.message, 'error');
+    } finally {
+      setRecreatingContainer(false);
     }
   };
 
@@ -221,7 +246,7 @@ export default function SystemHealth({ containerName }) {
             {containerName && (
               <button
                 onClick={() => setConfirmRestart('container')}
-                disabled={restartingContainer}
+                disabled={restartingContainer || recreatingContainer}
                 className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-[11px] text-surface-300 hover:bg-surface-750 hover:text-surface-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {restartingContainer ? (
@@ -230,6 +255,22 @@ export default function SystemHealth({ containerName }) {
                   <Box className="w-3.5 h-3.5" />
                 )}
                 <span>{restartingContainer ? 'Restarting...' : 'Restart Container'}</span>
+              </button>
+            )}
+
+            {/* Recreate Container (only show if container exists) */}
+            {containerName && (
+              <button
+                onClick={() => setConfirmRestart('recreate')}
+                disabled={recreatingContainer || restartingContainer}
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-[11px] text-amber-400/80 hover:bg-surface-750 hover:text-amber-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {recreatingContainer ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
+                <span>{recreatingContainer ? 'Recreating...' : 'Recreate Container'}</span>
               </button>
             )}
           </div>
@@ -250,12 +291,14 @@ export default function SystemHealth({ containerName }) {
               </div>
               <div className="flex-1">
                 <h3 className="text-sm font-medium text-surface-100 mb-1">
-                  {confirmRestart === 'server' ? 'Restart IDE Server?' : 'Restart Container?'}
+                  {confirmRestart === 'server' ? 'Restart IDE Server?' : confirmRestart === 'recreate' ? 'Recreate Container?' : 'Restart Container?'}
                 </h3>
                 <p className="text-xs text-surface-400">
                   {confirmRestart === 'server'
                     ? 'This will briefly disconnect all terminals and clients. They will reconnect automatically.'
-                    : 'This will restart the Docker container. Running processes inside will be terminated.'}
+                    : confirmRestart === 'recreate'
+                      ? 'The container will be deleted and recreated. Your code and configuration are safe — volumes are preserved. Use this to apply new networking or environment settings.'
+                      : 'This will restart the Docker container. Running processes inside will be terminated.'}
                 </p>
               </div>
             </div>
@@ -268,10 +311,18 @@ export default function SystemHealth({ containerName }) {
                 Cancel
               </button>
               <button
-                onClick={confirmRestart === 'server' ? handleRestartServer : handleRestartContainer}
-                className="px-3 py-1.5 text-xs bg-primary-500 text-white hover:bg-primary-600 rounded transition-colors"
+                onClick={
+                  confirmRestart === 'server' ? handleRestartServer
+                  : confirmRestart === 'recreate' ? handleRecreateContainer
+                  : handleRestartContainer
+                }
+                className={`px-3 py-1.5 text-xs rounded transition-colors text-white ${
+                  confirmRestart === 'recreate'
+                    ? 'bg-amber-600 hover:bg-amber-700'
+                    : 'bg-primary-500 hover:bg-primary-600'
+                }`}
               >
-                Restart
+                {confirmRestart === 'recreate' ? 'Recreate' : 'Restart'}
               </button>
             </div>
           </div>

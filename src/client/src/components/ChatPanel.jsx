@@ -157,28 +157,32 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
   );
 }
 
-function SessionAssistantControls({ session, defaultTool, disabled = false, onUpdate }) {
+function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate }) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
   const rawEffort = session?.effort || '';
 
-  // Dynamic Ollama model loading — replaces the static fallback list when available
+  // Dynamic Ollama model loading — queries host + container, shows installed models at top
   const [ollamaModels, setOllamaModels] = useState(null);
   useEffect(() => {
     if (effectiveTool !== 'ollama') return;
-    fetch('/api/llm/ollama/models')
+    // Use project-specific endpoint (merges host + container) if projectId is available
+    const url = projectId
+      ? `/api/projects/${projectId}/ollama-models`
+      : '/api/llm/ollama/models';
+    fetch(url)
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         const models = data?.models;
         if (Array.isArray(models) && models.length > 0) {
           setOllamaModels([
             { value: '', label: 'Select installed model' },
-            ...models.map(m => ({ value: m.name, label: m.name })),
+            ...models.map(m => ({ value: m.name, label: m.source === 'container' ? `${m.name} ✓` : m.name })),
           ]);
         }
       })
       .catch(() => {}); // Fall back to static list silently
-  }, [effectiveTool]);
+  }, [effectiveTool, projectId]);
 
   // Only show the model/effort if it belongs to this tool's options — prevents
   // stale values from a previous tool leaking into the dropdown.
@@ -829,6 +833,7 @@ function ChatSessionContent({
         session={session}
         defaultTool={tool}
         disabled={settingsDisabled}
+        projectId={projectId}
         onUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
       />
 
