@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal, Share2 } from 'lucide-react';
+import { stripTerminalQueryResponses } from '../utils/terminalControlFilter';
 import '@xterm/xterm/css/xterm.css';
 
 // WebSocket reconnection configuration
@@ -282,11 +283,22 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
 
     connect();
 
-    // Forward keyboard input
+    // Forward keyboard input, filtering terminal query responses emitted by xterm itself.
+    let inputBuf = '';
+    let inputTimer = null;
+
     xterm.onData((data) => {
-      if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data }));
-      }
+      if (!sessionIdRef.current) return;
+      inputBuf += data;
+
+      if (inputTimer) clearTimeout(inputTimer);
+      inputTimer = setTimeout(() => {
+        const cleaned = stripTerminalQueryResponses(inputBuf);
+        inputBuf = '';
+
+        if (!cleaned || wsRef.current?.readyState !== WebSocket.OPEN) return;
+        wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: cleaned }));
+      }, 3);
     });
 
     // Forward resize
@@ -307,6 +319,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
       window.removeEventListener('resize', resizeHandler);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (inputTimer) clearTimeout(inputTimer);
       xterm.dispose();
       xtermRef.current = null;
       if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.close();

@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Zap, X, MessageSquare, Bot, Brain, Sparkles, Cpu, Settings, Shield, AlertTriangle, FolderOpen } from 'lucide-react';
 import LLMSettingsPanel from './LLMSettingsPanel';
+import { stripTerminalQueryResponses } from '../utils/terminalControlFilter';
 import '@xterm/xterm/css/xterm.css';
 
 // WebSocket reconnection configuration
@@ -144,11 +145,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         let cleaned = inputBuf;
         inputBuf = '';
 
-        // Strip responses that the PTY echoes back as visible garbage:
-        cleaned = cleaned
-          .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC (color queries): \x1b]11;rgb:...\x07
-          .replace(/\x1b\[\??\d+(?:;\d+)*R/g, '');            // CPR: \x1b[1;165R, \x1b[56R
-        // DA responses (\x1b[?...c, \x1b[>...c) pass through untouched.
+        // Strip terminal query responses before bash can echo them as visible garbage.
+        cleaned = stripTerminalQueryResponses(cleaned);
 
         if (!cleaned) return;
         if (wsRef.current?.readyState === WebSocket.OPEN) {
