@@ -1444,9 +1444,15 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
 
     let fullMessage;
     if (tool === 'aider') {
-      // Aider: always use a clean message — rules go to --system-prompt in the command.
-      // Prefix with an exploration directive so the model reads relevant files first.
-      fullMessage = `Think carefully and thoroughly. Before making any changes, read all relevant project files to fully understand the existing code, patterns, and context.\n\n${message}`;
+      // Aider: always use a clean structured message. Rules are embedded with XML tags
+      // so the model can distinguish instructions from the task (--system-prompt not
+      // available until Aider v0.87+).
+      const aiderRulesPreamble = (() => {
+        const rules = this._getProjectRules(projectId);
+        if (!rules) return '';
+        return `<project_rules>\n${rules}\n</project_rules>\n\n`;
+      })();
+      fullMessage = `${aiderRulesPreamble}<task>\nThink carefully and thoroughly. Before making any changes, read all relevant project files to fully understand the existing code, patterns, and context.\n\n${message}\n</task>`;
     } else if (isFirstMessage) {
       const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings);
       fullMessage = preamble + '\n\n---\n\n' + message;
@@ -1511,12 +1517,6 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
         let cmd = `aider --message ${promptArg} --yes --no-pretty`;
         if (assistantSettings?.model) {
           cmd += ` --model ${this._quoteCliArg(assistantSettings.model)}`;
-        }
-        // Project rules go to --system-prompt so Aider treats them as standing instructions
-        // rather than part of the task text, which confuses the model
-        const aiderRules = this._getProjectRules(projectId);
-        if (aiderRules) {
-          cmd += ` --system-prompt ${this._quoteCliArg(aiderRules)}`;
         }
         return cmd;
       }
