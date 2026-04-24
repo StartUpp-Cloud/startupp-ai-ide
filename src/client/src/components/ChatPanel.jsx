@@ -162,13 +162,35 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, onUp
   const rawModel = session?.model || '';
   const rawEffort = session?.effort || '';
 
+  // Dynamic Ollama model loading — replaces the static fallback list when available
+  const [ollamaModels, setOllamaModels] = useState(null);
+  useEffect(() => {
+    if (effectiveTool !== 'ollama') return;
+    fetch('/api/llm/ollama/models')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const models = data?.models;
+        if (Array.isArray(models) && models.length > 0) {
+          setOllamaModels([
+            { value: '', label: 'Select installed model' },
+            ...models.map(m => ({ value: m.name, label: m.name })),
+          ]);
+        }
+      })
+      .catch(() => {}); // Fall back to static list silently
+  }, [effectiveTool]);
+
   // Only show the model/effort if it belongs to this tool's options — prevents
   // stale values from a previous tool leaking into the dropdown.
-  const toolModels = getToolModelOptions(effectiveTool);
+  const toolModels = effectiveTool === 'ollama' && ollamaModels
+    ? ollamaModels
+    : getToolModelOptions(effectiveTool);
   const toolEfforts = getToolEffortOptions(effectiveTool);
   const selectedModel = toolModels.some(o => o.value === rawModel) ? rawModel : '';
   const selectedEffort = toolEfforts.some(o => o.value === rawEffort) ? rawEffort : '';
-  const modelOptions = getToolModelOptions(effectiveTool, selectedModel);
+  const modelOptions = effectiveTool === 'ollama' && ollamaModels
+    ? (ollamaModels.some(o => o.value === rawModel) ? ollamaModels : [...ollamaModels, ...(rawModel ? [{ value: rawModel, label: `${rawModel} (current)` }] : [])])
+    : getToolModelOptions(effectiveTool, selectedModel);
   const effortOptions = toolEfforts;
 
   return (

@@ -923,6 +923,12 @@ RULES:
         }
         return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
       }
+    } else if (tool === 'ollama') {
+      const parsed = this._parseOllamaOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+      if (parsed.isError) {
+        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+      }
     } else {
       displayOutput = this._extractToolResponse(cleanOutput, cmd);
     }
@@ -1480,6 +1486,13 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
         let cmd = `codex exec --json --dangerously-bypass-approvals-and-sandbox ${promptArg}`;
         cmd += this._buildToolOptionArgs(tool, assistantSettings);
         return cmd;
+      }
+      case 'ollama': {
+        // ollama run <model> in non-interactive mode — exits after one response.
+        // Model is required; fall back to the configured LLM provider model or llama3.2.
+        const ollamaModel = assistantSettings?.model
+          || (() => { try { return llmProvider.getSettings().model || 'llama3.2'; } catch { return 'llama3.2'; } })();
+        return `ollama run ${this._quoteCliArg(ollamaModel)} ${promptArg}`;
       }
       case 'aider':
         return `aider --message ${promptArg} --yes`;
@@ -2170,6 +2183,38 @@ NEEDS_USER`,
    * Events are newline-delimited JSON objects. Each carries a `sessionID` field.
    * Text content arrives in events with `type === "text"` via `part.text`.
    */
+  /**
+   * Parse plain-text output from `ollama run <model> <prompt>`.
+   * Strips the echoed command line, ANSI codes, and any trailing shell prompt.
+   */
+  _parseOllamaOutput(cleanOutput, cmd) {
+    let isError = false;
+
+    // Strip the command echo (first line that starts with "ollama run")
+    let lines = cleanOutput.split('\n');
+    const cmdStartIdx = lines.findIndex(l => /^ollama\s+run\s+/i.test(l.trim()));
+    if (cmdStartIdx >= 0) lines = lines.slice(cmdStartIdx + 1);
+
+    // Drop trailing shell prompt line
+    while (lines.length > 0 && /[$#❯>]\s*$/.test(lines[lines.length - 1].trim())) {
+      lines.pop();
+    }
+
+    const text = lines.join('\n').trim();
+
+    if (!text) {
+      isError = true;
+      return { text: '⚠️ No response from Ollama. Is the service running and the model installed?', isError };
+    }
+
+    // Detect common Ollama error output
+    if (/Error:|model.*not found|connection refused|failed to|error loading/i.test(text)) {
+      isError = true;
+    }
+
+    return { text, isError };
+  }
+
   _parseOpencodeJsonOutput(cleanOutput, cmd) {
     let text = '';
     let sessionId = null;
