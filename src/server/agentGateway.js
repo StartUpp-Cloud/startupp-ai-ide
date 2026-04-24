@@ -449,10 +449,23 @@ RULES:
 
     let chunkIndex = 0;
 
+    // ── Context distillation: enrich follow-up messages with key context ──
+    // Computed once before the attempt loop so retries reuse the same brief.
+    let distilledContext = null;
+    try {
+      distilledContext = await this._distillContext(projectId, chatSessionId, message);
+      if (distilledContext) {
+        console.log(`[agentGateway] Context distilled for session ${chatSessionId} (${distilledContext.length} chars)`);
+      }
+    } catch (err) {
+      console.warn(`[agentGateway] Context distillation failed (non-blocking):`, err.message);
+    }
+
     try {
       for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
         const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode, {
           job, // Pass job for output recording
+          distilledContext, // Pre-computed context brief for follow-up enrichment
           // Callback to persist chunks as they arrive (for recovery)
           // NOTE: Raw chunks are saved to disk but NOT broadcast to client
           // Client only sees progress messages and the final cleaned response
@@ -617,7 +630,7 @@ RULES:
    * @param {Function} streamOpts.onChunk - Callback for each output chunk (for persistence)
    */
   async _attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
-    const { job, onChunk } = streamOpts;
+    const { job, onChunk, distilledContext } = streamOpts;
 
     // Get or create shell session
     let shellSessionId;
@@ -636,7 +649,7 @@ RULES:
     }
 
     const cliState = this._cliSessions.get(chatSessionId);
-    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode, assistantSettings);
+    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode, assistantSettings, distilledContext);
     const isFollowUp = !!(cliState?.cliSessionId);
 
     this._addProgressMessage(projectId, chatSessionId,
@@ -1158,6 +1171,80 @@ RULES:
   }
 
   /**
+   * Distill context from chat history using the local LLM.
+   * Produces a concise brief of key decisions, files, errors, and constraints
+   * that should be injected into follow-up messages to prevent context loss.
+   *
+   * Returns null if distillation is unnecessary (first message, too few messages,
+   * weak LLM, or fresh session).
+   */
+  async _distillContext(projectId, chatSessionId, userMessage) {
+    const provider = llmProvider.getSettings().provider;
+    if (provider === 'ollama') return null; // Skip for weak models
+
+    // Check if we have enough history to warrant distillation
+    let messages;
+    try {
+      messages = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 30 }).reverse();
+    } catch { return null; }
+
+    // Need at least 2 user+agent exchanges to distill
+    const substantive = messages.filter(m => m.role === 'user' || m.role === 'agent');
+    if (substantive.length < 3) return null;
+
+    // Skip distillation if the last agent response was very recent (< 2 min)
+    // and the CLI session is still alive — the tool likely has full context
+    const cliState = this._cliSessions.get(chatSessionId);
+    if (cliState?.cliSessionId) {
+      const lastAgent = messages.find(m => m.role === 'agent');
+      if (lastAgent?.timestamp) {
+        const ageSec = (Date.now() - new Date(lastAgent.timestamp).getTime()) / 1000;
+        if (ageSec < 120) return null;
+      }
+    }
+
+    // Build the conversation transcript for the LLM to analyze
+    const transcript = substantive
+      .slice(-20) // Last 20 substantive messages
+      .map(m => {
+        const content = m.content.slice(0, 600);
+        return `[${m.role}]: ${content}`;
+      })
+      .join('\n');
+
+    // Include project rules so the LLM can flag relevant ones
+    const rules = this._getProjectRules(projectId);
+
+    const prompt = `You are a context distiller for an AI coding assistant orchestrator. Analyze the conversation history below and produce a concise context brief that will be injected into the next message to the coding assistant.
+
+CONVERSATION HISTORY:
+${transcript}
+
+NEXT USER MESSAGE:
+${userMessage.slice(0, 400)}
+
+${rules ? `PROJECT RULES:\n${rules}\n` : ''}INSTRUCTIONS:
+Extract ONLY what the coding assistant needs to handle the next message correctly. Include:
+1. Key decisions made (what was agreed, what approach was chosen)
+2. Files modified or discussed (with paths if mentioned)
+3. Errors encountered and their resolutions
+4. Constraints or requirements established by the user
+5. Any unfinished work or pending items
+${rules ? '6. Which project rules are relevant to the current request (quote the rule number and text)' : ''}
+
+Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the coding assistant can derive from the codebase itself. If the conversation is straightforward and the next message is self-contained, respond with just "SKIP".`;
+
+    try {
+      const result = await llmProvider.generateResponse(prompt, { maxTokens: 400, temperature: 0.1 });
+      const response = result.response?.trim();
+      if (!response || response === 'SKIP' || response.length < 20) return null;
+      return response;
+    } catch {
+      return null; // Distillation is best-effort — never block on failure
+    }
+  }
+
+  /**
    * Build a context summary from the session's chat history.
    * Used when Claude loses context and we need to re-inject it.
    */
@@ -1322,7 +1409,7 @@ RULES:
     return args;
   }
 
-  _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}) {
+  _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}, distilledContext = null) {
     let cliState = this._cliSessions.get(chatSessionId);
     if (!cliState?.cliSessionId && chatSessionId && projectId) {
       const stored = chatStore.getSession(projectId, chatSessionId);
@@ -1353,6 +1440,13 @@ RULES:
       this._cliSessions.set(chatSessionId, { ...cliState, lastSkillHash: skillHash });
     } else {
       fullMessage = message;
+    }
+
+    // Inject distilled context for follow-up messages
+    // This ensures the coding assistant retains key decisions, files, and constraints
+    // even if its own session memory was lost, compacted, or drifted.
+    if (!isFirstMessage && distilledContext) {
+      fullMessage = `[Session Context — do not repeat this back, use it to inform your response]\n${distilledContext}\n\n[User Request]\n${fullMessage}`;
     }
     const encoded = Buffer.from(fullMessage, 'utf8').toString('base64');
     const promptArg = `\"$(printf %s '${encoded}' | base64 -d)\"`;
