@@ -1350,7 +1350,8 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
   _buildFirstMessagePreamble(tool, projectId, mode, assistantSettings = {}) {
     const parts = [];
 
-    // Skip skills for Ollama models — they struggle with tool-use instructions
+    // Skip skills for Ollama models and Aider — Ollama models output raw JSON instead of
+    // using tools; Aider doesn't understand Claude Code tool-use skill format at all.
     const isOllamaModel = assistantSettings?.model?.startsWith('ollama/') || tool === 'ollama';
 
     // Tool-specific CLAUDE.md instruction
@@ -1362,19 +1363,18 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
       parts.push('IMPORTANT: Read CLAUDE.md (if present) and always follow all project conventions and rules established there.');
     } else if (tool === 'codex') {
       parts.push('IMPORTANT: Follow all project conventions and rules. Read any CLAUDE.md, AGENTS.md, or .codex/ rules files if present.');
-    } else if (tool === 'aider') {
-      parts.push('Follow all project conventions.');
     }
 
-    // Mode instruction
-    if (mode === 'plan') {
-      parts.push('\nMODE: PLAN — You are in planning mode. Do NOT make any changes to files or run any commands that modify the codebase.\n\nYou are acting as a Chief Technology Officer. Your job is to identify the best solution given the full context of this project.\n- Present only the most viable options — omit approaches that are unlikely to work given the current stack, constraints, or scale.\n- Prioritize scalability, performance, and maintainability in every recommendation.\n- Use the full context available from this project (codebase, architecture, conventions, dependencies) to present an informed solution.\n- Follow the user\'s instructions precisely.\n- Do not execute anything. Present your analysis and recommendation clearly, then wait for explicit approval before any changes are made.');
-    } else if (mode === 'plan-review') {
-      // Internal review loops — persona is embedded in the message itself.
-      // Only inject CLAUDE.md instruction and project context, no mode override.
-      parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
-    } else {
-      parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done\n- IMPORTANT: Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops). Complete your task with the information available in a single pass and report results immediately.');
+    // Mode instruction — skip for Aider: it edits files directly and doesn't follow
+    // agent/plan mode personas. Injecting them confuses the underlying model.
+    if (tool !== 'aider') {
+      if (mode === 'plan') {
+        parts.push('\nMODE: PLAN — You are in planning mode. Do NOT make any changes to files or run any commands that modify the codebase.\n\nYou are acting as a Chief Technology Officer. Your job is to identify the best solution given the full context of this project.\n- Present only the most viable options — omit approaches that are unlikely to work given the current stack, constraints, or scale.\n- Prioritize scalability, performance, and maintainability in every recommendation.\n- Use the full context available from this project (codebase, architecture, conventions, dependencies) to present an informed solution.\n- Follow the user\'s instructions precisely.\n- Do not execute anything. Present your analysis and recommendation clearly, then wait for explicit approval before any changes are made.');
+      } else if (mode === 'plan-review') {
+        parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
+      } else {
+        parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done\n- IMPORTANT: Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops). Complete your task with the information available in a single pass and report results immediately.');
+      }
     }
 
     // Profile
@@ -1385,8 +1385,8 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
     const rules = this._getProjectRules(projectId);
     if (rules) parts.push(`\n${rules}`);
 
-    // Active skills (skip for Ollama — they output raw JSON instead of using tools)
-    if (!isOllamaModel) {
+    // Active skills (skip for Ollama models and Aider — incompatible tool-use format)
+    if (!isOllamaModel && tool !== 'aider') {
       const skillContext = skillManager.buildSkillContext(projectId);
       if (skillContext) parts.push(`\n${skillContext}`);
     }
@@ -1433,12 +1433,11 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
 
     const isFirstMessage = !cliState?.cliSessionId;
 
-    // Skip skills for Ollama models — they struggle with tool-use instructions
-    // and tend to output raw JSON instead of actually using tools
+    // Skip skills for Ollama models and Aider — incompatible tool-use format
     const isOllamaModel = assistantSettings?.model?.startsWith('ollama/') || tool === 'ollama';
 
     // Compute a lightweight skill hash to detect mid-session changes
-    const skillContext = isOllamaModel ? null : skillManager.buildSkillContext(projectId);
+    const skillContext = (isOllamaModel || tool === 'aider') ? null : skillManager.buildSkillContext(projectId);
     const skillHash = skillContext
       ? String(skillContext.length) + '|' + skillContext.slice(0, 64)
       : '';
@@ -1504,8 +1503,8 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
         return `ollama run ${this._quoteCliArg(ollamaModel)} ${promptArg}`;
       }
       case 'aider': {
-        let cmd = `aider --message ${promptArg} --yes`;
-        // Add model if specified (supports Ollama and cloud providers)
+        // --no-pretty disables the spinner/backspace chars that appear as garbage in xterm.js
+        let cmd = `aider --message ${promptArg} --yes --no-pretty`;
         if (assistantSettings?.model) {
           cmd += ` --model ${this._quoteCliArg(assistantSettings.model)}`;
         }
