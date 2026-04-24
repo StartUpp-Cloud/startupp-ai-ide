@@ -129,7 +129,10 @@ router.get('/ollama/models', async (req, res) => {
  */
 router.get('/opencode/models', async (req, res) => {
   try {
-    const models = await llmProvider.getOpenCodeModels({ refresh: req.query.refresh === 'true' });
+    const models = await llmProvider.getOpenCodeModels({
+      refresh: req.query.refresh === 'true',
+      allowFallback: req.query.fallback !== 'false',
+    });
     res.json({ models });
   } catch (error) {
     res.status(500).json({ error: 'Failed to list OpenCode models', message: error.message });

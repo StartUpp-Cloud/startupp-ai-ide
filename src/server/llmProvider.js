@@ -164,7 +164,7 @@ const DEFAULT_LLM_SETTINGS = {
     timeout: 30000,
   },
   opencode: {
-    model: 'openai/gpt-5.5-fast',
+    model: '',
     timeout: 60000,
   },
   // When to use LLM
@@ -999,10 +999,33 @@ class LLMProvider extends EventEmitter {
   async checkOpenCodeHealth() {
     const models = await this.getOpenCodeModels({ allowFallback: false });
     const hasModels = models.length > 0;
-    this.available = hasModels;
-    this.lastHealthCheck = hasModels
-      ? { available: true, provider: 'opencode', model: this.settings.opencode.model, models: models.map(m => m.name) }
-      : { available: false, error: 'OpenCode CLI unavailable or returned no models' };
+    const selectedModel = this.settings.opencode.model;
+
+    if (!hasModels) {
+      this.available = false;
+      this.lastHealthCheck = { available: false, error: 'OpenCode CLI unavailable or returned no models' };
+      return this.lastHealthCheck;
+    }
+
+    if (selectedModel && !models.some(m => (m.id || m.name) === selectedModel)) {
+      this.available = false;
+      this.lastHealthCheck = {
+        available: false,
+        error: `Selected OpenCode model "${selectedModel}" is not available. Choose one from the OpenCode model list or use OpenCode default.`,
+        provider: 'opencode',
+        model: selectedModel,
+        models: models.map(m => m.name),
+      };
+      return this.lastHealthCheck;
+    }
+
+    this.available = true;
+    this.lastHealthCheck = {
+      available: true,
+      provider: 'opencode',
+      model: selectedModel || 'default',
+      models: models.map(m => m.name),
+    };
     return this.lastHealthCheck;
   }
 
@@ -1229,6 +1252,13 @@ class LLMProvider extends EventEmitter {
       if (!health.available) {
         throw new Error(health.error || 'OpenCode CLI unavailable');
       }
+
+      return {
+        success: true,
+        response: 'OpenCode CLI available',
+        provider: 'opencode',
+        model: health.model,
+      };
     }
 
     const testPrompt = 'Continue with the changes? [Y/n]';

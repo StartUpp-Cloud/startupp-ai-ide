@@ -25,6 +25,16 @@ import {
 
 const API_BASE = '/api';
 
+function uniqueModels(models) {
+  const seen = new Set();
+  return models.filter((model) => {
+    const id = model.id || model.name;
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 export default function LLMSettingsPanel({ isOpen, onClose }) {
   const [settings, setSettings] = useState(null);
   const [health, setHealth] = useState(null);
@@ -83,9 +93,9 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
 
   const loadOpenCodeModels = async () => {
     try {
-      const res = await fetch(`${API_BASE}/llm/opencode/models`);
+      const res = await fetch(`${API_BASE}/llm/opencode/models?refresh=true&fallback=false`);
       const data = await res.json();
-      setOpencodeModels(data.models || []);
+      setOpencodeModels(uniqueModels(data.models || []));
     } catch (error) {
       console.error('Failed to load OpenCode models:', error);
       setOpencodeModels([]);
@@ -948,8 +958,8 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                           </option>
                         ))}
                         {settings.opencode?.model && !opencodeModels.some(m => (m.id || m.name) === settings.opencode.model) && (
-                          <option value={settings.opencode.model}>
-                            {settings.opencode.model} (current)
+                          <option value={settings.opencode.model} disabled>
+                            {settings.opencode.model} (not available)
                           </option>
                         )}
                       </select>
