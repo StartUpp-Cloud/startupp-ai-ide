@@ -392,10 +392,22 @@ class ContainerManager extends EventEmitter {
    * Also sets OLLAMA_NUM_CTX env var as fallback for direct ollama CLI usage.
    */
   configureOpenCodeOllama(containerName) {
-    // OpenCode provider config for Ollama via OpenAI-compatible API.
-    // No models list — OpenCode doesn't need pre-declared models when --model is passed
-    // via CLI. Any model installed in Ollama will work with ollama/<model-name>.
-    // See: https://opencode.ai/docs/providers/
+    // Query installed Ollama models from host (sync curl) so OpenCode can accept
+    // --model ollama/<name> for any model the user actually has installed.
+    let installedModels = {};
+    try {
+      const raw = execSync('curl -sf --max-time 3 http://localhost:11434/api/tags', {
+        encoding: 'utf-8',
+      });
+      const data = JSON.parse(raw);
+      for (const m of (data.models || [])) {
+        installedModels[m.name] = { name: m.name };
+      }
+    } catch {
+      // Ollama not reachable or no models — write config without models list;
+      // user will need to restart the container once Ollama is running.
+    }
+
     const config = {
       $schema: "https://opencode.ai/config.json",
       provider: {
@@ -405,11 +417,12 @@ class ContainerManager extends EventEmitter {
           options: {
             baseURL: "http://host.docker.internal:11434/v1",
           },
+          ...(Object.keys(installedModels).length > 0 && { models: installedModels }),
         },
       },
     };
-    // Use base64 to safely write JSON — avoids shell variable expansion ($schema, etc.)
-    // and double-escaping from execInContainer wrapping in bash -c "..."
+
+    // base64 avoids all shell quoting issues ($schema expansion, double-escaping in execInContainer)
     const b64 = Buffer.from(JSON.stringify(config, null, 2)).toString('base64');
     try {
       this.execInContainer(
@@ -422,7 +435,7 @@ class ContainerManager extends EventEmitter {
         `grep -q OLLAMA_NUM_CTX ~/.bashrc 2>/dev/null || echo 'export OLLAMA_NUM_CTX=32768' >> ~/.bashrc`,
         { timeout: 5000 },
       );
-      console.log(`[containerManager] Configured OpenCode for Ollama in ${containerName}`);
+      console.log(`[containerManager] Configured OpenCode for Ollama in ${containerName} (${Object.keys(installedModels).length} models registered)`);
     } catch (err) {
       console.warn(`[containerManager] Failed to configure OpenCode for Ollama:`, err?.message);
     }
