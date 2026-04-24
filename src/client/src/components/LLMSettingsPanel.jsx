@@ -29,6 +29,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
   const [settings, setSettings] = useState(null);
   const [health, setHealth] = useState(null);
   const [models, setModels] = useState([]);
+  const [opencodeModels, setOpencodeModels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -43,6 +44,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
       loadSettings();
       loadHealth();
       loadOllamaModels();
+      loadOpenCodeModels();
     }
   }, [isOpen]);
 
@@ -76,6 +78,17 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
       setModels(data.models || []);
     } catch (error) {
       console.error('Failed to load models:', error);
+    }
+  };
+
+  const loadOpenCodeModels = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/llm/opencode/models`);
+      const data = await res.json();
+      setOpencodeModels(data.models || []);
+    } catch (error) {
+      console.error('Failed to load OpenCode models:', error);
+      setOpencodeModels([]);
     }
   };
 
@@ -170,6 +183,24 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
     }
   };
 
+  const saveOpenCodeConfig = async (updates) => {
+    try {
+      setSaving(true);
+      const res = await fetch(`${API_BASE}/llm/opencode/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      await res.json();
+      await loadSettings();
+      loadHealth();
+    } catch (error) {
+      console.error('Failed to save OpenCode config:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const testConnection = async () => {
     try {
       setTesting(true);
@@ -224,6 +255,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
             { id: 'security', label: 'Security', icon: Shield },
             { id: 'ollama', label: 'Ollama', icon: Server },
             { id: 'openai', label: 'OpenAI', icon: Key },
+            { id: 'opencode', label: 'OpenCode', icon: Sparkles },
             { id: 'deepseek', label: 'DeepSeek', icon: Brain },
             { id: 'github', label: 'GitHub', icon: Sparkles },
             { id: 'advanced', label: 'Advanced', icon: Sliders },
@@ -372,6 +404,28 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                         </div>
                         <p className="text-xs text-surface-500">
                           Free with Copilot - GPT-4o, Llama & more
+                        </p>
+                      </button>
+
+                      <button
+                        onClick={() => saveSettings({ provider: 'opencode' })}
+                        className={`p-4 rounded-lg border text-left transition-all ${
+                          settings.provider === 'opencode'
+                            ? 'border-violet-500 bg-violet-500/10'
+                            : 'border-surface-700 bg-surface-800 hover:border-surface-600'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-2">
+                          <Sparkles className={`w-5 h-5 ${settings.provider === 'opencode' ? 'text-violet-400' : 'text-surface-400'}`} />
+                          <span className={`font-medium ${settings.provider === 'opencode' ? 'text-violet-300' : 'text-surface-300'}`}>
+                            OpenCode
+                          </span>
+                          {settings.provider === 'opencode' && (
+                            <Check className="w-4 h-4 text-violet-400 ml-auto" />
+                          )}
+                        </div>
+                        <p className="text-xs text-surface-500">
+                          Headless CLI - Reuse OpenCode subscriptions and auth
                         </p>
                       </button>
                     </div>
@@ -857,6 +911,97 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                       type="number"
                       value={settings.openai?.timeout || 30000}
                       onChange={(e) => saveOpenAIConfig({ timeout: parseInt(e.target.value) })}
+                      className="w-full px-3 py-2 text-sm bg-surface-800 border border-surface-700 rounded-lg text-surface-200 focus:ring-1 focus:ring-primary-500"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* OpenCode Tab */}
+              {activeTab === 'opencode' && settings && (
+                <div className="space-y-6">
+                  <div className="p-4 bg-violet-500/10 border border-violet-500/20 rounded-xl">
+                    <h3 className="text-sm font-semibold text-violet-300 mb-1">Use OpenCode as orchestrator</h3>
+                    <p className="text-[12px] text-surface-400">
+                      The IDE calls your authenticated OpenCode CLI headlessly, so users can reuse providers and subscriptions already connected in OpenCode.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-surface-300 mb-2">
+                      Model
+                    </label>
+                    <div className="flex gap-2">
+                      <select
+                        value={settings.opencode?.model || ''}
+                        onChange={(e) => saveOpenCodeConfig({ model: e.target.value })}
+                        className="flex-1 px-3 py-2 text-sm bg-surface-800 border border-surface-700 rounded-lg text-surface-200 focus:ring-1 focus:ring-primary-500"
+                      >
+                        <option value="">OpenCode default</option>
+                        {opencodeModels.map((model) => (
+                          <option key={model.id || model.name} value={model.id || model.name}>
+                            {model.id || model.name}
+                          </option>
+                        ))}
+                        {settings.opencode?.model && !opencodeModels.some(m => (m.id || m.name) === settings.opencode.model) && (
+                          <option value={settings.opencode.model}>
+                            {settings.opencode.model} (current)
+                          </option>
+                        )}
+                      </select>
+                      <button
+                        onClick={loadOpenCodeModels}
+                        className="px-3 py-2 bg-surface-700 hover:bg-surface-600 rounded-lg transition-colors"
+                      >
+                        <RefreshCw className="w-4 h-4 text-surface-400" />
+                      </button>
+                    </div>
+                    <p className="text-xs text-surface-500 mt-1">
+                      Loaded dynamically from <code className="text-surface-400">opencode models</code>. Configure providers with <code className="text-surface-400">opencode providers</code> in a terminal.
+                    </p>
+                  </div>
+
+                  <div className="bg-surface-800 border border-surface-700 rounded-lg divide-y divide-surface-700 max-h-56 overflow-y-auto">
+                    {opencodeModels.length > 0 ? (
+                      opencodeModels.map((model) => {
+                        const id = model.id || model.name;
+                        return (
+                          <div
+                            key={id}
+                            className={`flex items-center justify-between px-3 py-2 ${
+                              id === settings.opencode?.model ? 'bg-violet-500/10' : ''
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Sparkles className="w-4 h-4 text-violet-400 shrink-0" />
+                              <span className="text-sm text-surface-300 truncate">{id}</span>
+                              {id === settings.opencode?.model && (
+                                <span className="text-xs px-1.5 py-0.5 bg-violet-500/20 text-violet-300 rounded">
+                                  Active
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-xs text-surface-500 ml-3">
+                              {model.provider || id?.split('/')[0]}
+                            </span>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="px-3 py-4 text-center text-surface-500 text-sm">
+                        No OpenCode models found. Make sure the OpenCode CLI is installed and authenticated.
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-surface-300 mb-2">
+                      Timeout (ms)
+                    </label>
+                    <input
+                      type="number"
+                      value={settings.opencode?.timeout || 60000}
+                      onChange={(e) => saveOpenCodeConfig({ timeout: parseInt(e.target.value) })}
                       className="w-full px-3 py-2 text-sm bg-surface-800 border border-surface-700 rounded-lg text-surface-200 focus:ring-1 focus:ring-primary-500"
                     />
                   </div>

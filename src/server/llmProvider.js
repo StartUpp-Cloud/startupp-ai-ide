@@ -6,8 +6,122 @@
 
 import { getDB } from './db.js';
 import { EventEmitter } from 'events';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import * as pty from 'node-pty';
 import { sessionContext, RISK_LEVELS } from './sessionContext.js';
 import { encrypt, decrypt } from './fieldEncryption.js';
+
+const execFileAsync = promisify(execFile);
+
+const OPENCODE_MODEL_ID_RE = /^[a-z0-9][a-z0-9._-]*\/[a-zA-Z0-9][a-zA-Z0-9._:-]*$/;
+const OPENCODE_MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
+const OPENCODE_MODELS_MAX_BUFFER = 1024 * 1024;
+
+const OPENCODE_FALLBACK_MODELS = [
+  'opencode/big-pickle',
+  'opencode/gpt-5-nano',
+  'openai/gpt-5.5-fast',
+  'openai/gpt-5.5',
+  'openai/gpt-5.4',
+  'openai/gpt-5.4-mini',
+  'deepseek/deepseek-chat',
+  'deepseek/deepseek-reasoner',
+];
+
+function normalizeOpenCodeModelId(id) {
+  if (typeof id !== 'string') return null;
+  const trimmed = id.trim();
+  if (!OPENCODE_MODEL_ID_RE.test(trimmed)) return null;
+  const slashIndex = trimmed.indexOf('/');
+  return {
+    id: trimmed,
+    name: trimmed,
+    provider: trimmed.slice(0, slashIndex),
+    model: trimmed.slice(slashIndex + 1),
+  };
+}
+
+function parseOpenCodeModels(raw) {
+  const seen = new Set();
+  const models = [];
+
+  for (const line of String(raw || '').split(/\r?\n/)) {
+    const firstToken = line.trim().split(/\s+/)[0];
+    const model = normalizeOpenCodeModelId(firstToken);
+    if (!model || seen.has(model.id)) continue;
+    seen.add(model.id);
+    models.push(model);
+  }
+
+  return models;
+}
+
+function fallbackOpenCodeModels() {
+  return OPENCODE_FALLBACK_MODELS.map(normalizeOpenCodeModelId).filter(Boolean);
+}
+
+function parseOpenCodeRunOutput(raw) {
+  const textParts = [];
+  let tokensUsed = null;
+
+  for (const line of String(raw || '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+
+    try {
+      const event = JSON.parse(trimmed);
+      if (event.type === 'text' && typeof event.part?.text === 'string') {
+        textParts.push(event.part.text);
+      } else if (event.type === 'step_finish' && event.part?.tokens?.total) {
+        tokensUsed = event.part.tokens.total;
+      }
+    } catch {
+      // Ignore non-JSON progress lines from older OpenCode versions.
+    }
+  }
+
+  return { response: textParts.join('').trim(), tokensUsed };
+}
+
+function runOpenCodePty(args, { timeout, cwd } = {}) {
+  return new Promise((resolve, reject) => {
+    let output = '';
+    let settled = false;
+    const ptyProcess = pty.spawn('opencode', args, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd: cwd || process.cwd(),
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color',
+      },
+    });
+
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { ptyProcess.kill(); } catch { /* already exited */ }
+      reject(new Error('OpenCode request timed out'));
+    }, timeout || 60000);
+
+    ptyProcess.onData((data) => {
+      output += data;
+    });
+
+    ptyProcess.onExit(({ exitCode }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (exitCode !== 0) {
+        reject(new Error(`OpenCode exited with code ${exitCode}`));
+        return;
+      }
+      resolve(output);
+    });
+  });
+}
 
 // Default LLM settings
 const DEFAULT_LLM_SETTINGS = {
@@ -35,6 +149,10 @@ const DEFAULT_LLM_SETTINGS = {
     model: 'openai/gpt-4o-mini', // Free with Copilot subscription. Options: openai/gpt-4o-mini, openai/gpt-4o, meta-llama/Llama-4-Scout-17B-16E-Instruct
     apiKey: '', // GitHub Personal Access Token (PAT) with copilot scope
     timeout: 30000,
+  },
+  opencode: {
+    model: 'openai/gpt-5.5-fast',
+    timeout: 60000,
   },
   // When to use LLM
   useForLowConfidence: true,
@@ -187,6 +305,11 @@ class LLMProvider extends EventEmitter {
     }
 
     this.settings = { ...DEFAULT_LLM_SETTINGS, ...db.data.llmSettings };
+    this.settings.ollama = { ...DEFAULT_LLM_SETTINGS.ollama, ...(this.settings.ollama || {}) };
+    this.settings.openai = { ...DEFAULT_LLM_SETTINGS.openai, ...(this.settings.openai || {}) };
+    this.settings.deepseek = { ...DEFAULT_LLM_SETTINGS.deepseek, ...(this.settings.deepseek || {}) };
+    this.settings.github = { ...DEFAULT_LLM_SETTINGS.github, ...(this.settings.github || {}) };
+    this.settings.opencode = { ...DEFAULT_LLM_SETTINGS.opencode, ...(this.settings.opencode || {}) };
 
     // Decrypt API keys loaded from disk
     if (this.settings.openai?.apiKey) this.settings.openai.apiKey = decrypt(this.settings.openai.apiKey);
@@ -226,6 +349,7 @@ class LLMProvider extends EventEmitter {
       openai: { ...this.settings.openai, ...updates.openai },
       deepseek: { ...this.settings.deepseek, ...updates.deepseek },
       github: { ...this.settings.github, ...updates.github },
+      opencode: { ...this.settings.opencode, ...updates.opencode },
     };
 
     // Write encrypted copy to disk — never store plaintext API keys in db.json
@@ -304,6 +428,8 @@ class LLMProvider extends EventEmitter {
         return this.generateDeepSeekResponse(prompt, context);
       case 'github':
         return this.generateGitHubResponse(prompt, context);
+      case 'opencode':
+        return this.generateOpenCodeResponse(prompt, context);
       default:
         throw new Error(`Unknown LLM provider: ${provider}`);
     }
@@ -600,6 +726,38 @@ class LLMProvider extends EventEmitter {
   }
 
   /**
+   * Generate response using the authenticated OpenCode CLI.
+   * This lets users reuse the subscriptions/accounts already connected to OpenCode.
+   */
+  async generateOpenCodeResponse(prompt, context) {
+    const { model, timeout } = this.settings.opencode;
+
+    const systemPrompt = context.systemPrompt || this.buildSystemPrompt(context);
+    const userPrompt = context.systemPrompt ? prompt : this.buildUserPrompt(prompt, context);
+    const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
+    const args = ['run', fullPrompt, '--format', 'json', '--dangerously-skip-permissions'];
+    if (model) args.push('--model', model);
+
+    try {
+      const stdout = await runOpenCodePty(args, { timeout: timeout || 60000 });
+
+      const { response, tokensUsed } = parseOpenCodeRunOutput(stdout);
+      if (!response) {
+        throw new Error('OpenCode returned no text response');
+      }
+
+      return {
+        response: context.systemPrompt ? response : this.cleanResponse(response),
+        provider: 'opencode',
+        model: model || 'default',
+        tokensUsed,
+      };
+    } catch (error) {
+      throw new Error(`OpenCode error: ${error.message}`);
+    }
+  }
+
+  /**
    * Build system prompt with context
    */
   buildSystemPrompt(context) {
@@ -811,10 +969,25 @@ class LLMProvider extends EventEmitter {
         return this.checkDeepSeekHealth();
       case 'github':
         return this.checkGitHubHealth();
+      case 'opencode':
+        return this.checkOpenCodeHealth();
       default:
         this.available = false;
         return { available: false, error: `Unknown provider: ${provider}` };
     }
+  }
+
+  /**
+   * Check if the OpenCode CLI is available and can list models.
+   */
+  async checkOpenCodeHealth() {
+    const models = await this.getOpenCodeModels();
+    const hasModels = models.length > 0;
+    this.available = hasModels;
+    this.lastHealthCheck = hasModels
+      ? { available: true, provider: 'opencode', model: this.settings.opencode.model, models: models.map(m => m.name) }
+      : { available: false, error: 'OpenCode CLI unavailable or returned no models' };
+    return this.lastHealthCheck;
   }
 
   /**
@@ -980,6 +1153,35 @@ class LLMProvider extends EventEmitter {
     } catch (error) {
       return [];
     }
+  }
+
+  /**
+   * Get model IDs reported by the authenticated OpenCode CLI.
+   */
+  async getOpenCodeModels({ refresh = false } = {}) {
+    const now = Date.now();
+    if (!refresh && this.openCodeModelsCache && now - this.openCodeModelsCache.fetchedAt < OPENCODE_MODELS_CACHE_TTL_MS) {
+      return this.openCodeModelsCache.models;
+    }
+
+    try {
+      const { stdout } = await execFileAsync('opencode', ['models'], {
+        encoding: 'utf-8',
+        timeout: 8000,
+        maxBuffer: OPENCODE_MODELS_MAX_BUFFER,
+        windowsHide: true,
+      });
+
+      const models = parseOpenCodeModels(stdout);
+      if (models.length > 0) {
+        this.openCodeModelsCache = { models, fetchedAt: now };
+        return models;
+      }
+    } catch (error) {
+      console.warn('[llmProvider] OpenCode model discovery failed:', error.message);
+    }
+
+    return this.openCodeModelsCache?.models || fallbackOpenCodeModels();
   }
 
   /**

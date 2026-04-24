@@ -125,6 +125,18 @@ router.get('/ollama/models', async (req, res) => {
 });
 
 /**
+ * GET /api/llm/opencode/models - List models available through OpenCode
+ */
+router.get('/opencode/models', async (req, res) => {
+  try {
+    const models = await llmProvider.getOpenCodeModels({ refresh: req.query.refresh === 'true' });
+    res.json({ models });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to list OpenCode models', message: error.message });
+  }
+});
+
+/**
  * POST /api/llm/ollama/pull - Pull a model in Ollama
  */
 router.post('/ollama/pull', async (req, res) => {
@@ -167,8 +179,8 @@ router.put('/provider', async (req, res) => {
   try {
     const { provider } = req.body;
 
-    if (!['ollama', 'openai', 'deepseek'].includes(provider)) {
-      return res.status(400).json({ error: 'provider must be "ollama", "openai", or "deepseek"' });
+    if (!['ollama', 'openai', 'deepseek', 'github', 'opencode'].includes(provider)) {
+      return res.status(400).json({ error: 'provider must be "ollama", "openai", "deepseek", "github", or "opencode"' });
     }
 
     const settings = await llmProvider.updateSettings({ provider });
@@ -275,6 +287,27 @@ router.put('/github/config', async (req, res) => {
       ...settings.github,
       apiKey: settings.github?.apiKey ? '***configured***' : '',
     });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update', message: error.message });
+  }
+});
+
+/**
+ * PUT /api/llm/opencode/config - Configure OpenCode CLI settings
+ */
+router.put('/opencode/config', async (req, res) => {
+  try {
+    const { model, timeout } = req.body;
+
+    const updates = {};
+    if (model !== undefined) updates.model = model;
+    if (timeout !== undefined) updates.timeout = timeout;
+
+    const settings = await llmProvider.updateSettings({
+      opencode: { ...llmProvider.getSettings().opencode, ...updates },
+    });
+
+    res.json(settings.opencode);
   } catch (error) {
     res.status(500).json({ error: 'Failed to update', message: error.message });
   }
