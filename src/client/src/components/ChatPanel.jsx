@@ -165,6 +165,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   // Dynamic Ollama model loading — queries host + container, shows installed models at top
   // Also loads for OpenCode and Aider since they support ollama/ provider prefix
   const [ollamaModels, setOllamaModels] = useState(null);
+  const [opencodeModels, setOpencodeModels] = useState(null);
   useEffect(() => {
     if (effectiveTool !== 'ollama' && effectiveTool !== 'opencode' && effectiveTool !== 'aider') return;
     // Use project-specific endpoint (merges host + container) if projectId is available
@@ -197,6 +198,31 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       .catch(() => { setOllamaModels(null); }); // Fall back to static list silently
   }, [effectiveTool, projectId]);
 
+  useEffect(() => {
+    if (effectiveTool !== 'opencode' || !projectId) {
+      setOpencodeModels(null);
+      return;
+    }
+
+    fetch(`/api/projects/${projectId}/opencode-models`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const models = data?.models;
+        if (Array.isArray(models) && models.length > 0) {
+          setOpencodeModels([
+            { value: '', label: 'Tool default' },
+            ...models.map(m => ({
+              value: m.name,
+              label: m.source === 'container' ? `${m.name} ✓` : m.name,
+            })),
+          ]);
+        } else {
+          setOpencodeModels(null);
+        }
+      })
+      .catch(() => { setOpencodeModels(null); });
+  }, [effectiveTool, projectId]);
+
   // Only show the model/effort if it belongs to this tool's options — prevents
   // stale values from a previous tool leaking into the dropdown.
   // For Ollama: use dynamic models if available, otherwise static fallback
@@ -204,6 +230,9 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   const toolModels = (() => {
     if (effectiveTool === 'ollama' && ollamaModels) {
       return ollamaModels;
+    }
+    if (effectiveTool === 'opencode' && opencodeModels) {
+      return opencodeModels;
     }
     if ((effectiveTool === 'opencode' || effectiveTool === 'aider') && ollamaModels && ollamaModels.length > 0) {
       // Insert Ollama models after "Tool default" option
@@ -219,11 +248,11 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
     return getToolModelOptions(effectiveTool);
   })();
   const toolEfforts = getToolEffortOptions(effectiveTool);
-  const selectedModel = toolModels.some(o => o.value === rawModel) ? rawModel : '';
   const selectedEffort = toolEfforts.some(o => o.value === rawEffort) ? rawEffort : '';
   const modelOptions = effectiveTool === 'ollama' && ollamaModels
     ? (ollamaModels.some(o => o.value === rawModel) ? ollamaModels : [...ollamaModels, ...(rawModel ? [{ value: rawModel, label: `${rawModel} (current)` }] : [])])
     : (rawModel && !toolModels.some(o => o.value === rawModel) ? [...toolModels, { value: rawModel, label: `${rawModel} (current)` }] : toolModels);
+  const selectedModel = modelOptions.some(o => o.value === rawModel) ? rawModel : '';
   const effortOptions = toolEfforts;
 
   return (

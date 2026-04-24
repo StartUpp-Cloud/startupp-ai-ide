@@ -1,10 +1,46 @@
 import express from "express";
+import { execFileSync } from "child_process";
 import Project from "../models/Project.js";
 import { normalizePromptSettings } from "../models/Project.js";
 import { containerManager } from "../containerManager.js";
 import { ptyManager } from "../ptyManager.js";
 
 const router = express.Router();
+
+function parseOpenCodeModels(raw, source) {
+  if (!raw) return [];
+  return raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[a-z0-9][a-z0-9._-]*\/[\S]+$/i.test(line))
+    .map((name) => ({ name, source }));
+}
+
+function getHostOpenCodeModels() {
+  try {
+    const raw = execFileSync("opencode", ["models"], {
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 8000,
+    });
+    return parseOpenCodeModels(raw, "host");
+  } catch {
+    return [];
+  }
+}
+
+function mergeModelsByName(...modelLists) {
+  const seen = new Set();
+  const merged = [];
+  for (const models of modelLists) {
+    for (const model of models) {
+      if (!model?.name || seen.has(model.name)) continue;
+      seen.add(model.name);
+      merged.push(model);
+    }
+  }
+  return merged;
+}
 
 // GET /api/projects - Get all projects
 router.get("/", async (req, res) => {
@@ -306,6 +342,40 @@ router.get("/:id/ollama-models", async (req, res) => {
   }
 
   res.json({ models: merged, fromContainer: containerModels.length > 0, fromHost: hostModels.length > 0 });
+});
+
+/**
+ * GET /api/projects/:id/opencode-models
+ * Returns the model IDs reported by OpenCode itself, preferring the project
+ * container because its config/auth determine which models are usable there.
+ */
+router.get("/:id/opencode-models", async (req, res) => {
+  const project = Project.findById(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  let containerModels = [];
+  if (project.containerName) {
+    try {
+      const status = containerManager.getContainerStatus(project.containerName);
+      if (status === 'running') {
+        const raw = containerManager.execInContainer(
+          project.containerName,
+          'opencode models 2>/dev/null',
+          { timeout: 10000 },
+        );
+        containerModels = parseOpenCodeModels(raw, 'container');
+      }
+    } catch { /* container query failed */ }
+  }
+
+  const hostModels = getHostOpenCodeModels();
+  const models = mergeModelsByName(containerModels, hostModels);
+
+  res.json({
+    models,
+    fromContainer: containerModels.length > 0,
+    fromHost: hostModels.length > 0,
+  });
 });
 
 router.delete("/:id", async (req, res) => {
