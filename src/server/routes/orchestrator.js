@@ -5,9 +5,11 @@
 
 import express from 'express';
 import { orchestrator } from '../orchestrator.js';
+import { ollamaWorkspaceOrchestrator } from '../ollamaWorkspaceOrchestrator.js';
 import { ptyManager } from '../ptyManager.js';
 import { activityFeed } from '../activityFeed.js';
 import { gitManager } from '../gitManager.js';
+import Project from '../models/Project.js';
 
 const router = express.Router();
 
@@ -222,6 +224,111 @@ router.get('/git-info', (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/orchestrator/ollama/:projectId/status - Get Ollama workspace index status
+ */
+router.get('/ollama/:projectId/status', (req, res) => {
+  try {
+    const { projectId } = req.params;
+    res.json(ollamaWorkspaceOrchestrator.getStatus(projectId));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/orchestrator/ollama/:projectId/scan - Build or refresh Ollama-only workspace index
+ */
+router.post('/ollama/:projectId/scan', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const project = Project.findById(projectId);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const index = await ollamaWorkspaceOrchestrator.getOrBuildIndex(project, {
+      forceRefresh: req.body?.forceRefresh !== false,
+    });
+
+    res.json({
+      indexed: true,
+      scannedAt: index.scannedAt,
+      stats: index.stats,
+      stack: index.stack,
+      source: index.source,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to scan workspace for Ollama orchestrator', message: error.message });
+  }
+});
+
+/**
+ * GET /api/orchestrator/ollama/:projectId/search?q=... - Search the Ollama workspace index
+ */
+router.get('/ollama/:projectId/search', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { q = '', limit = 20 } = req.query;
+    const project = Project.findById(projectId);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const index = await ollamaWorkspaceOrchestrator.getOrBuildIndex(project);
+    const files = ollamaWorkspaceOrchestrator.searchIndex(index, q, {
+      limit: Math.min(parseInt(limit, 10) || 20, 50),
+    }).map((file) => ({
+      path: file.path,
+      purpose: file.purpose,
+      riskTags: file.riskTags,
+      score: file.score,
+      size: file.size,
+      language: file.language,
+    }));
+
+    res.json({ files, scannedAt: index.scannedAt, stats: index.stats });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to search Ollama workspace index', message: error.message });
+  }
+});
+
+/**
+ * GET /api/orchestrator/ollama/:projectId/jobs - List Ollama orchestration jobs
+ */
+router.get('/ollama/:projectId/jobs', (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { sessionId = null, limit = 20 } = req.query;
+    const jobs = ollamaWorkspaceOrchestrator.listJobs(projectId, sessionId || null, Math.min(parseInt(limit, 10) || 20, 100));
+    res.json({ jobs });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to list Ollama orchestration jobs', message: error.message });
+  }
+});
+
+/**
+ * GET /api/orchestrator/ollama/jobs/:jobId - Get Ollama orchestration job details
+ */
+router.get('/ollama/jobs/:jobId', (req, res) => {
+  try {
+    const job = ollamaWorkspaceOrchestrator.getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json(job);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get Ollama orchestration job', message: error.message });
+  }
+});
+
+/**
+ * GET /api/orchestrator/ollama/jobs/:jobId/artifacts/:name - Get job artifact
+ */
+router.get('/ollama/jobs/:jobId/artifacts/:name', (req, res) => {
+  try {
+    const artifact = ollamaWorkspaceOrchestrator.getJobArtifact(req.params.jobId, req.params.name);
+    if (!artifact) return res.status(404).json({ error: 'Artifact not found' });
+    res.json(artifact);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get Ollama orchestration artifact', message: error.message });
   }
 });
 

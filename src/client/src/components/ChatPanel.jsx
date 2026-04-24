@@ -315,7 +315,9 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       )}
 
       <div className="ml-auto text-[10px] text-surface-500 truncate">
-        {getToolConfig(effectiveTool).context}
+        {effectiveTool === 'ollama'
+          ? 'IDE orchestrator enabled: workspace scan, retrieval, stack guidance, task planning'
+          : getToolConfig(effectiveTool).context}
       </div>
     </div>
   );

@@ -18,6 +18,7 @@ import { chatStore } from './chatStore.js';
 import { agentShellPool } from './agentShellPool.js';
 import { jobManager } from './jobManager.js';
 import { skillManager } from './skillManager.js';
+import { ollamaWorkspaceOrchestrator } from './ollamaWorkspaceOrchestrator.js';
 import { getDB } from './db.js';
 import { supportsSessionEffortSelection, supportsSessionModelSelection } from './sessionSettings.js';
 import fs from 'fs';
@@ -79,17 +80,43 @@ class AgentGateway extends EventEmitter {
       const provider = llmProvider.getSettings().provider;
       const isCapable = provider !== 'ollama';
       const assistantSettings = { model, effort };
+      const isOllamaAssistant = ollamaWorkspaceOrchestrator.isOllamaAssistant(tool);
+
+      let routedContent = fullContent;
+      if (isOllamaAssistant) {
+        this._addProgressMessage(projectId, sessionId, 'Ollama orchestrator: scanning workspace, building stack context, and planning...', broadcastFn, null, { transient: true });
+        const prepared = await ollamaWorkspaceOrchestrator.prepareTaskContext({
+          projectId,
+          sessionId,
+          prompt: fullContent,
+          model,
+        });
+        routedContent = prepared.augmentedPrompt;
+        this._addProgressMessage(
+          projectId,
+          sessionId,
+          `Ollama orchestrator: job ${prepared.job.id} indexed ${prepared.index.stats.totalFiles} files, researched ${prepared.research.sources.length} sources, retrieved ${prepared.relevantFiles.length} files, and created ${prepared.evidenceLedger.claims.length} evidence claims.`,
+          broadcastFn,
+          null,
+          { transient: true }
+        );
+      }
 
       if (mode === 'plan') {
         // Plan mode: multi-loop review (plan → critic → optional 3rd pass)
-        await this._executePlanWithReview(projectId, sessionId, fullContent, tool, assistantSettings, broadcastFn, ctx);
+        await this._executePlanWithReview(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx);
+      } else if (isOllamaAssistant) {
+        // Ollama assistant always uses the IDE-side orchestrator + local Ollama CLI.
+        // Do not smart-route Ollama-selected sessions through cloud/capable providers.
+        this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn, null, { transient: true });
+        await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent');
       } else if (isCapable) {
         // Agent mode + capable LLM: smart routing
-        await this._smartRoute(projectId, sessionId, fullContent, mode, tool, assistantSettings, broadcastFn, ctx);
+        await this._smartRoute(projectId, sessionId, routedContent, mode, tool, assistantSettings, broadcastFn, ctx);
       } else {
         // Agent mode + Ollama: everything goes to the CLI tool
         this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, fullContent, tool, assistantSettings, broadcastFn, ctx, 'agent');
+        await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent');
       }
     } catch (error) {
       this._addErrorMessage(projectId, sessionId, `Error: ${error.message}`, broadcastFn);
