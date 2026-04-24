@@ -27,12 +27,9 @@ const MODEL_OPTIONS = {
   opencode: [
     { value: '', label: 'Tool default' },
     // Ollama (local) — common coding models
-    { value: 'ollama/qwen2.5-coder:32b', label: 'ollama/qwen2.5-coder:32b' },
-    { value: 'ollama/qwen2.5-coder:14b', label: 'ollama/qwen2.5-coder:14b' },
-    { value: 'ollama/qwen2.5-coder:7b', label: 'ollama/qwen2.5-coder:7b' },
     { value: 'ollama/deepseek-coder-v2:16b', label: 'ollama/deepseek-coder-v2:16b' },
-    { value: 'ollama/codellama:34b', label: 'ollama/codellama:34b' },
     { value: 'ollama/devstral:24b', label: 'ollama/devstral:24b' },
+    { value: 'ollama/codellama:34b', label: 'ollama/codellama:34b' },
     // Anthropic
     { value: 'anthropic/claude-opus-4-7', label: 'claude-opus-4-7 (latest)' },
     { value: 'anthropic/claude-opus-4-6', label: 'claude-opus-4-6' },
@@ -90,10 +87,6 @@ const MODEL_OPTIONS = {
   ollama: [
     { value: '', label: 'Select installed model' },
     // Coding-focused
-    { value: 'qwen2.5-coder:32b', label: 'qwen2.5-coder:32b' },
-    { value: 'qwen2.5-coder:14b', label: 'qwen2.5-coder:14b' },
-    { value: 'qwen2.5-coder:7b', label: 'qwen2.5-coder:7b' },
-    { value: 'qwen3.6:27b', label: 'qwen3.6:27b' },
     { value: 'deepseek-coder-v2:16b', label: 'deepseek-coder-v2:16b' },
     { value: 'deepseek-coder-v2:lite', label: 'deepseek-coder-v2:lite' },
     { value: 'devstral:24b', label: 'devstral:24b' },
@@ -115,17 +108,11 @@ const MODEL_OPTIONS = {
     { value: 'gemma3:9b', label: 'gemma3:9b' },
     { value: 'gemma3:4b', label: 'gemma3:4b' },
     { value: 'gemma3:1b', label: 'gemma3:1b' },
-    { value: 'qwen3:30b-a3b', label: 'qwen3:30b-a3b' },
-    { value: 'qwen3:14b', label: 'qwen3:14b' },
-    { value: 'qwen3:8b', label: 'qwen3:8b' },
-    { value: 'qwen3:4b', label: 'qwen3:4b' },
   ],
   // Aider: supports Ollama models (ollama/ prefix required) and cloud providers
   aider: [
     { value: '', label: 'Tool default' },
     // Ollama models — aider requires ollama/ prefix for --model
-    { value: 'ollama/qwen2.5-coder:14b', label: 'Ollama: qwen2.5-coder:14b' },
-    { value: 'ollama/qwen3.6:27b', label: 'Ollama: qwen3.6:27b' },
     { value: 'ollama/deepseek-coder-v2:16b', label: 'Ollama: deepseek-coder-v2:16b' },
     { value: 'ollama/devstral:24b', label: 'Ollama: devstral:24b' },
     { value: 'ollama/codellama:34b', label: 'Ollama: codellama:34b' },
