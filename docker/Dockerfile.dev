@@ -19,6 +19,9 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
 # Install pnpm (yarn comes with node:20)
 RUN npm install -g pnpm
 
+# Install Aider (Python AI coding assistant)
+RUN pip3 install aider-chat --break-system-packages
+
 # Create dev user
 RUN useradd -m -s /bin/bash dev
 

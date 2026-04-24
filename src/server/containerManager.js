@@ -170,6 +170,7 @@ class ContainerManager extends EventEmitter {
       // Allow containers to reach Ollama running on the host
       "--add-host=host.docker.internal:host-gateway",
       "-e OLLAMA_HOST=http://host.docker.internal:11434",
+      "-e OLLAMA_API_BASE=http://host.docker.internal:11434",
       envFlags,
       portFlags,
       `--label sai.projectId=${projectId}`,
