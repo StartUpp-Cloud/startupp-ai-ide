@@ -17,7 +17,7 @@ function normalizeTool(tool, fallback = 'claude') {
 }
 
 function supportsModelSelection(tool) {
-  return tool === 'claude' || tool === 'copilot' || tool === 'opencode' || tool === 'codex' || tool === 'ollama';
+  return tool === 'claude' || tool === 'copilot' || tool === 'opencode' || tool === 'codex' || tool === 'ollama' || tool === 'aider';
 }
 
 function supportsEffortSelection(tool) {

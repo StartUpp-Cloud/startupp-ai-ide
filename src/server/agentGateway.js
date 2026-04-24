@@ -1503,8 +1503,14 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
           || (() => { try { return llmProvider.getSettings().model || 'llama3.2'; } catch { return 'llama3.2'; } })();
         return `ollama run ${this._quoteCliArg(ollamaModel)} ${promptArg}`;
       }
-      case 'aider':
-        return `aider --message ${promptArg} --yes`;
+      case 'aider': {
+        let cmd = `aider --message ${promptArg} --yes`;
+        // Add model if specified (supports Ollama and cloud providers)
+        if (assistantSettings?.model) {
+          cmd += ` --model ${this._quoteCliArg(assistantSettings.model)}`;
+        }
+        return cmd;
+      }
       case 'gemini':
         return `gemini -p ${promptArg}`;
       case 'shell':

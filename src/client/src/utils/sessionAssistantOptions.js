@@ -93,8 +93,10 @@ const MODEL_OPTIONS = {
     { value: 'qwen2.5-coder:32b', label: 'qwen2.5-coder:32b' },
     { value: 'qwen2.5-coder:14b', label: 'qwen2.5-coder:14b' },
     { value: 'qwen2.5-coder:7b', label: 'qwen2.5-coder:7b' },
+    { value: 'qwen3.6:27b', label: 'qwen3.6:27b' },
     { value: 'deepseek-coder-v2:16b', label: 'deepseek-coder-v2:16b' },
     { value: 'deepseek-coder-v2:lite', label: 'deepseek-coder-v2:lite' },
+    { value: 'devstral:24b', label: 'devstral:24b' },
     { value: 'codellama:70b', label: 'codellama:70b' },
     { value: 'codellama:34b', label: 'codellama:34b' },
     { value: 'codellama:13b', label: 'codellama:13b' },
@@ -117,7 +119,21 @@ const MODEL_OPTIONS = {
     { value: 'qwen3:14b', label: 'qwen3:14b' },
     { value: 'qwen3:8b', label: 'qwen3:8b' },
     { value: 'qwen3:4b', label: 'qwen3:4b' },
-    { value: 'devstral:24b', label: 'devstral:24b' },
+  ],
+  // Aider: supports Ollama models (ollama/ prefix required) and cloud providers
+  aider: [
+    { value: '', label: 'Tool default' },
+    // Ollama models — aider requires ollama/ prefix for --model
+    { value: 'ollama/qwen2.5-coder:14b', label: 'Ollama: qwen2.5-coder:14b' },
+    { value: 'ollama/qwen3.6:27b', label: 'Ollama: qwen3.6:27b' },
+    { value: 'ollama/deepseek-coder-v2:16b', label: 'Ollama: deepseek-coder-v2:16b' },
+    { value: 'ollama/devstral:24b', label: 'Ollama: devstral:24b' },
+    { value: 'ollama/codellama:34b', label: 'Ollama: codellama:34b' },
+    // Cloud providers (prefix required)
+    { value: 'anthropic/claude-sonnet-4-5', label: 'Anthropic: claude-sonnet-4-5' },
+    { value: 'anthropic/claude-opus-4-5', label: 'Anthropic: claude-opus-4-5' },
+    { value: 'openai/gpt-4o', label: 'OpenAI: gpt-4o' },
+    { value: 'openai/o1', label: 'OpenAI: o1' },
   ],
   codex: [
     { value: '', label: 'Tool default' },

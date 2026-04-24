@@ -163,10 +163,10 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   const rawEffort = session?.effort || '';
 
   // Dynamic Ollama model loading — queries host + container, shows installed models at top
-  // Also loads for OpenCode since it supports ollama/ provider prefix
+  // Also loads for OpenCode and Aider since they support ollama/ provider prefix
   const [ollamaModels, setOllamaModels] = useState(null);
   useEffect(() => {
-    if (effectiveTool !== 'ollama' && effectiveTool !== 'opencode') return;
+    if (effectiveTool !== 'ollama' && effectiveTool !== 'opencode' && effectiveTool !== 'aider') return;
     // Use project-specific endpoint (merges host + container) if projectId is available
     const url = projectId
       ? `/api/projects/${projectId}/ollama-models`
@@ -181,8 +181,8 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
               { value: '', label: 'Select installed model' },
               ...models.map(m => ({ value: m.name, label: m.source === 'container' ? `${m.name} ✓` : m.name })),
             ]);
-          } else if (effectiveTool === 'opencode') {
-            // For OpenCode, use ollama/ prefix format
+          } else if (effectiveTool === 'opencode' || effectiveTool === 'aider') {
+            // For OpenCode and Aider, use ollama/ prefix format (required by both tools)
             setOllamaModels(
               models.map(m => ({
                 value: `ollama/${m.name}`,
@@ -200,12 +200,12 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   // Only show the model/effort if it belongs to this tool's options — prevents
   // stale values from a previous tool leaking into the dropdown.
   // For Ollama: use dynamic models if available, otherwise static fallback
-  // For OpenCode: merge static models with dynamic Ollama models (ollama/ prefix)
+  // For OpenCode/Aider: merge static models with dynamic Ollama models (ollama/ prefix)
   const toolModels = (() => {
     if (effectiveTool === 'ollama' && ollamaModels) {
       return ollamaModels;
     }
-    if (effectiveTool === 'opencode' && ollamaModels && ollamaModels.length > 0) {
+    if ((effectiveTool === 'opencode' || effectiveTool === 'aider') && ollamaModels && ollamaModels.length > 0) {
       // Insert Ollama models after "Tool default" option
       const staticModels = getToolModelOptions(effectiveTool);
       const ollamaSection = [
