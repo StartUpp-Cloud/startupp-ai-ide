@@ -901,7 +901,11 @@ RULES:
         chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
       }
       if (parsed.isError) {
-        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+        // Permanent errors (model not found, bad config) must not be retried
+        if (parsed.isPermanentError) {
+          return { success: false, retry: false, error: displayOutput, displayOutput };
+        }
+        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error', displayOutput };
       }
     } else if (tool === 'codex') {
       const parsed = this._parseCodexJsonOutput(cleanOutput, cmd);
@@ -2243,6 +2247,7 @@ NEEDS_USER`,
     let text = '';
     let sessionId = null;
     let isError = false;
+    let isPermanentError = false;
     const textParts = [];
 
     for (const line of cleanOutput.split('\n')) {
@@ -2250,19 +2255,34 @@ NEEDS_USER`,
       if (idx < 0) continue;
       try {
         const json = JSON.parse(line.slice(idx));
-        // Extract session ID from any event (always present)
         if (json.sessionID && !sessionId) sessionId = json.sessionID;
-        // Collect text parts
         if (json.type === 'text' && json.part?.text) {
           textParts.push(json.part.text);
         }
-        // Detect error events
         if (json.type === 'error' || json.part?.type === 'error') {
           isError = true;
-          const errMsg = json.part?.message || json.message || json.error || '';
+          // OpenCode nests the message at json.error.data.message
+          const errMsg = json.error?.data?.message
+            || json.error?.message
+            || (typeof json.error === 'string' ? json.error : '')
+            || json.part?.message
+            || json.message
+            || '';
           if (errMsg) textParts.push(`\n\n**Error:** ${errMsg}`);
+          if (/model.*not found|provider.*not found|ProviderModelNotFound/i.test(errMsg)) {
+            isPermanentError = true;
+          }
         }
       } catch {}
+    }
+
+    // Detect ProviderModelNotFoundError in raw stderr (appears before the JSON line)
+    if (/ProviderModelNotFoundError|Model not found:/i.test(cleanOutput) && !textParts.some(p => p.includes('Error:'))) {
+      isError = true;
+      isPermanentError = true;
+      const modelMatch = cleanOutput.match(/modelID:\s*["']?([^\s"',}\n]+)/);
+      const hint = modelMatch ? ` Model "${modelMatch[1].trim()}" is not registered.` : '';
+      textParts.push(`\n\n**Error:** OpenCode could not find this Ollama model in its provider config.${hint} Restart the project container to refresh the model list, then try again.`);
     }
 
     text = textParts.join('');
@@ -2277,7 +2297,7 @@ NEEDS_USER`,
         : '⚠️ No response received from OpenCode. Please try again.';
     }
 
-    return { text, sessionId, isError };
+    return { text, sessionId, isError, isPermanentError };
   }
 
   /**
