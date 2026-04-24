@@ -157,6 +157,16 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
   );
 }
 
+function dedupeModelOptions(options) {
+  const seen = new Set();
+  return options.filter((option) => {
+    if (!option.value || option.disabled) return true;
+    if (seen.has(option.value)) return false;
+    seen.add(option.value);
+    return true;
+  });
+}
+
 function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate }) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
@@ -249,9 +259,10 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   })();
   const toolEfforts = getToolEffortOptions(effectiveTool);
   const selectedEffort = toolEfforts.some(o => o.value === rawEffort) ? rawEffort : '';
-  const modelOptions = effectiveTool === 'ollama' && ollamaModels
+  const rawModelOptions = effectiveTool === 'ollama' && ollamaModels
     ? (ollamaModels.some(o => o.value === rawModel) ? ollamaModels : [...ollamaModels, ...(rawModel ? [{ value: rawModel, label: `${rawModel} (current)` }] : [])])
     : (rawModel && !toolModels.some(o => o.value === rawModel) ? [...toolModels, { value: rawModel, label: `${rawModel} (current)` }] : toolModels);
+  const modelOptions = dedupeModelOptions(rawModelOptions);
   const selectedModel = modelOptions.some(o => o.value === rawModel) ? rawModel : '';
   const effortOptions = toolEfforts;
 

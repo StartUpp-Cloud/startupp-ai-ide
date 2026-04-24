@@ -63,25 +63,38 @@ function fallbackOpenCodeModels() {
 
 function parseOpenCodeRunOutput(raw) {
   const textParts = [];
+  const errorParts = [];
   let tokensUsed = null;
 
   for (const line of String(raw || '').split(/\r?\n/)) {
-    const trimmed = line.trim();
+    const jsonStart = line.indexOf('{');
+    const trimmed = jsonStart >= 0 ? line.slice(jsonStart).trim() : line.trim();
     if (!trimmed.startsWith('{')) continue;
 
     try {
       const event = JSON.parse(trimmed);
       if (event.type === 'text' && typeof event.part?.text === 'string') {
         textParts.push(event.part.text);
+      } else if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
+        textParts.push(event.item.text);
       } else if (event.type === 'step_finish' && event.part?.tokens?.total) {
         tokensUsed = event.part.tokens.total;
+      }
+
+      if (event.type === 'error' || event.part?.type === 'error' || event.error) {
+        const message = event.error?.data?.message
+          || event.error?.message
+          || (typeof event.error === 'string' ? event.error : '')
+          || event.part?.message
+          || event.message;
+        if (message) errorParts.push(message);
       }
     } catch {
       // Ignore non-JSON progress lines from older OpenCode versions.
     }
   }
 
-  return { response: textParts.join('').trim(), tokensUsed };
+  return { response: textParts.join('').trim(), tokensUsed, error: errorParts.join('\n').trim() };
 }
 
 function runOpenCodePty(args, { timeout, cwd } = {}) {
@@ -741,7 +754,10 @@ class LLMProvider extends EventEmitter {
     try {
       const stdout = await runOpenCodePty(args, { timeout: timeout || 60000 });
 
-      const { response, tokensUsed } = parseOpenCodeRunOutput(stdout);
+      const { response, tokensUsed, error } = parseOpenCodeRunOutput(stdout);
+      if (error) {
+        throw new Error(error);
+      }
       if (!response) {
         throw new Error('OpenCode returned no text response');
       }
@@ -981,7 +997,7 @@ class LLMProvider extends EventEmitter {
    * Check if the OpenCode CLI is available and can list models.
    */
   async checkOpenCodeHealth() {
-    const models = await this.getOpenCodeModels();
+    const models = await this.getOpenCodeModels({ allowFallback: false });
     const hasModels = models.length > 0;
     this.available = hasModels;
     this.lastHealthCheck = hasModels
@@ -1158,7 +1174,7 @@ class LLMProvider extends EventEmitter {
   /**
    * Get model IDs reported by the authenticated OpenCode CLI.
    */
-  async getOpenCodeModels({ refresh = false } = {}) {
+  async getOpenCodeModels({ refresh = false, allowFallback = true } = {}) {
     const now = Date.now();
     if (!refresh && this.openCodeModelsCache && now - this.openCodeModelsCache.fetchedAt < OPENCODE_MODELS_CACHE_TTL_MS) {
       return this.openCodeModelsCache.models;
@@ -1181,7 +1197,7 @@ class LLMProvider extends EventEmitter {
       console.warn('[llmProvider] OpenCode model discovery failed:', error.message);
     }
 
-    return this.openCodeModelsCache?.models || fallbackOpenCodeModels();
+    return this.openCodeModelsCache?.models || (allowFallback ? fallbackOpenCodeModels() : []);
   }
 
   /**
@@ -1208,6 +1224,13 @@ class LLMProvider extends EventEmitter {
    * Test the LLM with a sample prompt
    */
   async testConnection() {
+    if (this.settings.provider === 'opencode') {
+      const health = await this.checkOpenCodeHealth();
+      if (!health.available) {
+        throw new Error(health.error || 'OpenCode CLI unavailable');
+      }
+    }
+
     const testPrompt = 'Continue with the changes? [Y/n]';
     const result = await this.generateResponse(testPrompt, {
       intent: 'confirmation',

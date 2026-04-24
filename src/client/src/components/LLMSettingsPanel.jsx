@@ -207,6 +207,10 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
       setTestResult(null);
       const res = await fetch(`${API_BASE}/llm/test`, { method: 'POST' });
       const data = await res.json();
+      if (!res.ok) {
+        setTestResult({ error: data.message || data.error || `Test failed (${res.status})` });
+        return;
+      }
       setTestResult(data);
     } catch (error) {
       setTestResult({ error: error.message });
