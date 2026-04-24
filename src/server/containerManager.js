@@ -392,28 +392,29 @@ class ContainerManager extends EventEmitter {
    */
   configureOpenCodeOllama(containerName) {
     // OpenCode provider config for Ollama via OpenAI-compatible API
+    // See: https://opencode.ai/docs/providers/
     const config = {
-      providers: {
+      "$schema": "https://opencode.ai/config.json",
+      provider: {
         ollama: {
-          type: "@ai-sdk/openai-compatible",
+          npm: "@ai-sdk/openai-compatible",
           name: "Ollama (Local)",
-          baseURL: "http://host.docker.internal:11434/v1",
-          // Model-specific context lengths for common coding models
+          options: {
+            baseURL: "http://host.docker.internal:11434/v1",
+          },
           models: {
-            "qwen2.5-coder:32b": { contextLength: 65536 },
-            "qwen2.5-coder:14b": { contextLength: 65536 },
-            "qwen2.5-coder:7b": { contextLength: 32768 },
-            "deepseek-coder-v2:16b": { contextLength: 65536 },
-            "deepseek-coder-v2:lite": { contextLength: 32768 },
-            "codellama:34b": { contextLength: 32768 },
-            "codellama:13b": { contextLength: 16384 },
-            "devstral:24b": { contextLength: 65536 },
-            "llama3.3:70b": { contextLength: 32768 },
-            "llama3.1:70b": { contextLength: 32768 },
-            "mistral:7b": { contextLength: 32768 },
-            "mixtral:8x7b": { contextLength: 32768 },
-            "qwen3:30b-a3b": { contextLength: 65536 },
-            "qwen3:14b": { contextLength: 32768 },
+            "qwen2.5-coder:32b": { name: "Qwen 2.5 Coder 32B" },
+            "qwen2.5-coder:14b": { name: "Qwen 2.5 Coder 14B" },
+            "qwen2.5-coder:7b": { name: "Qwen 2.5 Coder 7B" },
+            "deepseek-coder-v2:16b": { name: "DeepSeek Coder V2 16B" },
+            "deepseek-coder-v2:lite": { name: "DeepSeek Coder V2 Lite" },
+            "codellama:34b": { name: "Code Llama 34B" },
+            "codellama:13b": { name: "Code Llama 13B" },
+            "devstral:24b": { name: "Devstral 24B" },
+            "llama3.3:70b": { name: "Llama 3.3 70B" },
+            "llama3.1:8b": { name: "Llama 3.1 8B" },
+            "mistral:7b": { name: "Mistral 7B" },
+            "qwen3:14b": { name: "Qwen 3 14B" },
           },
         },
       },
