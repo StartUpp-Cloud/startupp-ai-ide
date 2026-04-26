@@ -392,6 +392,13 @@ function ChatSessionContent({
     if (el) el.scrollTop = 0;
   }, []);
 
+  const markCurrentSessionRead = useCallback(() => {
+    if (!projectId || !sessionId) return;
+    fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
+    onSessionUpdate?.(sessionId, { hasUnread: false });
+    onUnreadChange?.(projectId, sessionId, false);
+  }, [projectId, sessionId, onSessionUpdate, onUnreadChange]);
+
   // Load messages on mount
   useEffect(() => {
     if (!projectId || !sessionId) return;
@@ -408,13 +415,15 @@ function ChatSessionContent({
         knownIdsRef.current = new Set(msgs.map(m => m.id));
         setMessages(msgs);
         // Mark as read
-        fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
-        onSessionUpdate?.(sessionId, { hasUnread: false });
-        onUnreadChange?.(projectId, sessionId, false);
+        markCurrentSessionRead();
       })
       .catch(() => setMessages([]))
       .finally(() => setLoading(false));
-  }, [projectId, sessionId, onSessionUpdate, onUnreadChange]);
+  }, [projectId, sessionId, markCurrentSessionRead]);
+
+  useEffect(() => {
+    if (isVisible) markCurrentSessionRead();
+  }, [isVisible, markCurrentSessionRead]);
 
   // Attach to chat session for WebSocket events
   useEffect(() => {
@@ -590,9 +599,7 @@ function ChatSessionContent({
         case 'session-unread':
           if (msg.projectId === projectId && msg.sessionId === sessionId) {
             if (msg.hasUnread && isVisible) {
-              fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
-              onSessionUpdate?.(sessionId, { hasUnread: false });
-              onUnreadChange?.(projectId, sessionId, false);
+              markCurrentSessionRead();
             } else {
               onSessionUpdate?.(sessionId, { hasUnread: msg.hasUnread });
               onUnreadChange?.(projectId, sessionId, msg.hasUnread);
