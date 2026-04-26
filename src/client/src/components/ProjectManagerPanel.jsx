@@ -26,6 +26,11 @@ const Spinner = () => (
   <div className="w-4 h-4 border-2 border-current/30 border-t-current rounded-full animate-spin" />
 );
 
+function getUnreadCount(unreadCounts, projectId) {
+  const count = Number(unreadCounts?.[projectId]);
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
 const Modal = ({ children, onClose }) =>
   createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -386,7 +391,10 @@ export default function ProjectManagerPanel({
 
       {/* Project list */}
       <div className="flex-1 overflow-y-auto py-1">
-        {filteredProjects.map((project) => (
+        {filteredProjects.map((project) => {
+          const unreadCount = getUnreadCount(unreadCounts, project.id);
+
+          return (
           <div key={project.id} className="group">
             <div
               role="button"
@@ -420,8 +428,8 @@ export default function ProjectManagerPanel({
               <span className="text-sm truncate flex-1">{project.name}</span>
 
               {/* Unread badge */}
-              {unreadCounts[project.id] > 0 && (
-                <span className="flex-shrink-0 w-2 h-2 rounded-full bg-primary-500 animate-pulse" title={`${unreadCounts[project.id]} unread`} />
+              {unreadCount > 0 && (
+                <span className="flex-shrink-0 w-2 h-2 rounded-full bg-primary-500 animate-pulse" title={`${unreadCount} unread`} />
               )}
 
               {/* Hover actions */}
@@ -549,7 +557,8 @@ export default function ProjectManagerPanel({
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
 
         {filteredProjects.length === 0 && (
           <div className="px-3 py-8 text-center">

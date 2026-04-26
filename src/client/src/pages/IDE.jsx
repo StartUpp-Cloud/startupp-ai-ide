@@ -26,6 +26,18 @@ const STORAGE_KEYS = {
   LEFT_PANEL_COLLAPSED: 'ide-left-collapsed',
 };
 
+function normalizeUnreadSessions(value) {
+  if (!value || typeof value !== 'object') return {};
+
+  const normalized = {};
+  for (const [projectId, sessionIds] of Object.entries(value)) {
+    if (!Array.isArray(sessionIds)) continue;
+    const ids = [...new Set(sessionIds.filter(id => typeof id === 'string' && id.length > 0))];
+    if (ids.length > 0) normalized[projectId] = ids;
+  }
+  return normalized;
+}
+
 export default function IDE() {
   const { projects, getProject, getGlobalRules, notify } = useProjects();
   // Layout state (with persistence)
@@ -227,13 +239,16 @@ export default function IDE() {
         .then(r => r.ok ? r.json() : { unread: {} })
         .then(data => {
           if (data.sessions) {
-            setUnreadSessions(data.sessions || {});
+            setUnreadSessions(normalizeUnreadSessions(data.sessions));
             return;
           }
 
           const fallback = {};
           for (const [projectId, count] of Object.entries(data.unread || {})) {
-            fallback[projectId] = Array.from({ length: count }, (_, i) => `unknown-${i}`);
+            const unreadCount = Number(count);
+            if (Number.isFinite(unreadCount) && unreadCount > 0) {
+              fallback[projectId] = Array.from({ length: unreadCount }, (_, i) => `unknown-${i}`);
+            }
           }
           setUnreadSessions(fallback);
         })
