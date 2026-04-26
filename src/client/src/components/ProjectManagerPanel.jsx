@@ -144,6 +144,14 @@ export default function ProjectManagerPanel({
     }
   };
 
+  const toggleProjectExpanded = (projectId, e) => {
+    e?.stopPropagation();
+    setExpandedProjects((prev) => ({
+      ...prev,
+      [projectId]: !prev[projectId],
+    }));
+  };
+
   const handleImport = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -383,21 +391,11 @@ export default function ProjectManagerPanel({
             <div
               role="button"
               tabIndex={0}
-              onClick={() => {
-                onSelectProject(project.id);
-                setExpandedProjects((prev) => ({
-                  ...prev,
-                  [project.id]: !prev[project.id],
-                }));
-              }}
+              onClick={() => onSelectProject(project.id)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   onSelectProject(project.id);
-                  setExpandedProjects((prev) => ({
-                    ...prev,
-                    [project.id]: !prev[project.id],
-                  }));
                 }
               }}
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-surface-750 transition-colors cursor-pointer select-none ${
@@ -406,11 +404,18 @@ export default function ProjectManagerPanel({
                   : "text-surface-300"
               }`}
             >
-              {expandedProjects[project.id] ? (
-                <ChevronDown className="w-3 h-3 text-surface-500 flex-shrink-0" />
-              ) : (
-                <ChevronRight className="w-3 h-3 text-surface-500 flex-shrink-0" />
-              )}
+              <button
+                type="button"
+                onClick={(e) => toggleProjectExpanded(project.id, e)}
+                className="p-0.5 -m-0.5 rounded hover:bg-surface-700 text-surface-500 hover:text-surface-300 flex-shrink-0"
+                title={expandedProjects[project.id] ? "Collapse project" : "Expand project"}
+              >
+                {expandedProjects[project.id] ? (
+                  <ChevronDown className="w-3 h-3" />
+                ) : (
+                  <ChevronRight className="w-3 h-3" />
+                )}
+              </button>
               <FolderOpen className="w-4 h-4 text-surface-400 flex-shrink-0" />
               <span className="text-sm truncate flex-1">{project.name}</span>
 

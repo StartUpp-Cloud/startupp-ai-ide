@@ -167,7 +167,8 @@ async function startServer() {
       try {
         const { chatStore } = await import("./chatStore.js");
         const counts = chatStore.getAllUnreadCounts();
-        res.json({ unread: counts });
+        const sessions = chatStore.getAllUnreadSessionIds();
+        res.json({ unread: counts, sessions });
       } catch (error) {
         res.status(500).json({ error: error.message });
       }

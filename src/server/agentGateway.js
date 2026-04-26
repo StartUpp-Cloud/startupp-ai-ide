@@ -53,20 +53,24 @@ class AgentGateway extends EventEmitter {
   }) {
     const existing = this._running.get(sessionId);
     if (existing && existing.queue) {
-      existing.queue = existing.queue.then(() =>
-        this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn })
-      );
+      existing.queue = existing.queue.then(() => {
+        if (existing.aborted) return null;
+        return this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn });
+      });
       return existing.queue;
     }
 
+    this._running.set(sessionId, { aborted: false, startedAt: Date.now(), queue: null });
     const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn });
-    this._running.set(sessionId, { aborted: false, startedAt: Date.now(), queue: promise });
+    const entry = this._running.get(sessionId);
+    if (entry) entry.queue = promise;
     return promise;
   }
 
   async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, model, effort, broadcastFn }) {
-    const ctx = { aborted: false, startedAt: Date.now() };
-    this._running.set(sessionId, { ...ctx, queue: this._running.get(sessionId)?.queue });
+    const ctx = this._running.get(sessionId) || { aborted: false, queue: null };
+    ctx.startedAt = Date.now();
+    this._running.set(sessionId, ctx);
 
     try {
       broadcastFn({ type: 'agent-status', projectId, sessionId, busy: true });
@@ -595,7 +599,8 @@ RULES:
           const backoffMs = result.retryType === 'codex-rate-limit' ? 5000
             : result.retryType === 'codex-transient' ? 3000
             : 2000;
-          await new Promise(r => setTimeout(r, backoffMs));
+          const shouldContinue = await this._waitForRetryBackoff(ctx, backoffMs);
+          if (!shouldContinue) return;
           continue;
         }
 
@@ -1890,6 +1895,30 @@ Reply with exactly one word: YES or NO.`,
         try { agentShellPool.write(shellSessionId, '\u0003'); } catch {}
       }, 150);
     }
+  }
+
+  _waitForRetryBackoff(ctx, ms) {
+    return new Promise((resolve) => {
+      if (ctx.aborted) {
+        resolve(false);
+        return;
+      }
+
+      const startedAt = Date.now();
+      const timer = setTimeout(() => {
+        clearInterval(interval);
+        resolve(!ctx.aborted);
+      }, ms);
+      const interval = setInterval(() => {
+        if (ctx.aborted) {
+          clearTimeout(timer);
+          clearInterval(interval);
+          resolve(false);
+        } else if (Date.now() - startedAt >= ms) {
+          clearInterval(interval);
+        }
+      }, 100);
+    });
   }
 
   _waitForOutput(sessionId, ctx, quietMs = 3000) {

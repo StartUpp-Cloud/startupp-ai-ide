@@ -348,6 +348,7 @@ function ChatSessionContent({
   isVisible,
   projectSwitchKey,
   onSessionUpdate,
+  onUnreadChange,
   onUpdateSessionConfig,
 }) {
   const [messages, setMessages] = useState([]);
@@ -361,6 +362,7 @@ function ChatSessionContent({
   const scrollContainerRef = useRef(null);
   const knownIdsRef = useRef(new Set());
   const busyClearRef = useRef(false);
+  const finalClearRef = useRef(false);
   const streamingChunksRef = useRef('');
   const prevMessageCountRef = useRef(0);
   const isInitialLoadRef = useRef(true);
@@ -408,10 +410,11 @@ function ChatSessionContent({
         // Mark as read
         fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
         onSessionUpdate?.(sessionId, { hasUnread: false });
+        onUnreadChange?.(projectId, sessionId, false);
       })
       .catch(() => setMessages([]))
       .finally(() => setLoading(false));
-  }, [projectId, sessionId]);
+  }, [projectId, sessionId, onSessionUpdate, onUnreadChange]);
 
   // Attach to chat session for WebSocket events
   useEffect(() => {
@@ -469,6 +472,12 @@ function ChatSessionContent({
         case 'chat-message':
           if (msg.message?.sessionId === sessionId && msg.message?.id) {
             knownIdsRef.current.add(msg.message.id);
+            if (msg.message.role === 'agent' || msg.message.role === 'error') {
+              setStreamingMessage(null);
+              streamingChunksRef.current = '';
+              setAgentBusy(false);
+              setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
+            }
             setMessages(prev => {
               const filtered = prev.filter(m => {
                 if (m.id === msg.message.id) return false;
@@ -522,6 +531,9 @@ function ChatSessionContent({
         case 'chat-message-recovered':
           if (msg.message) {
             knownIdsRef.current.add(msg.message.id);
+            setStreamingMessage(null);
+            streamingChunksRef.current = '';
+            setAgentBusy(false);
             setMessages(prev => {
               const filtered = prev.filter(m => m.id !== msg.message.id);
               return [...filtered, msg.message];
@@ -577,7 +589,14 @@ function ChatSessionContent({
 
         case 'session-unread':
           if (msg.projectId === projectId && msg.sessionId === sessionId) {
-            onSessionUpdate?.(sessionId, { hasUnread: msg.hasUnread });
+            if (msg.hasUnread && isVisible) {
+              fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
+              onSessionUpdate?.(sessionId, { hasUnread: false });
+              onUnreadChange?.(projectId, sessionId, false);
+            } else {
+              onSessionUpdate?.(sessionId, { hasUnread: msg.hasUnread });
+              onUnreadChange?.(projectId, sessionId, msg.hasUnread);
+            }
           }
           break;
 
@@ -585,6 +604,11 @@ function ChatSessionContent({
           // Agent busy state - needs sessionId to target correct session
           if (msg.projectId === projectId && (!msg.sessionId || msg.sessionId === sessionId)) {
             setAgentBusy(msg.busy || false);
+            if (!msg.busy) {
+              setStreamingMessage(null);
+              streamingChunksRef.current = '';
+              setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
+            }
           }
           break;
       }
@@ -592,7 +616,7 @@ function ChatSessionContent({
 
     wsRef.current.addEventListener('message', handleMessage);
     return () => wsRef.current?.removeEventListener('message', handleMessage);
-  }, [wsRef, sessionId, projectId, onSessionUpdate]);
+  }, [wsRef, sessionId, projectId, isVisible, onSessionUpdate, onUnreadChange]);
 
   // Detect stalled recovery after 30 seconds
   useEffect(() => {
@@ -695,6 +719,7 @@ function ChatSessionContent({
             if (hasNewFinalAfterUser) {
               result = result.filter(m => m.role !== 'progress' || result.indexOf(m) <= lastUserIdx);
               busyClearRef.current = true;
+              finalClearRef.current = true;
             }
 
             result.push(...newFinal, ...newOther);
@@ -704,6 +729,12 @@ function ChatSessionContent({
           if (busyClearRef.current) {
             busyClearRef.current = false;
             setAgentBusy(false);
+          }
+          if (finalClearRef.current) {
+            finalClearRef.current = false;
+            setStreamingMessage(null);
+            streamingChunksRef.current = '';
+            setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
           }
         })
         .catch(() => {});
@@ -1012,7 +1043,7 @@ function ChatSessionContent({
  * Main ChatPanel - manages sessions/tabs and renders all open sessions.
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
-export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange }) {
+export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange }) {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -1178,8 +1209,9 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     setSessions(prev => prev.map(s =>
       s.id === sessionId ? { ...s, hasUnread: false } : s
     ));
+    onUnreadChange?.(projectId, sessionId, false);
     fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
-  }, [projectId]);
+  }, [projectId, onUnreadChange]);
 
   const switchToTab = useCallback((sessionId) => {
     setActiveSessionId(sessionId);
@@ -1637,6 +1669,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               isVisible={visibleTabIds.includes(tabId)}
               projectSwitchKey={projectSwitchKey}
               onSessionUpdate={handleSessionUpdate}
+              onUnreadChange={onUnreadChange}
               onUpdateSessionConfig={updateSessionAssistantConfig}
             />
           </div>

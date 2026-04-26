@@ -192,6 +192,22 @@ class ChatStore {
     return counts;
   }
 
+  getAllUnreadSessionIds() {
+    const unread = {};
+    const projectDirs = fs.readdirSync(CHAT_DIR).filter(f => {
+      const stat = fs.statSync(path.join(CHAT_DIR, f));
+      return stat.isDirectory();
+    });
+
+    for (const projectId of projectDirs) {
+      const sessions = this._readIndex(projectId);
+      const ids = sessions.filter(s => s.hasUnread === true).map(s => s.id);
+      if (ids.length > 0) unread[projectId] = ids;
+    }
+
+    return unread;
+  }
+
   /**
    * Get a specific session by ID.
    */

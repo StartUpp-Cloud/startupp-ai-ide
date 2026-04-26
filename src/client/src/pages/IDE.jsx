@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useProjects } from '../contexts/ProjectContext';
 import ChatPanel from '../components/ChatPanel';
 import InternalConsole from '../components/InternalConsole';
@@ -86,8 +86,15 @@ export default function IDE() {
   // Container repos state
   const [containerRepos, setContainerRepos] = useState([]);
 
-  // Unread session counts per project: { projectId: count }
-  const [unreadCounts, setUnreadCounts] = useState({});
+  // Unread session IDs per project. Counts are derived so duplicate events stay idempotent.
+  const [unreadSessions, setUnreadSessions] = useState({});
+  const unreadCounts = useMemo(() => {
+    const counts = {};
+    for (const [projectId, sessionIds] of Object.entries(unreadSessions)) {
+      if (sessionIds.length > 0) counts[projectId] = sessionIds.length;
+    }
+    return counts;
+  }, [unreadSessions]);
 
   // Active chat session ID (exposed by ChatPanel for InternalConsole sharing)
   const [activeChatSessionId, setActiveChatSessionId] = useState(null);
@@ -218,12 +225,38 @@ export default function IDE() {
     const fetchUnreadCounts = () => {
       fetch('/api/unread-counts')
         .then(r => r.ok ? r.json() : { unread: {} })
-        .then(data => setUnreadCounts(data.unread || {}))
+        .then(data => {
+          if (data.sessions) {
+            setUnreadSessions(data.sessions || {});
+            return;
+          }
+
+          const fallback = {};
+          for (const [projectId, count] of Object.entries(data.unread || {})) {
+            fallback[projectId] = Array.from({ length: count }, (_, i) => `unknown-${i}`);
+          }
+          setUnreadSessions(fallback);
+        })
         .catch(() => {});
     };
     fetchUnreadCounts();
     const interval = setInterval(fetchUnreadCounts, 30000); // Refresh every 30s
     return () => clearInterval(interval);
+  }, []);
+
+  const handleUnreadChange = useCallback((projectId, sessionId, hasUnread) => {
+    if (!projectId || !sessionId) return;
+
+    setUnreadSessions(prev => {
+      const current = new Set(prev[projectId] || []);
+      if (hasUnread) current.add(sessionId);
+      else current.delete(sessionId);
+
+      const next = { ...prev };
+      if (current.size > 0) next[projectId] = Array.from(current);
+      else delete next[projectId];
+      return next;
+    });
   }, []);
 
   // Handle unread WebSocket events
@@ -235,25 +268,14 @@ export default function IDE() {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'session-unread') {
-          setUnreadCounts(prev => ({
-            ...prev,
-            [data.projectId]: (prev[data.projectId] || 0) + (data.hasUnread ? 1 : -1),
-          }));
+          handleUnreadChange(data.projectId, data.sessionId, data.hasUnread);
         }
       } catch {}
     };
 
     ws.addEventListener('message', handleMessage);
     return () => ws.removeEventListener('message', handleMessage);
-  }, [chatWsRef.current]);
-
-  // Clear unread count when viewing a project's session
-  const markProjectRead = useCallback((projectId) => {
-    setUnreadCounts(prev => {
-      const { [projectId]: _, ...rest } = prev;
-      return rest;
-    });
-  }, []);
+  }, [chatWsRef.current, handleUnreadChange]);
 
   // ── Notification helpers ──
 
@@ -388,7 +410,6 @@ export default function IDE() {
                   selectedProjectId={selectedProjectId}
                   onSelectProject={(id) => {
                     setSelectedProjectId(id);
-                    if (id) markProjectRead(id);
                   }}
                   onProjectChanged={() => {
                     if (selectedProjectId) loadProject(selectedProjectId);
@@ -511,6 +532,7 @@ export default function IDE() {
                   tool={selectedTool}
                   isActive={projectId === selectedProjectId}
                   onActiveSessionChange={projectId === selectedProjectId ? setActiveChatSessionId : undefined}
+                  onUnreadChange={handleUnreadChange}
                 />
               </div>
             ))}
