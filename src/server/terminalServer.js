@@ -880,6 +880,7 @@ class TerminalServer {
           tool: assistantSettings.tool,
           model: assistantSettings.model,
           effort: assistantSettings.effort,
+          skipUnread: true,
           broadcastFn: (data) => {
             this.broadcastToChatSession(chatSessionId, data);
             this.broadcast(data);
@@ -1753,6 +1754,7 @@ class TerminalServer {
         tool: assistantSettings.tool,
         model: assistantSettings.model,
         effort: assistantSettings.effort,
+        skipUnread: true,
         broadcastFn: (msg) => {
           this.broadcastToChatSession(chatSessionId, msg);
           this.broadcast(msg);
@@ -1822,6 +1824,7 @@ class TerminalServer {
         tool: assistantSettings.tool,
         model: assistantSettings.model,
         effort: assistantSettings.effort,
+        skipUnread: true,
         broadcastFn: (msg) => {
           this.broadcastToChatSession(chatSessionId, msg);
           this.broadcast(msg);

@@ -394,6 +394,7 @@ function ChatSessionContent({
 
   const markCurrentSessionRead = useCallback(() => {
     if (!projectId || !sessionId) return;
+    console.log('[unread] markCurrentSessionRead', { projectId, sessionId });
     fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}/read`, { method: 'POST' }).catch(() => {});
     onSessionUpdate?.(sessionId, { hasUnread: false });
     onUnreadChange?.(projectId, sessionId, false);
@@ -598,6 +599,7 @@ function ChatSessionContent({
 
         case 'session-unread':
           if (msg.projectId === projectId && msg.sessionId === sessionId) {
+            console.log('[unread] session-unread received', { projectId, sessionId, hasUnread: msg.hasUnread, isVisible });
             if (msg.hasUnread && isVisible) {
               markCurrentSessionRead();
             } else {
@@ -1050,7 +1052,7 @@ function ChatSessionContent({
  * Main ChatPanel - manages sessions/tabs and renders all open sessions.
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
-export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange }) {
+export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead }) {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -1072,6 +1074,16 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   useEffect(() => {
     if (isActive) setProjectSwitchKey(k => k + 1);
   }, [isActive]);
+
+  // Clear project-level unread badge when this project becomes active via non-click paths
+  const prevIsActiveRef = useRef(isActive);
+  useEffect(() => {
+    const wasActive = prevIsActiveRef.current;
+    prevIsActiveRef.current = isActive;
+    if (isActive && !wasActive && projectId) {
+      onProjectRead?.(projectId);
+    }
+  }, [isActive, projectId, onProjectRead]);
 
   // Notify parent of active session changes (used by InternalConsole sharing)
   useEffect(() => {

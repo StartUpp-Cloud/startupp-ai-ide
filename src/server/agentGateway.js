@@ -50,24 +50,25 @@ class AgentGateway extends EventEmitter {
     model = null,
     effort = null,
     broadcastFn,
+    skipUnread = false,
   }) {
     const existing = this._running.get(sessionId);
     if (existing && existing.queue) {
       existing.queue = existing.queue.then(() => {
         if (existing.aborted) return null;
-        return this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn });
+        return this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn, skipUnread });
       });
       return existing.queue;
     }
 
     this._running.set(sessionId, { aborted: false, startedAt: Date.now(), queue: null });
-    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn });
+    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn, skipUnread });
     const entry = this._running.get(sessionId);
     if (entry) entry.queue = promise;
     return promise;
   }
 
-  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, model, effort, broadcastFn }) {
+  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, model, effort, broadcastFn, skipUnread = false }) {
     const ctx = this._running.get(sessionId) || { aborted: false, queue: null };
     ctx.startedAt = Date.now();
     this._running.set(sessionId, ctx);
@@ -108,19 +109,19 @@ class AgentGateway extends EventEmitter {
 
       if (mode === 'plan') {
         // Plan mode: multi-loop review (plan → critic → optional 3rd pass)
-        await this._executePlanWithReview(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx);
+        await this._executePlanWithReview(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, skipUnread);
       } else if (isOllamaAssistant) {
         // Ollama assistant always uses the IDE-side orchestrator + local Ollama CLI.
         // Do not smart-route Ollama-selected sessions through cloud/capable providers.
         this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent');
+        await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
       } else if (isCapable) {
         // Agent mode + capable LLM: smart routing
-        await this._smartRoute(projectId, sessionId, routedContent, mode, tool, assistantSettings, broadcastFn, ctx);
+        await this._smartRoute(projectId, sessionId, routedContent, mode, tool, assistantSettings, broadcastFn, ctx, skipUnread);
       } else {
         // Agent mode + Ollama: everything goes to the CLI tool
         this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent');
+        await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
       }
     } catch (error) {
       this._addErrorMessage(projectId, sessionId, `Error: ${error.message}`, broadcastFn);
@@ -254,7 +255,7 @@ class AgentGateway extends EventEmitter {
 
   // ── Smart routing (capable local LLM) ──
 
-  async _smartRoute(projectId, sessionId, content, mode, tool, assistantSettings, broadcastFn, ctx) {
+  async _smartRoute(projectId, sessionId, content, mode, tool, assistantSettings, broadcastFn, ctx, skipUnread = false) {
     // Build rich context for the local LLM
     const context = this._buildContext(projectId, sessionId, content);
 
@@ -300,35 +301,35 @@ RULES:
 
       if (firstLine.startsWith('ANSWER')) {
         this._addProgressMessage(projectId, sessionId, `Analyzing your question — I can answer this directly.`, broadcastFn, null, { transient: true });
-        this._addAgentMessage(projectId, sessionId, body || response, broadcastFn, { tool: 'local' });
+        this._addAgentMessage(projectId, sessionId, body || response, broadcastFn, { tool: 'local' }, skipUnread);
 
       } else if (firstLine.startsWith('COMMAND')) {
         const cmd = body;
         const looksValid = cmd && !cmd.includes('[') && !cmd.includes('NEEDS') && cmd.length < 200;
         if (looksValid) {
           this._addProgressMessage(projectId, sessionId, `Running shell command: \`${cmd}\``, broadcastFn, null, { transient: true });
-          await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx);
+          await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx, skipUnread);
         } else {
           this._addProgressMessage(projectId, sessionId, `This needs ${tool} — delegating your request...`, broadcastFn, null, { transient: true });
-          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode);
+          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
         }
 
       } else if (firstLine.startsWith('DELEGATE')) {
         this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode);
+        await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
 
       } else {
         const isGarbage = response.includes('NEEDS_USER') || response.includes('[') || response.length < 10;
         if (!isGarbage && response.length < 500 && !response.includes('```')) {
-          this._addAgentMessage(projectId, sessionId, response, broadcastFn, { tool: 'local' });
+          this._addAgentMessage(projectId, sessionId, response, broadcastFn, { tool: 'local' }, skipUnread);
         } else {
           this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
-          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode);
+          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
         }
       }
     } catch (err) {
       this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
-      await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode);
+      await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
     }
   }
 
@@ -374,7 +375,7 @@ RULES:
 
   // ── Run a shell command and format the result ──
 
-  async _runShellCommand(projectId, sessionId, cmd, originalQuestion, broadcastFn, ctx) {
+  async _runShellCommand(projectId, sessionId, cmd, originalQuestion, broadcastFn, ctx, skipUnread = false) {
     let shellSessionId;
     try {
       const sess = await agentShellPool.getSession(projectId, sessionId || 'shell');
@@ -411,9 +412,9 @@ RULES:
         `The user asked: "${originalQuestion}"\nCommand run: ${cmd}\nOutput:\n${display.slice(-3000)}\n\nGive a clean, helpful answer based on this output. Use markdown.`,
         { maxTokens: 500, temperature: 0.1 }
       );
-      this._addAgentMessage(projectId, sessionId, result.response, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) });
+      this._addAgentMessage(projectId, sessionId, result.response, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) }, skipUnread);
     } catch {
-      this._addAgentMessage(projectId, sessionId, `\`\`\`\n${display}\n\`\`\``, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) });
+      this._addAgentMessage(projectId, sessionId, `\`\`\`\n${display}\n\`\`\``, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) }, skipUnread);
     }
   }
 
@@ -429,7 +430,7 @@ RULES:
    * - JOB PERSISTENCE: Full operation tracked via JobManager for reliability
    * - STREAMING PERSISTENCE: Saves response chunks to disk as they arrive
    */
-  async _sendToCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, mode = 'agent') {
+  async _sendToCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, mode = 'agent', skipUnread = false) {
     const MAX_ATTEMPTS = 3;
 
     // Create a streaming message placeholder BEFORE starting
@@ -565,15 +566,17 @@ RULES:
             },
           });
 
-          // Mark session as unread and broadcast
-          const changed = chatStore.markSessionUnread(projectId, chatSessionId);
-          if (changed) {
-            broadcastFn({
-              type: 'session-unread',
-              projectId,
-              sessionId: chatSessionId,
-              hasUnread: true,
-            });
+          // Mark session as unread and broadcast (only for user-initiated tasks)
+          if (!skipUnread) {
+            const changed = chatStore.markSessionUnread(projectId, chatSessionId);
+            if (changed) {
+              broadcastFn({
+                type: 'session-unread',
+                projectId,
+                sessionId: chatSessionId,
+                hasUnread: true,
+              });
+            }
           }
 
           this._persistContext(projectId, chatSessionId, message, finalContent);
@@ -637,14 +640,16 @@ RULES:
         });
 
         // Mark session as unread even for failures (user needs to see error)
-        const changed = chatStore.markSessionUnread(projectId, chatSessionId);
-        if (changed) {
-          broadcastFn({
-            type: 'session-unread',
-            projectId,
-            sessionId: chatSessionId,
-            hasUnread: true,
-          });
+        if (!skipUnread) {
+          const changed = chatStore.markSessionUnread(projectId, chatSessionId);
+          if (changed) {
+            broadcastFn({
+              type: 'session-unread',
+              projectId,
+              sessionId: chatSessionId,
+              hasUnread: true,
+            });
+          }
         }
         return;
       }
@@ -1655,7 +1660,7 @@ Reply with exactly one word: YES or NO.`,
    * Progress messages keep the user informed throughout. Only the final
    * synthesised plan is shown as the agent response.
    */
-  async _executePlanWithReview(projectId, sessionId, userMessage, tool, assistantSettings, broadcastFn, ctx) {
+  async _executePlanWithReview(projectId, sessionId, userMessage, tool, assistantSettings, broadcastFn, ctx, skipUnread = false) {
     // Create a streaming placeholder visible to the user from the start
     const streamingMsg = chatStore.createStreamingMessage({
       projectId,
@@ -1815,9 +1820,11 @@ Reply with exactly one word: YES or NO.`,
         },
       });
 
-      const changed = chatStore.markSessionUnread(projectId, sessionId);
-      if (changed) {
-        broadcastFn({ type: 'session-unread', projectId, sessionId, hasUnread: true });
+      if (!skipUnread) {
+        const changed = chatStore.markSessionUnread(projectId, sessionId);
+        if (changed) {
+          broadcastFn({ type: 'session-unread', projectId, sessionId, hasUnread: true });
+        }
       }
 
       this._persistContext(projectId, sessionId, userMessage, finalText);
@@ -2495,7 +2502,7 @@ NEEDS_USER`,
       .replace(/\r/g, '');
   }
 
-  _addAgentMessage(projectId, sessionId, content, broadcastFn, metadata = null) {
+  _addAgentMessage(projectId, sessionId, content, broadcastFn, metadata = null, skipUnread = false) {
     // sessionId is now passed explicitly to avoid concurrency issues
 
     // Generate suggested follow-ups for capable LLMs (async, don't block)
@@ -2516,15 +2523,17 @@ NEEDS_USER`,
     const msg = chatStore.addMessage({ projectId, sessionId, role: 'agent', content, metadata });
     broadcastFn({ type: 'chat-message', message: msg });
 
-    // Mark session as unread and broadcast
-    const changed = chatStore.markSessionUnread(projectId, sessionId);
-    if (changed) {
-      broadcastFn({
-        type: 'session-unread',
-        projectId,
-        sessionId,
-        hasUnread: true,
-      });
+    // Mark session as unread and broadcast (only for user-initiated tasks)
+    if (!skipUnread) {
+      const changed = chatStore.markSessionUnread(projectId, sessionId);
+      if (changed) {
+        broadcastFn({
+          type: 'session-unread',
+          projectId,
+          sessionId,
+          hasUnread: true,
+        });
+      }
     }
   }
 

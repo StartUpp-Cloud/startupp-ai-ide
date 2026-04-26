@@ -49,6 +49,7 @@ export default function ProjectManagerPanel({
   selectedProjectId,
   onSelectProject,
   onProjectChanged,
+  onProjectRead,
   sessions = [],
   activeSessionId = null,
   unreadCounts = {},
@@ -399,11 +400,12 @@ export default function ProjectManagerPanel({
             <div
               role="button"
               tabIndex={0}
-              onClick={() => onSelectProject(project.id)}
+              onClick={() => { onSelectProject(project.id); onProjectRead?.(project.id); }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   onSelectProject(project.id);
+                  onProjectRead?.(project.id);
                 }
               }}
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-surface-750 transition-colors cursor-pointer select-none ${
@@ -493,8 +495,8 @@ export default function ProjectManagerPanel({
                             key={s.id}
                             onClick={(e) => {
                               e.stopPropagation();
-                              // Select this project and switch to this session
                               onSelectProject(project.id);
+                              onProjectRead?.(project.id);
                               if (window.switchMainSession && s.role === 'main') {
                                 window.switchMainSession(s.id);
                               }

@@ -261,6 +261,7 @@ export default function IDE() {
 
   const handleUnreadChange = useCallback((projectId, sessionId, hasUnread) => {
     if (!projectId || !sessionId) return;
+    console.log('[unread] handleUnreadChange', { projectId, sessionId, hasUnread });
 
     setUnreadSessions(prev => {
       const current = new Set(prev[projectId] || []);
@@ -270,6 +271,20 @@ export default function IDE() {
       const next = { ...prev };
       if (current.size > 0) next[projectId] = Array.from(current);
       else delete next[projectId];
+      console.log('[unread] unreadSessions updated', next);
+      return next;
+    });
+  }, []);
+
+  // Clear all unread for a project when the user opens it
+  const handleProjectRead = useCallback((projectId) => {
+    if (!projectId) return;
+    console.log('[unread] handleProjectRead - clearing all for', projectId);
+    fetch(`/api/projects/${projectId}/chat/read-all`, { method: 'POST' }).catch(() => {});
+    setUnreadSessions(prev => {
+      if (!prev[projectId]) return prev;
+      const next = { ...prev };
+      delete next[projectId];
       return next;
     });
   }, []);
@@ -429,6 +444,7 @@ export default function IDE() {
                   onProjectChanged={() => {
                     if (selectedProjectId) loadProject(selectedProjectId);
                   }}
+                  onProjectRead={handleProjectRead}
                   unreadCounts={unreadCounts}
                 />
               </div>
@@ -548,6 +564,7 @@ export default function IDE() {
                   isActive={projectId === selectedProjectId}
                   onActiveSessionChange={projectId === selectedProjectId ? setActiveChatSessionId : undefined}
                   onUnreadChange={handleUnreadChange}
+                  onProjectRead={handleProjectRead}
                 />
               </div>
             ))}
