@@ -1673,7 +1673,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               mode={mode}
               tool={tool}
               session={sessions.find(s => s.id === tabId)}
-              isVisible={visibleTabIds.includes(tabId)}
+              isVisible={isActive && visibleTabIds.includes(tabId)}
               projectSwitchKey={projectSwitchKey}
               onSessionUpdate={handleSessionUpdate}
               onUnreadChange={onUnreadChange}
