@@ -5,8 +5,8 @@
 // Ollama (weak): Everything goes to Claude/Copilot, local LLM only formats output.
 //
 // GitHub/OpenAI/DeepSeek (capable): Local LLM acts as orchestrator.
-//   - Questions it can answer → answers directly with full context
-//   - Coding tasks / architecture → routes to Claude with --resume
+//   - Only very general questions → answers directly
+//   - Anything needing repository/code verification → routes to Claude with --resume
 //   - Shell commands → generates and executes them
 //
 // Each chat session gets its own shell PTY — multiple sessions run in parallel.
@@ -272,7 +272,7 @@ RESPOND with exactly ONE of these formats (first line must be the keyword):
 
 ANSWER:
 <your direct answer in markdown>
-(Use this for: general questions, explanations, how-to, status inquiries, advice, conversation)
+(Use this ONLY for very general, codebase-independent knowledge or conversation)
 
 COMMAND:
 <shell command to run>
@@ -283,7 +283,9 @@ DELEGATE:
 (Use this for: code changes, file edits, architecture work, debugging, complex analysis that needs codebase access, planning features)
 
 RULES:
-- ANSWER directly if you can answer from context (project info, conversation history, general knowledge)
+- ANSWER directly ONLY for broad general knowledge, conversational replies, or generic conceptual explanations that do not depend on this repository, runtime state, logs, configuration, dependencies, files, or prior implementation details.
+- NEVER answer directly if the user asks about this app/project/codebase, existing behavior, a bug, an error, a warning, a stack trace, terminal output, tests, build results, implementation details, architecture in this repo, files, settings, config, dependencies, commits, branches, Docker/container state, or whether something is possible in the current code. DELEGATE those.
+- If an answer would require reading code, checking files, running commands, verifying behavior, inspecting logs/output, or making changes, DELEGATE.
 - COMMAND only for simple info-gathering commands: git status, ls, cat, grep, df, ps, pwd, which, node -v
 - DELEGATE to ${tool} for EVERYTHING else: deployments, builds, tests, code changes, installs, fixes, debugging, architecture, planning, npm/pnpm scripts, any multi-step task
 - When in doubt, ALWAYS DELEGATE — ${tool} has full codebase access and can execute complex tasks safely
@@ -300,8 +302,13 @@ RULES:
       const body = response.slice(response.indexOf('\n') + 1).trim();
 
       if (firstLine.startsWith('ANSWER')) {
-        this._addProgressMessage(projectId, sessionId, `Analyzing your question — I can answer this directly.`, broadcastFn, null, { transient: true });
-        this._addAgentMessage(projectId, sessionId, body || response, broadcastFn, { tool: 'local' }, skipUnread);
+        if (this._canAnswerDirectly(content)) {
+          this._addProgressMessage(projectId, sessionId, `Analyzing your question — I can answer this directly.`, broadcastFn, null, { transient: true });
+          this._addAgentMessage(projectId, sessionId, body || response, broadcastFn, { tool: 'local' }, skipUnread);
+        } else {
+          this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn, null, { transient: true });
+          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
+        }
 
       } else if (firstLine.startsWith('COMMAND')) {
         const cmd = body;
@@ -320,7 +327,7 @@ RULES:
 
       } else {
         const isGarbage = response.includes('NEEDS_USER') || response.includes('[') || response.length < 10;
-        if (!isGarbage && response.length < 500 && !response.includes('```')) {
+        if (!isGarbage && this._canAnswerDirectly(content) && response.length < 500 && !response.includes('```')) {
           this._addAgentMessage(projectId, sessionId, response, broadcastFn, { tool: 'local' }, skipUnread);
         } else {
           this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
@@ -331,6 +338,29 @@ RULES:
       this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
       await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
     }
+  }
+
+  _canAnswerDirectly(content) {
+    const text = String(content || '').toLowerCase();
+    if (!text.trim()) return false;
+
+    const requiresVerification = [
+      /\b(this|the|our|my)\s+(app|project|repo|repository|codebase|code|implementation|feature|component|page|api|endpoint|route|server|client|ui|database|container|docker|settings?)\b/,
+      /\b(error|bug|warning|failed|failure|broken|not working|doesn't work|stack trace|console|terminal|log|output)\b/,
+      /\b(test|build|lint|typecheck|run|execute|verify|check|inspect|debug|fix|change|update|implement|add|remove|refactor|review)\b/,
+      /\b(file|folder|directory|path|config|package|dependency|branch|commit|diff|pr|pull request)\b/,
+      /\b(can we|could we|should we|is there|do we|does it|why is|how is|where is|what is wrong)\b/,
+      /[`/][\w./-]+\b/,
+    ];
+
+    if (requiresVerification.some(pattern => pattern.test(text))) return false;
+
+    const generalKnowledge = [
+      /^(hi|hello|hey|thanks|thank you)\b/,
+      /\b(what is|explain|how does|how do i|what are|difference between|best practices for)\b/,
+    ];
+
+    return generalKnowledge.some(pattern => pattern.test(text));
   }
 
   // ── Context builder for smart routing ──
@@ -1993,28 +2023,41 @@ Reply with exactly one word: YES or NO.`,
    */
   async _smartAutoConfirm(text, projectId, sessionId, broadcastFn) {
     const lastBit = text.slice(-500);
+    const rules = this._getProjectRules(projectId);
+    const profile = this._getProfileContext();
     try {
       const result = await llmProvider.generateResponse(
-        `A coding AI tool is asking for input. Decide what to respond.
+        `A coding AI tool is asking for input during an end-to-end implementation. Decide what to respond.
 
-Prompt: "${lastBit}"
+Goal: keep the implementation moving end-to-end when the answer is safely derivable from project rules, user profile, or the user's current request.
 
-Rules:
+${profile ? `USER PROFILE:
+${profile}
+
+` : ''}${rules ? `PROJECT RULES:
+${rules}
+
+` : ''}Prompt: "${lastBit}"
+
+Decision rules:
 - If it's asking for approval/confirmation of a safe operation (file edit, command, install): respond YES
 - If it's asking for approval of something destructive (delete, force push, drop table): respond NEEDS_USER
-- If it's asking a question that needs the user's specific input (which file, what name): respond NEEDS_USER
+- If it's asking an implementation follow-up whose answer is clearly implied by the project rules, user profile, or current request: respond YES with the answer to type
+- If it's asking a question that needs the user's subjective choice or missing product decision (which feature name, exact copy, which option to choose): respond NEEDS_USER
+- If answering would require inspecting code, logs, runtime state, credentials, external systems, or making assumptions not present in the rules/context: respond NEEDS_USER
 - If it's asking to continue/proceed: respond YES
+- Prefer end-to-end implementation: do not interrupt the user for questions already answered by rules/context.
 
 Respond with EXACTLY one line:
-YES: <response to type> (e.g., "YES: y" or "YES: " for enter)
+YES: <response to type> (e.g., "YES: y", "YES: use TypeScript", or "YES: " for enter)
 NEEDS_USER`,
-        { maxTokens: 20, temperature: 0.1 }
+        { maxTokens: 80, temperature: 0.1 }
       );
 
       const response = result.response.trim();
       if (response.startsWith('YES:')) {
         const answer = response.slice(4).trim();
-        this._addProgressMessage(projectId, sessionId, `Auto-confirmed: "${answer || '(enter)'}"`, broadcastFn);
+        this._addProgressMessage(projectId, sessionId, `Answered coding-agent prompt from project context: "${answer || '(enter)'}"`, broadcastFn);
         return answer;
       }
       return null; // Needs user input
@@ -2083,21 +2126,26 @@ NEEDS_USER`,
         if (event.type === 'tool_use' || event.tool) {
           const toolName = event.tool || event.name || '';
           const input = typeof event.input === 'string' ? event.input : JSON.stringify(event.input || '');
+          if (!toolName && (!input || input === '{}')) {
+            return 'Working: coding assistant is using a tool...';
+          }
           if (toolName.toLowerCase().includes('bash') || toolName.toLowerCase().includes('shell')) {
-            return `Running: \`${input.slice(0, 80)}\``;
+            return input ? `Running: \`${input.slice(0, 80)}\`` : 'Running shell command...';
           }
           if (toolName.toLowerCase().includes('read') || toolName.toLowerCase().includes('file')) {
             const path = input.match(/["']?([^\s"']+\.\w+)["']?/)?.[1] || input.slice(0, 60);
-            return `Reading: \`${path}\``;
+            return path ? `Reading: \`${path}\`` : 'Reading project files...';
           }
           if (toolName.toLowerCase().includes('write') || toolName.toLowerCase().includes('edit')) {
             const path = input.match(/["']?([^\s"']+\.\w+)["']?/)?.[1] || input.slice(0, 60);
-            return `Editing: \`${path}\``;
+            return path ? `Editing: \`${path}\`` : 'Editing project files...';
           }
           if (toolName.toLowerCase().includes('glob') || toolName.toLowerCase().includes('grep') || toolName.toLowerCase().includes('search')) {
-            return `Searching: ${input.slice(0, 60)}`;
+            return input ? `Searching: ${input.slice(0, 60)}` : 'Searching the codebase...';
           }
-          return `Using ${toolName}: ${input.slice(0, 60)}`;
+          if (toolName && input && input !== '{}') return `Using ${toolName}: ${input.slice(0, 60)}`;
+          if (toolName) return `Using ${toolName}...`;
+          return 'Working: coding assistant is using a tool...';
         }
 
         // Assistant message — extract thinking or text content
