@@ -387,6 +387,22 @@ function ChatSessionContent({
     if (el) el.scrollTop = el.scrollHeight;
   }, []);
 
+  const scheduleScrollToBottom = useCallback(() => {
+    if (!isVisible) return undefined;
+
+    let rafId = null;
+    const timeoutId = setTimeout(scrollToBottom, 80);
+    rafId = requestAnimationFrame(() => {
+      scrollToBottom();
+      rafId = requestAnimationFrame(scrollToBottom);
+    });
+
+    return () => {
+      clearTimeout(timeoutId);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [isVisible, scrollToBottom]);
+
   const scrollToTop = useCallback(() => {
     const el = scrollContainerRef.current;
     if (el) el.scrollTop = 0;
@@ -664,29 +680,42 @@ function ChatSessionContent({
     const prevCount = prevMessageCountRef.current;
 
     if (isInitialLoadRef.current && currentCount > 0) {
-      scrollToBottom();
+      scheduleScrollToBottom();
       isInitialLoadRef.current = false;
     } else if (currentCount > prevCount && prevCount > 0) {
-      scrollToBottom();
+      scheduleScrollToBottom();
     }
 
     prevMessageCountRef.current = currentCount;
-  }, [messages, isVisible, scrollToBottom]);
+  }, [messages, isVisible, scheduleScrollToBottom]);
+
+  useEffect(() => {
+    if (!isVisible) return;
+    if (!streamingMessage && !agentBusy && !recoveryStatus.active) return;
+
+    return scheduleScrollToBottom();
+  }, [
+    isVisible,
+    streamingMessage?.id,
+    streamingMessage?.content,
+    agentBusy,
+    recoveryStatus.active,
+    recoveryStatus.message,
+    scheduleScrollToBottom,
+  ]);
 
   // Scroll to bottom when becoming visible
   useEffect(() => {
     if (isVisible) {
-      const timer = setTimeout(scrollToBottom, 50);
-      return () => clearTimeout(timer);
+      return scheduleScrollToBottom();
     }
-  }, [isVisible, scrollToBottom]);
+  }, [isVisible, scheduleScrollToBottom]);
 
   // Ensure visible sessions jump to latest when switching projects
   useEffect(() => {
     if (!isVisible) return;
-    const timer = setTimeout(scrollToBottom, 80);
-    return () => clearTimeout(timer);
-  }, [projectSwitchKey, isVisible, scrollToBottom]);
+    return scheduleScrollToBottom();
+  }, [projectSwitchKey, isVisible, scheduleScrollToBottom]);
 
   // Poll for new messages (runs even when hidden)
   useEffect(() => {
