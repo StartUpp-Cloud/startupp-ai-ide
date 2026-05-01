@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
+import InternalConsole from './InternalConsole';
 import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal } from 'lucide-react';
 import {
   CLI_TOOLS,
@@ -356,7 +357,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
 
       <div className="ml-auto text-[10px] text-surface-500 truncate">
         {channel === 'shell'
-          ? 'Shell proxy: commands and prompt responses run directly inside the project container'
+          ? 'Interactive shell: full terminal PTY inside the project container'
           : effectiveTool === 'ollama'
           ? 'IDE orchestrator enabled: workspace scan, retrieval, stack guidance, task planning'
           : getToolConfig(effectiveTool).context}
@@ -386,6 +387,7 @@ function ChatSessionContent({
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
   const [chatChannel, setChatChannel] = useState('assistant');
+  const [queuedShellCommand, setQueuedShellCommand] = useState(null);
   const [searchResults, setSearchResults] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
@@ -949,7 +951,7 @@ function ChatSessionContent({
       const text = String(command || '').trim();
       if (!text) return;
       setChatChannel('shell');
-      handleSend(text, [], { channel: 'shell' });
+      setQueuedShellCommand(text);
     };
 
     const handleRunInUtil = (event) => runShellCommand(event.detail?.command);
@@ -960,7 +962,7 @@ function ChatSessionContent({
       window.removeEventListener('run-in-util', handleRunInUtil);
       if (window.sendShellCommand === runShellCommand) delete window.sendShellCommand;
     };
-  }, [isVisible, handleSend]);
+  }, [isVisible]);
 
   const handleSearch = useCallback(async (query) => {
     if (!query || !projectId) { setSearchResults(null); return; }
@@ -1075,6 +1077,18 @@ function ChatSessionContent({
         onChannelChange={setChatChannel}
       />
 
+      {chatChannel === 'shell' ? (
+        <InternalConsole
+          projectId={projectId}
+          chatWsRef={wsRef}
+          activeChatSessionId={sessionId}
+          embedded
+          active={isVisible}
+          queuedCommand={queuedShellCommand}
+          onQueuedCommandHandled={() => setQueuedShellCommand(null)}
+        />
+      ) : (
+        <>
       {/* Messages */}
       <div ref={scrollContainerRef} onScroll={handleScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }} className="px-1 py-4">
         {loading ? (
@@ -1167,6 +1181,8 @@ function ChatSessionContent({
         busy={agentBusy}
         isVisible={isVisible}
       />
+        </>
+      )}
     </div>
   );
 }

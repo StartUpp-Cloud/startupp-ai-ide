@@ -1338,7 +1338,7 @@ class TerminalServer {
       return;
     }
 
-    const inputData = this.normalizeInputForInteractivePrompt(targetSession, data);
+    const inputData = data;
 
     // Write to PTY - returns false if session is terminated (don't error)
     const written = ptyManager.write(targetSession, inputData);
@@ -1385,11 +1385,8 @@ class TerminalServer {
 
     if (!defaultYesPrompt) return data;
 
-    // Some container/PTY stacks do not deliver raw single-key confirmation
-    // input to CLIs like `gh auth login`. For default-yes prompts, Enter is
-    // equivalent to Y and works in both raw and line-buffered modes.
     this.lastInteractivePrompt.delete(sessionId);
-    return data === 'N' || data === 'n' ? `${data}\r` : '\r';
+    return data;
   }
 
   rememberInteractivePrompt(sessionId, text) {

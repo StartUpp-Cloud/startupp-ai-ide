@@ -18,9 +18,9 @@ const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
 const DEFAULT_HEIGHT = 180;
 
-const QUICK_COMMANDS = [
-  { label: 'Quick commands...', command: '' },
-  { label: 'Login to GitHub', command: 'gh auth login --hostname github.com --git-protocol https --web' },
+export const QUICK_COMMANDS = [
+  { label: 'GitHub Login', command: 'gh auth login --hostname github.com --git-protocol https --web' },
+  { label: 'GitHub Wizard', command: 'gh auth login' },
   { label: 'GitHub auth status', command: 'gh auth status' },
   { label: 'Install Claude Code', command: 'npm install -g @anthropic-ai/claude-code' },
   { label: 'Install OpenCode', command: 'npm install -g opencode-ai' },
@@ -64,7 +64,15 @@ function getStoredHeight() {
  * Opens its own WebSocket + PTY session independently from the chat system.
  * Includes visibility-aware reconnection for stability and a drag-to-resize handle.
  */
-export default function InternalConsole({ projectId, chatWsRef, activeChatSessionId }) {
+export default function InternalConsole({
+  projectId,
+  chatWsRef,
+  activeChatSessionId,
+  embedded = false,
+  active = true,
+  queuedCommand = null,
+  onQueuedCommandHandled,
+}) {
   const [open, setOpen] = useState(true);
   const [connected, setConnected] = useState(false);
   const [consoleHeight, setConsoleHeight] = useState(getStoredHeight);
@@ -81,6 +89,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
   const mountedRef = useRef(true);
   const forceNewSessionRef = useRef(false);
   const promptResponseFallbackRef = useRef(null);
+  const pendingCommandsRef = useRef([]);
 
   /**
    * Capture the visible terminal buffer text (last N lines).
@@ -152,6 +161,47 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
     setSessionResetKey((key) => key + 1);
   }, [projectId, restarting]);
 
+  const runCommand = useCallback((command) => {
+    const text = String(command || '').trim();
+    if (!text) return;
+
+    if (!embedded) setOpen(true);
+
+    if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: `${text}\n` }));
+      xtermRef.current?.focus();
+      return;
+    }
+
+    pendingCommandsRef.current.push(text);
+  }, [embedded]);
+
+  const flushPendingCommands = useCallback(() => {
+    if (!sessionIdRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    const pending = pendingCommandsRef.current.splice(0);
+    for (const command of pending) {
+      wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: `${command}\n` }));
+    }
+    if (pending.length > 0) xtermRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!queuedCommand) return;
+    runCommand(queuedCommand);
+    onQueuedCommandHandled?.();
+  }, [queuedCommand, runCommand, onQueuedCommandHandled]);
+
+  useEffect(() => {
+    if (!active) return;
+
+    const runShellCommand = (command) => runCommand(command);
+    window.sendShellCommand = runShellCommand;
+
+    return () => {
+      if (window.sendShellCommand === runShellCommand) delete window.sendShellCommand;
+    };
+  }, [active, runCommand]);
+
   const sendPromptResponse = useCallback((response, action = null) => {
     const targetSessionId = action?.sessionId || sessionIdRef.current;
     const ws = wsRef.current;
@@ -171,8 +221,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
       promptResponseFallbackRef.current = null;
       if (wsRef.current?.readyState !== WebSocket.OPEN) return;
 
-      const defaultYes = /(?:\(|\[)Y\/n(?:\)|\])\s*$/i.test(promptText);
-      const data = response === 'y' && defaultYes ? '\r' : `${response}\r`;
+      const data = `${response}\r`;
       wsRef.current.send(JSON.stringify({ type: 'input', sessionId: targetSessionId, data }));
     }, 250);
 
@@ -215,7 +264,8 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
 
   // Create xterm + WS + session when opened
   useEffect(() => {
-    if (!open || !projectId || !termRef.current) return;
+    const shouldOpen = embedded || open;
+    if (!shouldOpen || !active || !projectId || !termRef.current) return;
 
     // Avoid re-init if same project and already connected
     if (xtermRef.current && prevProjectIdRef.current === projectId && wsRef.current?.readyState === WebSocket.OPEN) {
@@ -240,7 +290,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
     const fit = new FitAddon();
     xterm.loadAddon(fit);
     xterm.open(termRef.current);
-    fit.fit();
+    setTimeout(() => { try { fit.fit(); } catch {} }, 0);
     xtermRef.current = xterm;
     fitRef.current = fit;
 
@@ -309,6 +359,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
           setRestarting(false);
           // Attach
           ws.send(JSON.stringify({ type: 'attach', sessionId: msg.sessionId }));
+          setTimeout(flushPendingCommands, 50);
         }
 
         if (msg.type === 'error') {
@@ -461,7 +512,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
       wsRef.current = null;
       sessionIdRef.current = null;
     };
-  }, [open, projectId, sessionResetKey]);
+  }, [open, embedded, active, projectId, sessionResetKey, flushPendingCommands]);
 
   // Refit xterm when height changes (after drag)
   useEffect(() => {
@@ -469,6 +520,84 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
       try { fitRef.current.fit(); } catch {}
     }
   }, [consoleHeight, open]);
+
+  useEffect(() => {
+    if (!active || !fitRef.current) return;
+    const id = requestAnimationFrame(() => {
+      try { fitRef.current?.fit(); } catch {}
+    });
+    return () => cancelAnimationFrame(id);
+  }, [active, embedded]);
+
+  const promptBar = promptAction && (
+    <div className="flex items-center gap-2 px-2 py-1 bg-amber-500/10 border-t border-amber-500/20 text-[11px] text-amber-100">
+      <span className="text-amber-300 font-medium">Terminal needs input</span>
+      <span className="truncate text-amber-100/80 flex-1" title={promptAction.text}>{promptAction.text}</span>
+      <button
+        onClick={() => sendPromptResponse('y', promptAction)}
+        className="px-2 py-0.5 rounded bg-green-600/80 hover:bg-green-600 text-white font-medium transition-colors"
+      >
+        Yes
+      </button>
+      <button
+        onClick={() => sendPromptResponse('n', promptAction)}
+        className="px-2 py-0.5 rounded bg-red-600/80 hover:bg-red-600 text-white font-medium transition-colors"
+      >
+        No
+      </button>
+      <button
+        onClick={() => setPromptAction(null)}
+        className="px-1.5 py-0.5 rounded text-amber-200/70 hover:text-amber-100 hover:bg-amber-500/10 transition-colors"
+      >
+        Dismiss
+      </button>
+    </div>
+  );
+
+  if (embedded) {
+    return (
+      <div className="flex flex-col h-full min-h-0 bg-[#0d1117]">
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-surface-700 bg-surface-850/80 text-xs">
+          <TerminalIcon size={14} className="text-amber-400" />
+          <span className="font-medium text-surface-200">Shell Console</span>
+          <div
+            className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}
+            title={connected ? 'Connected' : restarting ? 'Restarting...' : 'Connecting...'}
+          />
+          <span className="text-[10px] text-surface-500 truncate">Interactive PTY inside the selected project container</span>
+          <span className="flex-1" />
+          {connected && activeChatSessionId && (
+            <button
+              onClick={handleShareToAgent}
+              disabled={shareStatus === 'sending'}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-colors ${
+                shareStatus === 'sent'
+                  ? 'text-green-400 bg-green-500/10'
+                  : 'text-surface-400 hover:text-primary-300 hover:bg-surface-800'
+              }`}
+              title="Share shell output with the AI agent"
+            >
+              <Share2 size={10} />
+              {shareStatus === 'sent' ? 'Shared' : 'Share'}
+            </button>
+          )}
+          <button
+            onClick={handleRestartConsole}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-surface-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors"
+            title="Terminate this shell and start a fresh session"
+          >
+            <RotateCcw size={10} className={restarting ? 'animate-spin' : ''} />
+            {restarting ? 'Restarting' : 'New session'}
+          </button>
+        </div>
+
+        <QuickCommandButtons onRun={runCommand} />
+        <div ref={termRef} className="flex-1 min-h-0 bg-[#0d1117] p-2" />
+        {promptBar}
+        <CommandBuilder onRun={runCommand} />
+      </div>
+    );
+  }
 
   return (
     <div className="border-t border-surface-700 flex-shrink-0">
@@ -537,41 +666,30 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
           {/* Terminal canvas */}
           <div ref={termRef} style={{ height: consoleHeight }} className="bg-[#0d1117]" />
 
-          {promptAction && (
-            <div className="flex items-center gap-2 px-2 py-1 bg-amber-500/10 border-t border-amber-500/20 text-[11px] text-amber-100">
-              <span className="text-amber-300 font-medium">Terminal needs input</span>
-              <span className="truncate text-amber-100/80 flex-1" title={promptAction.text}>{promptAction.text}</span>
-              <button
-                onClick={() => sendPromptResponse('y', promptAction)}
-                className="px-2 py-0.5 rounded bg-green-600/80 hover:bg-green-600 text-white font-medium transition-colors"
-              >
-                Yes
-              </button>
-              <button
-                onClick={() => sendPromptResponse('n', promptAction)}
-                className="px-2 py-0.5 rounded bg-red-600/80 hover:bg-red-600 text-white font-medium transition-colors"
-              >
-                No
-              </button>
-              <button
-                onClick={() => setPromptAction(null)}
-                className="px-1.5 py-0.5 rounded text-amber-200/70 hover:text-amber-100 hover:bg-amber-500/10 transition-colors"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
+          {promptBar}
 
           {/* AI command builder */}
-          <CommandBuilder
-            onRun={(cmd) => {
-              if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: cmd + '\n' }));
-              }
-            }}
-          />
+          <CommandBuilder onRun={runCommand} />
         </>
       )}
+    </div>
+  );
+}
+
+function QuickCommandButtons({ onRun }) {
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-2 border-b border-surface-700/50 bg-surface-900/70 overflow-x-auto">
+      <span className="text-[10px] uppercase tracking-wide text-surface-500 flex-shrink-0">Quick</span>
+      {QUICK_COMMANDS.map((item) => (
+        <button
+          key={item.label}
+          onClick={() => onRun(item.command)}
+          className="px-2 py-1 rounded border border-surface-700 bg-surface-800 text-[10px] text-surface-300 hover:text-amber-200 hover:border-amber-500/40 hover:bg-amber-500/10 transition-colors whitespace-nowrap"
+          title={item.command}
+        >
+          {item.label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -630,6 +748,7 @@ function CommandBuilder({ onRun }) {
         className="max-w-[170px] bg-surface-800 border border-surface-700 rounded px-1.5 py-0.5 text-[10px] text-surface-300 outline-none focus:border-primary-500/50"
         title="Run a common setup command"
       >
+        <option value="">Quick commands...</option>
         {QUICK_COMMANDS.map((item) => (
           <option key={item.label} value={item.command}>{item.label}</option>
         ))}
