@@ -40,7 +40,17 @@ setw -g xterm-keys on\n\
 set -g set-clipboard on\n\
 ' > /home/dev/.tmux.conf && chown dev:dev /home/dev/.tmux.conf
 
+ENV NPM_CONFIG_PREFIX=/home/dev/.npm-global
+ENV PATH="/home/dev/.npm-global/bin:${PATH}"
+
 USER dev
+
+WORKDIR /home/dev
+
+# Configure non-root npm global installs for interactive project containers.
+RUN mkdir -p "$NPM_CONFIG_PREFIX" \
+    && npm config set prefix "$NPM_CONFIG_PREFIX"
+
 WORKDIR /workspace
 
 # Keep container running

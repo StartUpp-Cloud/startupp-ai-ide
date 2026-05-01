@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal, Share2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal, Share2, RotateCcw } from 'lucide-react';
 import { stripTerminalQueryResponses } from '../utils/terminalControlFilter';
 import '@xterm/xterm/css/xterm.css';
 
@@ -36,6 +36,8 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
   const [connected, setConnected] = useState(false);
   const [consoleHeight, setConsoleHeight] = useState(getStoredHeight);
   const [shareStatus, setShareStatus] = useState(null); // null | 'sending' | 'sent'
+  const [sessionResetKey, setSessionResetKey] = useState(0);
+  const [restarting, setRestarting] = useState(false);
   const termRef = useRef(null);
   const xtermRef = useRef(null);
   const fitRef = useRef(null);
@@ -43,6 +45,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
   const sessionIdRef = useRef(null);
   const prevProjectIdRef = useRef(null);
   const mountedRef = useRef(true);
+  const forceNewSessionRef = useRef(false);
 
   /**
    * Capture the visible terminal buffer text (last N lines).
@@ -87,6 +90,27 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
     setShareStatus('sent');
     setTimeout(() => setShareStatus(null), 2000);
   }, [chatWsRef, projectId, activeChatSessionId, captureTerminalOutput]);
+
+  const handleRestartConsole = useCallback((e) => {
+    e?.stopPropagation();
+    if (!projectId || restarting) return;
+
+    forceNewSessionRef.current = true;
+    setRestarting(true);
+    setConnected(false);
+
+    const ws = wsRef.current;
+    const sessionId = sessionIdRef.current;
+    if (ws?.readyState === WebSocket.OPEN && sessionId) {
+      try { ws.send(JSON.stringify({ type: 'kill-session', sessionId })); } catch {}
+    }
+
+    try { ws?.close(); } catch {}
+    try { xtermRef.current?.clear(); } catch {}
+    prevProjectIdRef.current = null;
+    sessionIdRef.current = null;
+    setSessionResetKey((key) => key + 1);
+  }, [projectId, restarting]);
 
   // Drag-to-resize state
   const dragRef = useRef({ active: false, startY: 0, startHeight: 0 });
@@ -188,7 +212,9 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
           cliTool: null,
           cols: xterm.cols || 120,
           rows: xterm.rows || 12,
+          forceNew: forceNewSessionRef.current,
         }));
+        forceNewSessionRef.current = false;
 
         // Start heartbeat
         if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -212,8 +238,13 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
 
         if (msg.type === 'session-created' && !sessionIdRef.current) {
           sessionIdRef.current = msg.sessionId;
+          setRestarting(false);
           // Attach
           ws.send(JSON.stringify({ type: 'attach', sessionId: msg.sessionId }));
+        }
+
+        if (msg.type === 'error') {
+          setRestarting(false);
         }
 
         if (msg.type === 'output' && msg.sessionId === sessionIdRef.current) {
@@ -240,6 +271,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
 
       ws.onerror = () => {
         setConnected(false);
+        setRestarting(false);
       };
     };
 
@@ -326,7 +358,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
       wsRef.current = null;
       sessionIdRef.current = null;
     };
-  }, [open, projectId]);
+  }, [open, projectId, sessionResetKey]);
 
   // Refit xterm when height changes (after drag)
   useEffect(() => {
@@ -351,10 +383,25 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
         {open && (
           <div
             className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}
-            title={connected ? 'Connected' : 'Connecting...'}
+            title={connected ? 'Connected' : restarting ? 'Restarting...' : 'Connecting...'}
           />
         )}
         <span className="flex-1" />
+        {open && (
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={handleRestartConsole}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') handleRestartConsole(e);
+            }}
+            className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-surface-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors"
+            title="Terminate this bottom console and start a fresh session"
+          >
+            <RotateCcw size={10} className={restarting ? 'animate-spin' : ''} />
+            {restarting ? 'Restarting...' : 'New session'}
+          </span>
+        )}
         {open ? <ChevronDown size={12} /> : <ChevronUp size={14} className="text-primary-400" />}
       </button>
       {open && connected && activeChatSessionId && (

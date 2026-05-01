@@ -906,7 +906,7 @@ class TerminalServer {
   /**
    * Create a new PTY session
    */
-  async handleCreateSession(ws, { projectId, cliTool, cols, rows, cwd, role }) {
+  async handleCreateSession(ws, { projectId, cliTool, cols, rows, cwd, role, forceNew = false }) {
     try {
       // If projectId provided, use project's folder path as cwd
       let workingDir = cwd;
@@ -942,6 +942,7 @@ class TerminalServer {
         cliTool,
         containerName,
         role: role || 'main',
+        forceNew,
         cols: cols || 120,
         rows: rows || 30,
         cwd: workingDir,
@@ -996,10 +997,11 @@ class TerminalServer {
         const __dirname = path.dirname(fileURLToPath(import.meta.url));
         const liveDir = path.join(__dirname, '../../data/session-live');
 
-        // Look for live files from previous sessions for this project + role
+        // Look for live files from previous sessions for this project + role.
+        // Fresh utility sessions intentionally skip replay to avoid restoring stuck output.
         let replayText = null;
 
-        if (fs.existsSync(liveDir)) {
+        if (!forceNew && fs.existsSync(liveDir)) {
           const files = fs.readdirSync(liveDir).filter(f => f.endsWith('.txt'));
           // Find the LARGEST matching file (most content = most useful session)
           let bestFile = null;
@@ -1033,8 +1035,9 @@ class TerminalServer {
           }
         }
 
-        // If no live file, check session history for the most recent
-        if (!replayText) {
+        // If no live file, check session history for the most recent.
+        // Forced new sessions should start clean.
+        if (!forceNew && !replayText) {
           const history = sessionHistory.getHistory(projectId, 5);
           const match = history.find(h => (h.role || 'main') === (role || 'main'));
           if (match) {

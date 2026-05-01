@@ -207,6 +207,7 @@ class PTYManager extends EventEmitter {
       cliTool = null,
       containerName = null,
       role = 'main', // 'main' or 'utility'
+      forceNew = false,
       cols = 120,
       rows = 30,
       cwd = process.env.HOME || os.homedir(),
@@ -235,10 +236,17 @@ class PTYManager extends EventEmitter {
       // Check for existing active session for this container+role
       // ONLY reuse utility sessions, NOT agent sessions - each chat session needs its own Claude CLI
       if (role === 'utility') {
-        const existingSession = Array.from(this.sessions.values()).find(
+        const existingSessions = Array.from(this.sessions.values()).filter(
           s => s.containerName === containerName && s.role === role && s.status === 'active'
         );
-        if (existingSession) {
+
+        if (forceNew) {
+          for (const existingSession of existingSessions) {
+            this.killSession(existingSession.id);
+            this.sessions.delete(existingSession.id);
+          }
+        } else if (existingSessions.length > 0) {
+          const existingSession = existingSessions[0];
           console.log(`[ptyManager] Reusing existing ${role} session for ${containerName}: ${existingSession.id}`);
           return {
             sessionId: existingSession.id,
