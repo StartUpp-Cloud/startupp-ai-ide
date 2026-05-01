@@ -18,6 +18,20 @@ const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
 const DEFAULT_HEIGHT = 180;
 
+const QUICK_COMMANDS = [
+  { label: 'Quick commands...', command: '' },
+  { label: 'Login to GitHub', command: 'gh auth login' },
+  { label: 'GitHub auth status', command: 'gh auth status' },
+  { label: 'Install Claude Code', command: 'npm install -g @anthropic-ai/claude-code' },
+  { label: 'Install OpenCode', command: 'npm install -g opencode-ai' },
+  { label: 'Install GitHub Copilot extension', command: 'gh extension install github/gh-copilot' },
+  { label: 'Install Salesforce CLI', command: 'npm install -g @salesforce/cli' },
+  { label: 'Login to Salesforce', command: 'sf org login web' },
+  { label: 'Install pnpm', command: 'npm install -g pnpm' },
+  { label: 'Install Aider', command: 'pip3 install --user aider-chat' },
+  { label: 'Check tool versions', command: 'node -v && npm -v && gh --version && claude --version 2>/dev/null || true && opencode --version 2>/dev/null || true && sf --version 2>/dev/null || true' },
+];
+
 function getStoredHeight() {
   try {
     const v = parseInt(localStorage.getItem('internalConsoleHeight'), 10);
@@ -454,6 +468,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
  */
 function CommandBuilder({ onRun }) {
   const [query, setQuery] = useState('');
+  const [quickCommand, setQuickCommand] = useState('');
   const [generating, setGenerating] = useState(false);
   const [suggestion, setSuggestion] = useState(null);
 
@@ -486,9 +501,33 @@ function CommandBuilder({ onRun }) {
     }
   };
 
+  const handleQuickRun = () => {
+    if (!quickCommand) return;
+    onRun(quickCommand);
+    setQuickCommand('');
+  };
+
   return (
     <div className="flex items-center gap-1 px-2 py-1 bg-surface-850 border-t border-surface-700/50">
       <Sparkles size={12} className="text-primary-400 flex-shrink-0" />
+      <select
+        value={quickCommand}
+        onChange={(e) => setQuickCommand(e.target.value)}
+        className="max-w-[170px] bg-surface-800 border border-surface-700 rounded px-1.5 py-0.5 text-[10px] text-surface-300 outline-none focus:border-primary-500/50"
+        title="Run a common setup command"
+      >
+        {QUICK_COMMANDS.map((item) => (
+          <option key={item.label} value={item.command}>{item.label}</option>
+        ))}
+      </select>
+      <button
+        onClick={handleQuickRun}
+        disabled={!quickCommand}
+        className="px-1.5 py-0.5 rounded text-[10px] text-primary-300 hover:text-primary-200 hover:bg-primary-500/10 disabled:text-surface-600 disabled:hover:bg-transparent"
+        title={quickCommand || 'Select a quick command first'}
+      >
+        Run
+      </button>
       <input
         type="text"
         value={query}

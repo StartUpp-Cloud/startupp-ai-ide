@@ -41,6 +41,7 @@ set -g set-clipboard on\n\
 ' > /home/dev/.tmux.conf && chown dev:dev /home/dev/.tmux.conf
 
 ENV NPM_CONFIG_PREFIX=/home/dev/.npm-global
+ENV BROWSER=false
 ENV PATH="/home/dev/.npm-global/bin:${PATH}"
 
 USER dev

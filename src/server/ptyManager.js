@@ -218,15 +218,16 @@ class PTYManager extends EventEmitter {
     let shell, args, spawnCwd;
 
     if (containerName) {
-      // Docker container session via dtach — survives PM2 restarts
-      // dtach -A creates new or attaches to existing session socket
-      // Unlike tmux, dtach passes ALL terminal escape sequences through untouched,
-      // which prevents garbled rendering of TUI apps like Claude Code.
+      // Docker container sessions usually go through dtach so AI/main sessions
+      // survive PM2 restarts. The interactive utility console intentionally uses
+      // direct docker exec because tools like `gh auth login` rely on cbreak
+      // single-key prompts that are more reliable without a dtach hop.
       //
       // We spawn /bin/bash and exec into docker from there, because node-pty's
       // posix_spawnp can fail on macOS when spawning docker directly (code signing).
       const dockerBin = findDockerBinary();
-      ensureDtach(containerName);
+      const useDtach = role !== 'utility';
+      if (useDtach) ensureDtach(containerName);
       // Agent sessions need unique socket paths to prevent mixing; utility sessions share one
       const socketPath = role === 'agent'
         ? `/tmp/${role}-${sessionId}.dtach`
@@ -259,12 +260,14 @@ class PTYManager extends EventEmitter {
       }
 
       // No active session - clean any orphaned dtach socket before creating new
-      this._cleanDtachSocket(containerName, role, sessionId);
+      if (useDtach) this._cleanDtachSocket(containerName, role, sessionId);
 
       shell = '/bin/bash';
       args = [
         '-c',
-        `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -w '${workDir}' '${containerName}' dtach -A '${socketPath}' -z bash -l`,
+        useDtach
+          ? `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false -w '${workDir}' '${containerName}' dtach -A '${socketPath}' -z bash -l`
+          : `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false -w '${workDir}' '${containerName}' bash -l`,
       ];
       spawnCwd = undefined;
     } else {
@@ -287,6 +290,7 @@ class PTYManager extends EventEmitter {
           PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin`,
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',
+          BROWSER: 'false',
         },
       });
 
@@ -395,6 +399,7 @@ class PTYManager extends EventEmitter {
               PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin`,
               TERM: 'xterm-256color',
               COLORTERM: 'truecolor',
+              BROWSER: 'false',
             },
           });
 
