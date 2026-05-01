@@ -230,6 +230,12 @@ Connect to your running Chrome instance to capture screenshots, console errors, 
 - Switch away from a project → session keeps running in background
 - Switch back → reattach with full output history
 
+### Terminal Input Fidelity
+
+- Terminal keystrokes are forwarded from `xterm.js` to the PTY unchanged.
+- Do not filter terminal query responses or rewrite single-key input before `ptyManager.write()`.
+- See `docs/troubleshooting.md` for the `gh auth login` `Y/n` regression test and debugging notes.
+
 ## Tech Stack
 
 | Layer      | Tech                                    |

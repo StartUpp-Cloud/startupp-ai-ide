@@ -4,7 +4,6 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Zap, X, MessageSquare, Bot, Brain, Sparkles, Cpu, Settings, Shield, AlertTriangle, FolderOpen } from 'lucide-react';
 import LLMSettingsPanel from './LLMSettingsPanel';
-import { stripTerminalQueryResponses } from '../utils/terminalControlFilter';
 import '@xterm/xterm/css/xterm.css';
 
 // WebSocket reconnection configuration
@@ -129,34 +128,15 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     // This is synchronous — xterm.open() triggers the DA, reset() flushes it
     xterm.write('\x1b[2J\x1b[H'); // Clear screen + cursor home
 
-    // Handle terminal input — coalesce for 3ms then filter auto-responses
-    // that cause echo garbage. DA responses are allowed through (apps need them).
-    // The coalesce window ensures split sequences (e.g. \x1b[1;1 | R) arrive
-    // complete so the regex can match them reliably.
-    let inputBuf = '';
-    let inputTimer = null;
-
+    // Forward terminal input exactly as xterm emits it. Interactive CLIs rely on
+    // raw single-key input and terminal query responses.
     xterm.onData((data) => {
-      if (!sessionIdRef.current) return;
-      inputBuf += data;
-
-      if (inputTimer) clearTimeout(inputTimer);
-      inputTimer = setTimeout(() => {
-        let cleaned = inputBuf;
-        inputBuf = '';
-
-        // Strip terminal query responses before bash can echo them as visible garbage.
-        cleaned = stripTerminalQueryResponses(cleaned);
-
-        if (!cleaned) return;
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'input',
-            sessionId: sessionIdRef.current,
-            data: cleaned,
-          }));
-        }
-      }, 3);
+      if (!sessionIdRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
+      wsRef.current.send(JSON.stringify({
+        type: 'input',
+        sessionId: sessionIdRef.current,
+        data,
+      }));
     });
 
     // Handle resize - always include sessionId

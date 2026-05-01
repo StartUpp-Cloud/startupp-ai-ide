@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal, Share2, RotateCcw } from 'lucide-react';
-import { stripTerminalQueryResponses } from '../utils/terminalControlFilter';
 import '@xterm/xterm/css/xterm.css';
 
 // WebSocket reconnection configuration
@@ -461,26 +460,15 @@ export default function InternalConsole({
 
     connect();
 
-    // Forward keyboard input, filtering terminal query responses emitted by xterm itself.
-    let inputBuf = '';
-    let inputTimer = null;
-
+    // Forward terminal input exactly as xterm emits it. Interactive programs
+    // like GitHub CLI prompts rely on raw single-key input and terminal query
+    // responses; filtering here can swallow `y/n` or break cbreak prompts.
     xterm.onData((data) => {
-      if (!sessionIdRef.current) return;
-      inputBuf += data;
-
-      if (inputTimer) clearTimeout(inputTimer);
-      inputTimer = setTimeout(() => {
-        const cleaned = stripTerminalQueryResponses(inputBuf);
-        inputBuf = '';
-
-        const wsReady = wsRef.current?.readyState === WebSocket.OPEN;
-        if (!cleaned || !wsReady) return;
-        wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: cleaned }));
-        if (cleaned.includes('\r') || cleaned.includes('\n') || /^[YyNn]$/.test(cleaned)) {
-          setPromptAction(null);
-        }
-      }, 3);
+      if (!sessionIdRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
+      wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data }));
+      if (data.includes('\r') || data.includes('\n') || /^[YyNn]$/.test(data)) {
+        setPromptAction(null);
+      }
     });
 
     // Forward resize
@@ -501,7 +489,6 @@ export default function InternalConsole({
       window.removeEventListener('resize', resizeHandler);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatInterval) clearInterval(heartbeatInterval);
-      if (inputTimer) clearTimeout(inputTimer);
       if (promptResponseFallbackRef.current) {
         clearTimeout(promptResponseFallbackRef.current);
         promptResponseFallbackRef.current = null;
