@@ -246,6 +246,11 @@ class PTYManager extends EventEmitter {
             this.killSession(existingSession.id);
             this.sessions.delete(existingSession.id);
           }
+
+          // Utility sessions used to run through a shared dtach socket. Clean it
+          // even though new utility sessions use direct docker exec, otherwise a
+          // pre-upgrade stuck `gh auth login` prompt can survive in the container.
+          this._cleanDtachSocket(containerName, role, sessionId);
         } else if (existingSessions.length > 0) {
           const existingSession = existingSessions[0];
           console.log(`[ptyManager] Reusing existing ${role} session for ${containerName}: ${existingSession.id}`);

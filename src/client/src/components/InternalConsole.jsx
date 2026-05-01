@@ -20,7 +20,7 @@ const DEFAULT_HEIGHT = 180;
 
 const QUICK_COMMANDS = [
   { label: 'Quick commands...', command: '' },
-  { label: 'Login to GitHub', command: 'gh auth login' },
+  { label: 'Login to GitHub', command: 'gh auth login --hostname github.com --git-protocol https --web' },
   { label: 'GitHub auth status', command: 'gh auth status' },
   { label: 'Install Claude Code', command: 'npm install -g @anthropic-ai/claude-code' },
   { label: 'Install OpenCode', command: 'npm install -g opencode-ai' },
