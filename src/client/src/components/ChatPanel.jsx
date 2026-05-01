@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
-import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal } from 'lucide-react';
 import {
   CLI_TOOLS,
   getToolConfig,
@@ -167,7 +167,7 @@ function dedupeModelOptions(options) {
   });
 }
 
-function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate }) {
+function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange }) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
   const rawEffort = session?.effort || '';
@@ -268,6 +268,33 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
 
   return (
     <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-surface-700/40 bg-surface-850/40">
+      <div className="flex items-center gap-1 rounded-md border border-surface-700 bg-surface-900/60 p-0.5">
+        <button
+          onClick={() => onChannelChange?.('assistant')}
+          className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
+            channel === 'assistant'
+              ? 'bg-primary-600 text-white'
+              : 'text-surface-400 hover:text-surface-200 hover:bg-surface-800'
+          }`}
+        >
+          <Bot size={11} />
+          Assistant
+        </button>
+        <button
+          onClick={() => onChannelChange?.('shell')}
+          className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
+            channel === 'shell'
+              ? 'bg-amber-600 text-white'
+              : 'text-surface-400 hover:text-surface-200 hover:bg-surface-800'
+          }`}
+        >
+          <Terminal size={11} />
+          Shell
+        </button>
+      </div>
+
+      {channel === 'assistant' && (
+        <>
       <div className="flex items-center gap-1.5 min-w-0">
         <span className="text-[10px] uppercase tracking-wide text-surface-500">Assistant</span>
         <select
@@ -324,9 +351,13 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
           </select>
         </div>
       )}
+        </>
+      )}
 
       <div className="ml-auto text-[10px] text-surface-500 truncate">
-        {effectiveTool === 'ollama'
+        {channel === 'shell'
+          ? 'Shell proxy: commands and prompt responses run directly inside the project container'
+          : effectiveTool === 'ollama'
           ? 'IDE orchestrator enabled: workspace scan, retrieval, stack guidance, task planning'
           : getToolConfig(effectiveTool).context}
       </div>
@@ -354,6 +385,7 @@ function ChatSessionContent({
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
+  const [chatChannel, setChatChannel] = useState('assistant');
   const [searchResults, setSearchResults] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
@@ -529,9 +561,10 @@ function ChatSessionContent({
             id: msg.messageId,
             jobId: msg.jobId,
             role: 'agent',
-            content: 'Thinking...',
+            content: msg.content || (msg.shell ? 'Running shell command...' : 'Thinking...'),
             createdAt: new Date().toISOString(),
             streaming: true,
+            shell: !!msg.shell,
           });
           streamingChunksRef.current = '';
           break;
@@ -787,8 +820,43 @@ function ChatSessionContent({
   const settingsDisabled = agentBusy || Boolean(streamingMessage) || recoveryStatus.active;
 
   // Send message handler
-  const handleSend = useCallback((content, attachments = []) => {
+  const handleSend = useCallback((content, attachments = [], options = {}) => {
     if (!projectId || !sessionId) return;
+
+    const targetChannel = options.channel || chatChannel;
+
+    if (targetChannel === 'shell') {
+      const shellContent = (content || '').trim();
+      if (!shellContent) return;
+
+      setMessages(prev => [...prev, {
+        id: 'pending-' + Date.now(),
+        projectId,
+        sessionId,
+        role: 'user',
+        content: shellContent,
+        metadata: { mode: 'shell', channel: 'shell' },
+        createdAt: new Date().toISOString(),
+      }]);
+
+      if (wsRef?.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'chat-shell-send',
+          projectId,
+          sessionId,
+          content: shellContent,
+        }));
+      } else {
+        setMessages(prev => [...prev, {
+          id: 'err-' + Date.now(),
+          projectId,
+          role: 'error',
+          content: 'Not connected to server. Please wait and retry.',
+          createdAt: new Date().toISOString(),
+        }]);
+      }
+      return;
+    }
 
     // ── /logs command: capture logs from container and share with agent ──
     const logsMatch = content.match(/^\/logs\s*(.*)?$/i);
@@ -869,7 +937,27 @@ function ChatSessionContent({
         createdAt: new Date().toISOString(),
       }]);
     }
-  }, [projectId, sessionId, mode, wsRef, effectiveTool, sessionModel, sessionEffort]);
+  }, [projectId, sessionId, mode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel]);
+
+  useEffect(() => {
+    if (!isVisible) return;
+
+    const runShellCommand = (command) => {
+      const text = String(command || '').trim();
+      if (!text) return;
+      setChatChannel('shell');
+      handleSend(text, [], { channel: 'shell' });
+    };
+
+    const handleRunInUtil = (event) => runShellCommand(event.detail?.command);
+    window.addEventListener('run-in-util', handleRunInUtil);
+    window.sendShellCommand = runShellCommand;
+
+    return () => {
+      window.removeEventListener('run-in-util', handleRunInUtil);
+      if (window.sendShellCommand === runShellCommand) delete window.sendShellCommand;
+    };
+  }, [isVisible, handleSend]);
 
   const handleSearch = useCallback(async (query) => {
     if (!query || !projectId) { setSearchResults(null); return; }
@@ -980,6 +1068,8 @@ function ChatSessionContent({
         disabled={settingsDisabled}
         projectId={projectId}
         onUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
+        channel={chatChannel}
+        onChannelChange={setChatChannel}
       />
 
       {/* Messages */}
@@ -1036,7 +1126,7 @@ function ChatSessionContent({
           />
         )}
 
-        {(agentBusy || streamingMessage || recoveryStatus.active) && (
+        {(agentBusy || recoveryStatus.active || (streamingMessage && !streamingMessage.shell)) && (
           <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
         )}
 
@@ -1067,6 +1157,7 @@ function ChatSessionContent({
 
       <ChatInput
         mode={mode}
+        channel={chatChannel}
         projectId={projectId}
         onSend={handleSend}
         onSearch={handleSearch}
@@ -1114,7 +1205,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     }
   }, [isActive, projectId, onProjectRead]);
 
-  // Notify parent of active session changes (used by InternalConsole sharing)
+  // Notify parent of active session changes for integrations that target a chat tab.
   useEffect(() => {
     if (isActive && activeSessionId) {
       onActiveSessionChange?.(activeSessionId);

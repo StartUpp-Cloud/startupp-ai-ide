@@ -32,6 +32,25 @@ const QUICK_COMMANDS = [
   { label: 'Check tool versions', command: 'node -v && npm -v && gh --version && claude --version 2>/dev/null || true && opencode --version 2>/dev/null || true && sf --version 2>/dev/null || true' },
 ];
 
+function stripTerminalControls(data = '') {
+  return String(data)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
+    .replace(/\x1b[78]/g, '');
+}
+
+function detectYesNoPrompt(data) {
+  const clean = stripTerminalControls(data);
+  const lines = clean.split(/[\r\n]+/).map(line => line.trim()).filter(Boolean);
+  const lastLine = lines[lines.length - 1] || '';
+
+  if (/[?:].*(?:\(|\[)[Yy]\/[Nn](?:\)|\])\s*$/.test(lastLine)) {
+    return lastLine.slice(-180);
+  }
+
+  return null;
+}
+
 function getStoredHeight() {
   try {
     const v = parseInt(localStorage.getItem('internalConsoleHeight'), 10);
@@ -52,6 +71,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
   const [shareStatus, setShareStatus] = useState(null); // null | 'sending' | 'sent'
   const [sessionResetKey, setSessionResetKey] = useState(0);
   const [restarting, setRestarting] = useState(false);
+  const [promptAction, setPromptAction] = useState(null);
   const termRef = useRef(null);
   const xtermRef = useRef(null);
   const fitRef = useRef(null);
@@ -60,6 +80,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
   const prevProjectIdRef = useRef(null);
   const mountedRef = useRef(true);
   const forceNewSessionRef = useRef(false);
+  const promptResponseFallbackRef = useRef(null);
 
   /**
    * Capture the visible terminal buffer text (last N lines).
@@ -123,8 +144,41 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
     try { xtermRef.current?.clear(); } catch {}
     prevProjectIdRef.current = null;
     sessionIdRef.current = null;
+    if (promptResponseFallbackRef.current) {
+      clearTimeout(promptResponseFallbackRef.current);
+      promptResponseFallbackRef.current = null;
+    }
+    setPromptAction(null);
     setSessionResetKey((key) => key + 1);
   }, [projectId, restarting]);
+
+  const sendPromptResponse = useCallback((response, action = null) => {
+    const targetSessionId = action?.sessionId || sessionIdRef.current;
+    const ws = wsRef.current;
+    if (!targetSessionId || ws?.readyState !== WebSocket.OPEN) return;
+
+    const promptText = action?.text || '';
+
+    ws.send(JSON.stringify({
+      type: 'send-response',
+      sessionId: targetSessionId,
+      response,
+      promptText,
+    }));
+
+    if (promptResponseFallbackRef.current) clearTimeout(promptResponseFallbackRef.current);
+    promptResponseFallbackRef.current = setTimeout(() => {
+      promptResponseFallbackRef.current = null;
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+      const defaultYes = /(?:\(|\[)Y\/n(?:\)|\])\s*$/i.test(promptText);
+      const data = response === 'y' && defaultYes ? '\r' : `${response}\r`;
+      wsRef.current.send(JSON.stringify({ type: 'input', sessionId: targetSessionId, data }));
+    }, 250);
+
+    setPromptAction(null);
+    xtermRef.current?.focus();
+  }, []);
 
   // Drag-to-resize state
   const dragRef = useRef({ active: false, startY: 0, startHeight: 0 });
@@ -263,6 +317,33 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
 
         if (msg.type === 'output' && msg.sessionId === sessionIdRef.current) {
           xterm.write(msg.data);
+          const promptText = detectYesNoPrompt(msg.data);
+          if (promptText) {
+            setPromptAction({ text: promptText, responses: ['y', 'n'], sessionId: msg.sessionId });
+          }
+        }
+
+        if (msg.type === 'prompt-detected' && msg.sessionId === sessionIdRef.current) {
+          const responses = msg.responses || [];
+          const matchedText = msg.matchedText || '';
+          const isYesNoPrompt = responses.includes('y') && responses.includes('n')
+            || /(?:\(|\[)[Yy]\/[Nn](?:\)|\])/.test(matchedText);
+
+          if (isYesNoPrompt) {
+            setPromptAction({
+              text: stripTerminalControls(matchedText).trim().slice(-180),
+              responses: ['y', 'n'],
+              sessionId: msg.sessionId,
+            });
+          }
+        }
+
+        if (msg.type === 'response-sent' || msg.type === 'auto-response-sent') {
+          if (promptResponseFallbackRef.current) {
+            clearTimeout(promptResponseFallbackRef.current);
+            promptResponseFallbackRef.current = null;
+          }
+          setPromptAction(null);
         }
       };
 
@@ -342,8 +423,12 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
         const cleaned = stripTerminalQueryResponses(inputBuf);
         inputBuf = '';
 
-        if (!cleaned || wsRef.current?.readyState !== WebSocket.OPEN) return;
+        const wsReady = wsRef.current?.readyState === WebSocket.OPEN;
+        if (!cleaned || !wsReady) return;
         wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: cleaned }));
+        if (cleaned.includes('\r') || cleaned.includes('\n') || /^[YyNn]$/.test(cleaned)) {
+          setPromptAction(null);
+        }
       }, 3);
     });
 
@@ -366,6 +451,10 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (inputTimer) clearTimeout(inputTimer);
+      if (promptResponseFallbackRef.current) {
+        clearTimeout(promptResponseFallbackRef.current);
+        promptResponseFallbackRef.current = null;
+      }
       xterm.dispose();
       xtermRef.current = null;
       if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.close();
@@ -447,6 +536,31 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
 
           {/* Terminal canvas */}
           <div ref={termRef} style={{ height: consoleHeight }} className="bg-[#0d1117]" />
+
+          {promptAction && (
+            <div className="flex items-center gap-2 px-2 py-1 bg-amber-500/10 border-t border-amber-500/20 text-[11px] text-amber-100">
+              <span className="text-amber-300 font-medium">Terminal needs input</span>
+              <span className="truncate text-amber-100/80 flex-1" title={promptAction.text}>{promptAction.text}</span>
+              <button
+                onClick={() => sendPromptResponse('y', promptAction)}
+                className="px-2 py-0.5 rounded bg-green-600/80 hover:bg-green-600 text-white font-medium transition-colors"
+              >
+                Yes
+              </button>
+              <button
+                onClick={() => sendPromptResponse('n', promptAction)}
+                className="px-2 py-0.5 rounded bg-red-600/80 hover:bg-red-600 text-white font-medium transition-colors"
+              >
+                No
+              </button>
+              <button
+                onClick={() => setPromptAction(null)}
+                className="px-1.5 py-0.5 rounded text-amber-200/70 hover:text-amber-100 hover:bg-amber-500/10 transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           {/* AI command builder */}
           <CommandBuilder

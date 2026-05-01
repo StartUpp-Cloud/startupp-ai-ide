@@ -111,7 +111,7 @@ export const DEFAULT_PATTERNS = [
   {
     id: 'generic-yes-no',
     name: 'Generic Yes/No',
-    pattern: '\\?\\s*\\[?[Yy](?:es)?\\/?[Nn](?:o)?\\]?\\s*$',
+    pattern: '\\?\\s*(?:\\(|\\[)?[Yy](?:es)?\\/?[Nn](?:o)?(?:\\)|\\])?\\s*$',
     cli: 'generic',
     category: 'approval',
     action: 'suggest',

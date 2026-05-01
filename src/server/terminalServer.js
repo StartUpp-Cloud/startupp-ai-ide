@@ -15,6 +15,7 @@ import { activityFeed } from './activityFeed.js';
 import { agentShellPool } from './agentShellPool.js';
 import { slackService } from './slackService.js';
 import { mergeSessionAssistantSettings } from './sessionSettings.js';
+import { shellProxy } from './shellProxy.js';
 
 class TerminalServer {
   constructor() {
@@ -24,8 +25,10 @@ class TerminalServer {
     this.outputBuffers = new Map(); // sessionId -> OutputBuffer
     this.userInputBuffers = new Map(); // sessionId -> current user input
     this.recentOutput = new Map(); // sessionId -> recent output for prompt detection
+    this.lastInteractivePrompt = new Map(); // sessionId -> last prompt tail for input normalization
     this.sessionCliTools = new Map(); // sessionId -> cliTool
     this.autoResponseTimers = new Map(); // sessionId -> pending auto-response timer
+    this.shellStreams = new Map(); // projectId:chatSessionId -> active shell output stream
 
     // Per-session WebSocket tracking for isolation
     // Each chat session gets its own dedicated client set
@@ -306,6 +309,9 @@ class TerminalServer {
         error,
       });
     });
+
+    shellProxy.on('data', (event) => this.handleShellProxyData(event));
+    shellProxy.on('exit', (event) => this.handleShellProxyExit(event));
 
     // Forward orchestrator events to WebSocket clients
     orchestrator.on('status-change', (data) => {
@@ -655,6 +661,41 @@ class TerminalServer {
         break;
       }
 
+      case 'chat-shell-send': {
+        const { chatStore } = await import('./chatStore.js');
+
+        chatStore.migrateIfNeeded(payload.projectId);
+        const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
+        const content = (payload.content || '').trim();
+        if (!content) {
+          this.sendError(ws, 'Shell input is required');
+          break;
+        }
+
+        this.attachToChatSession(ws, chatSessionId);
+
+        const userMsg = chatStore.addMessage({
+          projectId: payload.projectId,
+          sessionId: chatSessionId,
+          role: 'user',
+          content,
+          metadata: { mode: 'shell', channel: 'shell' },
+        });
+
+        this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: userMsg });
+        this.broadcast({ type: 'chat-message', message: userMsg });
+
+        try {
+          this.openShellStream(payload.projectId, chatSessionId, content);
+          shellProxy.send({ projectId: payload.projectId, chatSessionId, input: content });
+        } catch (err) {
+          this.completeShellStream(this.shellKey(payload.projectId, chatSessionId), {
+            error: `Shell proxy error: ${err.message}`,
+          });
+        }
+        break;
+      }
+
       case 'chat-retry': {
         const { chatStore } = await import('./chatStore.js');
         const { agentGateway } = await import('./agentGateway.js');
@@ -903,6 +944,155 @@ class TerminalServer {
     }
   }
 
+  shellKey(projectId, chatSessionId) {
+    return `${projectId}:${chatSessionId}`;
+  }
+
+  limitShellOutput(output) {
+    const text = String(output || '').trimEnd();
+    const max = 20000;
+    if (text.length <= max) return text;
+    return `[output truncated to last ${max} chars]\n` + text.slice(-max);
+  }
+
+  detectShellPrompt(text) {
+    const clean = stripAnsi(String(text || '')).trimEnd();
+    const lines = clean.split('\n').map(line => line.trim()).filter(Boolean);
+    const lastLine = lines[lines.length - 1] || '';
+
+    if (/(?:\(|\[)[Yy]\/[Nn](?:\)|\])\s*$/.test(lastLine)) {
+      return { type: 'yes-no', text: lastLine.slice(-240), responses: ['y', 'n', 'enter', 'ctrl-c'] };
+    }
+
+    if (/https?:\/\/[^\s]+/i.test(lastLine)) {
+      return { type: 'url', text: lastLine.slice(-240), responses: ['enter', 'ctrl-c'] };
+    }
+
+    return null;
+  }
+
+  openShellStream(projectId, chatSessionId, command = '') {
+    const key = this.shellKey(projectId, chatSessionId);
+    const existing = this.shellStreams.get(key);
+    if (existing) this.completeShellStream(key, { fallback: existing.output || '_Previous shell output ended._' });
+
+    const messageId = `shell-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const stream = {
+      key,
+      projectId,
+      chatSessionId,
+      command,
+      messageId,
+      output: '',
+      tail: '',
+      timer: null,
+      noOutputTimer: null,
+      prompt: null,
+    };
+    this.shellStreams.set(key, stream);
+
+    this.broadcastToChatSession(chatSessionId, {
+      type: 'chat-message-stream-start',
+      projectId,
+      sessionId: chatSessionId,
+      messageId,
+      jobId: messageId,
+      content: 'Running shell command...',
+      shell: true,
+    });
+
+    stream.noOutputTimer = setTimeout(() => {
+      this.completeShellStream(key, { fallback: '_Command sent. Waiting for output or the next prompt._' });
+    }, 1800);
+
+    return stream;
+  }
+
+  handleShellProxyData({ projectId, chatSessionId, data, atPrompt, tail }) {
+    const key = this.shellKey(projectId, chatSessionId);
+    let stream = this.shellStreams.get(key);
+    if (!stream) stream = this.openShellStream(projectId, chatSessionId, '');
+
+    if (stream.noOutputTimer) {
+      clearTimeout(stream.noOutputTimer);
+      stream.noOutputTimer = null;
+    }
+    if (stream.timer) clearTimeout(stream.timer);
+
+    stream.output += data;
+    stream.tail = tail || stream.tail;
+    stream.prompt = this.detectShellPrompt(stream.output) || this.detectShellPrompt(stream.tail) || stream.prompt;
+
+    this.broadcastToChatSession(chatSessionId, {
+      type: 'chat-message-chunk',
+      projectId,
+      sessionId: chatSessionId,
+      messageId: stream.messageId,
+      chunk: data,
+      shell: true,
+    });
+
+    stream.timer = setTimeout(() => {
+      this.completeShellStream(key);
+    }, atPrompt ? 250 : 1800);
+  }
+
+  handleShellProxyExit({ projectId, chatSessionId, exitCode, signal }) {
+    const key = this.shellKey(projectId, chatSessionId);
+    this.completeShellStream(key, {
+      fallback: `Shell session exited (${signal || (exitCode ?? 'unknown')}).`,
+    });
+  }
+
+  async completeShellStream(key, { error = null, fallback = null } = {}) {
+    const stream = this.shellStreams.get(key);
+    if (!stream) return;
+    this.shellStreams.delete(key);
+
+    if (stream.timer) clearTimeout(stream.timer);
+    if (stream.noOutputTimer) clearTimeout(stream.noOutputTimer);
+
+    const { chatStore } = await import('./chatStore.js');
+    const rawOutput = error || this.limitShellOutput(stream.output || fallback || '_No output._');
+    const content = error
+      ? rawOutput
+      : rawOutput.startsWith('_')
+        ? rawOutput
+        : `\`\`\`shell\n${rawOutput}\n\`\`\``;
+
+    const message = chatStore.addMessage({
+      projectId: stream.projectId,
+      sessionId: stream.chatSessionId,
+      role: error ? 'error' : 'agent',
+      content,
+      metadata: {
+        mode: 'shell',
+        channel: 'shell',
+        shell: {
+          command: stream.command || null,
+          prompt: stream.prompt,
+        },
+      },
+    });
+
+    this.broadcastToChatSession(stream.chatSessionId, {
+      type: 'chat-message-stream-complete',
+      projectId: stream.projectId,
+      sessionId: stream.chatSessionId,
+      messageId: stream.messageId,
+      message,
+      shell: true,
+    });
+    this.broadcast({
+      type: 'chat-message-stream-complete',
+      projectId: stream.projectId,
+      sessionId: stream.chatSessionId,
+      messageId: stream.messageId,
+      message,
+      shell: true,
+    });
+  }
+
   /**
    * Create a new PTY session
    */
@@ -1092,6 +1282,7 @@ class TerminalServer {
     // Send scrollback buffer so the client sees recent output history
     const scrollback = ptyManager.getScrollback(sessionId);
     if (scrollback) {
+      this.rememberInteractivePrompt(sessionId, scrollback);
       this.send(ws, {
         type: 'output',
         sessionId,
@@ -1128,8 +1319,10 @@ class TerminalServer {
       return;
     }
 
+    const inputData = this.normalizeInputForInteractivePrompt(targetSession, data);
+
     // Write to PTY - returns false if session is terminated (don't error)
-    const written = ptyManager.write(targetSession, data);
+    const written = ptyManager.write(targetSession, inputData);
     if (!written) {
       // Session is gone, silently ignore input
       return;
@@ -1137,10 +1330,13 @@ class TerminalServer {
 
     // Track user input for history
     const inputBuffer = this.userInputBuffers.get(targetSession) || '';
+    if (inputData.includes('\r') || inputData.includes('\n')) {
+      this.lastInteractivePrompt.delete(targetSession);
+    }
 
     // If Enter was pressed (newline), save the accumulated input as user message
-    if (data.includes('\r') || data.includes('\n')) {
-      const userMessage = (inputBuffer + data).replace(/[\r\n]+$/, '').trim();
+    if (inputData.includes('\r') || inputData.includes('\n')) {
+      const userMessage = (inputBuffer + inputData).replace(/[\r\n]+$/, '').trim();
       if (userMessage.length > 0) {
         // Store user input in history
         await History.addHistoryEntry(targetSession, {
@@ -1151,7 +1347,36 @@ class TerminalServer {
       this.userInputBuffers.set(targetSession, '');
     } else {
       // Accumulate input
-      this.userInputBuffers.set(targetSession, inputBuffer + data);
+      this.userInputBuffers.set(targetSession, inputBuffer + inputData);
+    }
+  }
+
+  normalizeInputForInteractivePrompt(sessionId, data, promptText = '') {
+    if (data !== 'Y' && data !== 'y' && data !== 'N' && data !== 'n') {
+      return data;
+    }
+
+    const tail = [
+      this.recentOutput.get(sessionId),
+      promptText,
+      this.lastInteractivePrompt.get(sessionId),
+    ].filter(Boolean).join('\n').slice(-800);
+    const cleanTail = stripAnsi(tail).replace(/\x1b[78]/g, '').trimEnd();
+    const defaultYesPrompt = /(?:\(|\[)Y\/n(?:\)|\])\s*$/i.test(cleanTail);
+
+    if (!defaultYesPrompt) return data;
+
+    // Some container/PTY stacks do not deliver raw single-key confirmation
+    // input to CLIs like `gh auth login`. For default-yes prompts, Enter is
+    // equivalent to Y and works in both raw and line-buffered modes.
+    this.lastInteractivePrompt.delete(sessionId);
+    return data === 'N' || data === 'n' ? `${data}\r` : '\r';
+  }
+
+  rememberInteractivePrompt(sessionId, text) {
+    const promptTail = stripAnsi(text || '').slice(-500).replace(/\x1b[78]/g, '').trimEnd();
+    if (/(?:\(|\[)Y\/n(?:\)|\])\s*$/i.test(promptTail)) {
+      this.lastInteractivePrompt.set(sessionId, promptTail);
     }
   }
 
@@ -1368,6 +1593,8 @@ class TerminalServer {
     }
     this.recentOutput.set(sessionId, recent);
 
+    this.rememberInteractivePrompt(sessionId, recent);
+
     // Also track in session context for history
     sessionContext.addCliOutput(sessionId, cleanData);
 
@@ -1502,18 +1729,25 @@ class TerminalServer {
   /**
    * Send a response to a detected prompt
    */
-  handleSendResponse(ws, { sessionId, response }) {
+  handleSendResponse(ws, { sessionId, response, promptText }) {
     const targetSession = sessionId || this.clients.get(ws)?.sessionId;
     if (!targetSession) {
       this.sendError(ws, 'No session specified');
       return;
     }
 
-    const written = ptyManager.write(targetSession, response + '\r');
+    const normalized = this.normalizeInputForInteractivePrompt(targetSession, response, promptText);
+    const data = /[\r\n]$/.test(normalized) ? normalized : `${normalized}\r`;
+    const visibleData = data.replace(/\r/g, '<CR>').replace(/\n/g, '<LF>');
+    console.log(`[terminalServer] prompt response -> session=${targetSession}, response=${JSON.stringify(response)}, data=${JSON.stringify(visibleData)}, hasPromptText=${Boolean(promptText)}`);
+
+    const written = ptyManager.write(targetSession, data);
+    console.log(`[terminalServer] prompt response write ${written ? 'succeeded' : 'failed'} -> session=${targetSession}`);
     if (written) {
       this.send(ws, { type: 'response-sent', sessionId: targetSession, response });
       // Clear recent output
       this.recentOutput.set(targetSession, '');
+      this.lastInteractivePrompt.delete(targetSession);
     }
   }
 
@@ -1536,6 +1770,7 @@ class TerminalServer {
    */
   cleanupSession(sessionId) {
     this.recentOutput.delete(sessionId);
+    this.lastInteractivePrompt.delete(sessionId);
     this.sessionCliTools.delete(sessionId);
     this.userInputBuffers.delete(sessionId);
     this.outputBuffers.delete(sessionId);

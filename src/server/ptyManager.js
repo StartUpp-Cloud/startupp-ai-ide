@@ -218,63 +218,67 @@ class PTYManager extends EventEmitter {
     let shell, args, spawnCwd;
 
     if (containerName) {
-      // Docker container sessions usually go through dtach so AI/main sessions
-      // survive PM2 restarts. The interactive utility console intentionally uses
-      // direct docker exec because tools like `gh auth login` rely on cbreak
-      // single-key prompts that are more reliable without a dtach hop.
-      //
       // We spawn /bin/bash and exec into docker from there, because node-pty's
       // posix_spawnp can fail on macOS when spawning docker directly (code signing).
       const dockerBin = findDockerBinary();
-      const useDtach = role !== 'utility';
-      if (useDtach) ensureDtach(containerName);
-      // Agent sessions need unique socket paths to prevent mixing; utility sessions share one
-      const socketPath = role === 'agent'
-        ? `/tmp/${role}-${sessionId}.dtach`
-        : `/tmp/${role}-session.dtach`;
       const workDir = cwd || '/workspace';
 
-      // Check for existing active session for this container+role
-      // ONLY reuse utility sessions, NOT agent sessions - each chat session needs its own Claude CLI
-      if (role === 'utility') {
-        const existingSessions = Array.from(this.sessions.values()).filter(
-          s => s.containerName === containerName && s.role === role && s.status === 'active'
-        );
+      if (role === 'main' || role === 'utility') {
+        // User-facing terminals use plain docker exec (no dtach). docker exec -it
+        // handles PTY raw mode directly, which allows interactive prompts such as
+        // `gh auth login` Y/n confirmations to receive keystrokes reliably. dtach
+        // adds another PTY layer that can swallow single-key prompt input.
+        if (role === 'utility') {
+          const existingSessions = Array.from(this.sessions.values()).filter(
+            s => s.containerName === containerName && s.role === role && s.status === 'active'
+          );
 
-        if (forceNew) {
-          for (const existingSession of existingSessions) {
-            this.killSession(existingSession.id);
-            this.sessions.delete(existingSession.id);
+          if (forceNew) {
+            for (const existingSession of existingSessions) {
+              this.killSession(existingSession.id);
+              this.sessions.delete(existingSession.id);
+            }
+          } else if (existingSessions.length > 0) {
+            const existingSession = existingSessions[0];
+            console.log(`[ptyManager] Reusing existing ${role} session for ${containerName}: ${existingSession.id}`);
+            return {
+              sessionId: existingSession.id,
+              projectId: existingSession.projectId,
+              containerName,
+              role,
+              reused: true,
+            };
           }
-
-          // Utility sessions used to run through a shared dtach socket. Clean it
-          // even though new utility sessions use direct docker exec, otherwise a
-          // pre-upgrade stuck `gh auth login` prompt can survive in the container.
-          this._cleanDtachSocket(containerName, role, sessionId);
-        } else if (existingSessions.length > 0) {
-          const existingSession = existingSessions[0];
-          console.log(`[ptyManager] Reusing existing ${role} session for ${containerName}: ${existingSession.id}`);
-          return {
-            sessionId: existingSession.id,
-            projectId: existingSession.projectId,
-            containerName,
-            role,
-            reused: true,
-          };
         }
+
+        // Clean up stale dtach sessions from older builds that wrapped
+        // user-facing terminals, otherwise a stuck prompt can be reattached.
+        this._cleanDtachSocket(containerName, role, sessionId);
+
+        shell = '/bin/bash';
+        args = [
+          '-c',
+          `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false -w '${workDir}' '${containerName}' bash -l`,
+        ];
+        console.log(`[ptyManager] spawning ${role} session — cmd: ${args[1]}`);
+        spawnCwd = undefined;
+      } else {
+        // Hidden agent sessions use dtach so background agent processes remain
+        // isolated from each other and can survive transient client disconnects.
+        ensureDtach(containerName);
+        const socketPath = `/tmp/${role}-${sessionId}.dtach`;
+
+        // Clean any orphaned dtach socket before creating new session
+        this._cleanDtachSocket(containerName, role, sessionId);
+
+        shell = '/bin/bash';
+        args = [
+          '-c',
+          `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false -w '${workDir}' '${containerName}' dtach -A '${socketPath}' -Ez bash -l`,
+        ];
+        console.log(`[ptyManager] spawning ${role} session — cmd: ${args[1]}`);
+        spawnCwd = undefined;
       }
-
-      // No active session - clean any orphaned dtach socket before creating new
-      if (useDtach) this._cleanDtachSocket(containerName, role, sessionId);
-
-      shell = '/bin/bash';
-      args = [
-        '-c',
-        useDtach
-          ? `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false -w '${workDir}' '${containerName}' dtach -A '${socketPath}' -z bash -l`
-          : `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false -w '${workDir}' '${containerName}' bash -l`,
-      ];
-      spawnCwd = undefined;
     } else {
       // Local session
       const config = this.getShellConfig();
@@ -657,7 +661,8 @@ class PTYManager extends EventEmitter {
    */
   _cleanDtachSocket(containerName, role, sessionId = null) {
     const dockerBin = findDockerBinary();
-    // Agent sessions have unique socket paths; utility sessions share one
+    // Legacy user-facing sessions used shared sockets; active dtach-backed
+    // agent sessions use unique paths so concurrent agents stay isolated.
     const socketPath = (role === 'agent' && sessionId)
       ? `/tmp/${role}-${sessionId}.dtach`
       : `/tmp/${role}-session.dtach`;

@@ -21,7 +21,7 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function ChatInput({ mode, projectId, onSend, onSearch, disabled = false, busy = false, isVisible = true }) {
+export default function ChatInput({ mode, channel = 'assistant', projectId, onSend, onSearch, disabled = false, busy = false, isVisible = true }) {
   const [text, setText] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -112,7 +112,9 @@ export default function ChatInput({ mode, projectId, onSend, onSearch, disabled 
     }
   };
 
-  const placeholder = busy
+  const placeholder = channel === 'shell'
+    ? 'Run a shell command or reply to the current prompt... (Ctrl+Enter to send)'
+    : busy
     ? 'Type to queue a follow-up message... (Ctrl+Enter to send)'
     : mode === 'plan'
       ? 'Describe what you want to build... (Ctrl+Enter to send)'
@@ -228,7 +230,9 @@ export default function ChatInput({ mode, projectId, onSend, onSearch, disabled 
           disabled={(!text.trim() && attachments.length === 0) || disabled}
           className={`p-2 rounded-lg transition-colors ${
             (text.trim() || attachments.length > 0) && !disabled
-              ? mode === 'plan'
+              ? channel === 'shell'
+                ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                : mode === 'plan'
                 ? 'bg-purple-600 hover:bg-purple-500 text-white'
                 : 'bg-green-600 hover:bg-green-500 text-white'
               : 'bg-surface-800 text-surface-600'

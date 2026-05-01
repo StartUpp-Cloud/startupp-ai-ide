@@ -193,7 +193,11 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const [showRaw, setShowRaw] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
   const [showLogInput, setShowLogInput] = useState(false);
-  const style = ROLE_STYLES[message.role] || ROLE_STYLES.agent;
+  const shellPrompt = message.metadata?.shell?.prompt;
+  const isShellMessage = message.metadata?.channel === 'shell' || Boolean(message.metadata?.shell);
+  const style = isShellMessage && message.role !== 'user'
+    ? { align: 'justify-start', bubble: 'bg-amber-500/10 border-amber-500/20', icon: Terminal, label: 'Shell' }
+    : ROLE_STYLES[message.role] || ROLE_STYLES.agent;
   const Icon = style.icon;
   const time = new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -262,6 +266,23 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
         <div className="text-sm leading-relaxed break-words">
           {renderedContent}
         </div>
+
+        {shellPrompt?.responses?.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {shellPrompt.responses.map((response) => {
+              const label = response === 'y' ? 'Yes' : response === 'n' ? 'No' : response === 'ctrl-c' ? 'Ctrl-C' : 'Enter';
+              return (
+                <button
+                  key={response}
+                  onClick={() => onSend?.(response, [], { channel: 'shell' })}
+                  className="px-2 py-1 rounded border border-amber-500/40 text-[11px] text-amber-200 hover:bg-amber-500/10 transition-colors"
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Task list */}
         {tasks && tasks.length > 0 && (
@@ -410,7 +431,7 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
           </div>
         )}
 
-        {(message.role === 'agent' || message.role === 'error') && (
+        {!isShellMessage && (message.role === 'agent' || message.role === 'error') && (
           <div className="mt-2 flex items-center gap-2">
             <button
               onClick={handleRetry}

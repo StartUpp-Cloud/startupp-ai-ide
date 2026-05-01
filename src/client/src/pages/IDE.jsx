@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useProjects } from '../contexts/ProjectContext';
 import ChatPanel from '../components/ChatPanel';
-import InternalConsole from '../components/InternalConsole';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import QuickActionsPanel from '../components/QuickActionsPanel';
 import TopBar from '../components/TopBar';
@@ -107,9 +106,6 @@ export default function IDE() {
     }
     return counts;
   }, [unreadSessions]);
-
-  // Active chat session ID (exposed by ChatPanel for InternalConsole sharing)
-  const [activeChatSessionId, setActiveChatSessionId] = useState(null);
 
   // Plan execution state (shared with TopBar)
   const [executionId, setExecutionId] = useState(null);
@@ -562,7 +558,6 @@ export default function IDE() {
                   mode={agentMode}
                   tool={selectedTool}
                   isActive={projectId === selectedProjectId}
-                  onActiveSessionChange={projectId === selectedProjectId ? setActiveChatSessionId : undefined}
                   onUnreadChange={handleUnreadChange}
                   onProjectRead={handleProjectRead}
                 />
@@ -577,7 +572,6 @@ export default function IDE() {
               </div>
             )}
           </div>
-          <InternalConsole projectId={selectedProjectId} chatWsRef={chatWsRef} activeChatSessionId={activeChatSessionId} />
         </div>
 
         {/* Right resizer */}
