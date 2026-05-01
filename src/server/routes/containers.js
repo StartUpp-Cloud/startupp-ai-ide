@@ -2,6 +2,8 @@ import { Router } from "express";
 import { execSync as rawExecSync } from "child_process";
 import path from "path";
 import os from "os";
+import fs from "fs";
+import multer from "multer";
 import { containerManager } from "../containerManager.js";
 import { getDB } from "../db.js";
 
@@ -309,6 +311,118 @@ router.get("/:name/repos", (req, res) => {
     }
 
     res.json({ repos });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CONTAINER FILE BROWSING & UPLOAD
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/containers/:name/browse
+ * List directories (and optionally files) at a path inside the container.
+ * Query: ?path=/workspace (default: /workspace)
+ */
+router.get("/:name/browse", (req, res) => {
+  try {
+    const { name } = req.params;
+    const browsePath = req.query.path || "/workspace";
+
+    const status = containerManager.getContainerStatus(name);
+    if (!status) return res.status(404).json({ error: "Container not found" });
+    if (status !== "running") return res.status(409).json({ error: "Container is not running" });
+
+    // Security: prevent path traversal
+    const resolved = path.posix.resolve(browsePath);
+    if (!resolved.startsWith("/workspace") && !resolved.startsWith("/home/dev")) {
+      return res.status(403).json({ error: "Browsing is restricted to /workspace and /home/dev" });
+    }
+
+    // List entries with type indicator: d=directory, f=file
+    const output = containerManager.execInContainer(
+      name,
+      `ls -1pA '${resolved}' 2>/dev/null`,
+      { timeout: 5000 },
+    );
+
+    if (output === null) {
+      return res.json({ path: resolved, entries: [] });
+    }
+
+    const entries = output.split("\n").filter(Boolean).map(entry => {
+      const isDir = entry.endsWith("/");
+      const entryName = isDir ? entry.slice(0, -1) : entry;
+      return { name: entryName, type: isDir ? "directory" : "file" };
+    });
+
+    // Sort: directories first, then alphabetical
+    entries.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    res.json({ path: resolved, entries });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Multer for temporary upload to host before docker cp
+const tmpUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 50 * 1024 * 1024 } });
+
+/**
+ * POST /api/containers/:name/upload
+ * Upload files directly into a container at a given destination path.
+ * Form fields: files (multipart), destination (string, e.g. "/workspace/my-repo/src")
+ */
+router.post("/:name/upload", tmpUpload.array("files", 20), (req, res) => {
+  try {
+    const { name } = req.params;
+    const destination = req.body.destination || "/workspace";
+
+    const status = containerManager.getContainerStatus(name);
+    if (!status) return res.status(404).json({ error: "Container not found" });
+    if (status !== "running") return res.status(409).json({ error: "Container is not running" });
+
+    // Security: restrict destination
+    const resolved = path.posix.resolve(destination);
+    if (!resolved.startsWith("/workspace") && !resolved.startsWith("/home/dev")) {
+      return res.status(403).json({ error: "Upload restricted to /workspace and /home/dev" });
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded" });
+    }
+
+    // Ensure destination directory exists in container
+    containerManager.execInContainer(name, `mkdir -p '${resolved}'`, { timeout: 5000 });
+
+    const uploaded = [];
+    const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].join(path.delimiter);
+    const envWithDocker = { ...process.env, PATH: `${process.env.PATH || ""}${path.delimiter}${extraPaths}` };
+
+    for (const file of req.files) {
+      const containerDest = `${resolved}/${file.originalname}`;
+      try {
+        rawExecSync(`docker cp '${file.path}' '${name}:${containerDest}'`, {
+          encoding: "utf-8",
+          env: envWithDocker,
+          timeout: 30000,
+        });
+        // Fix ownership so the dev user can access the file
+        containerManager.execInContainer(name, `chown dev:dev '${containerDest}' 2>/dev/null`, { timeout: 5000 });
+        uploaded.push({ name: file.originalname, path: containerDest, size: file.size });
+      } catch (err) {
+        uploaded.push({ name: file.originalname, error: err.message });
+      } finally {
+        // Clean up temp file
+        try { fs.unlinkSync(file.path); } catch { /* ignore */ }
+      }
+    }
+
+    res.json({ destination: resolved, uploaded });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

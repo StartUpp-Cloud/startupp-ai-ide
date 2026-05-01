@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Search, X, Paperclip, Image, FileText, File, Loader } from 'lucide-react';
+import { Send, Search, X, Paperclip, Upload, Image, FileText, File, Loader } from 'lucide-react';
+import ContainerUploadPopover from './ContainerUploadPopover';
 
 const FILE_ICONS = {
   image: Image,
@@ -27,6 +28,7 @@ export default function ChatInput({ mode, channel = 'assistant', projectId, onSe
   const [searchQuery, setSearchQuery] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
+  const [showUploadPopover, setShowUploadPopover] = useState(false);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -121,7 +123,7 @@ export default function ChatInput({ mode, channel = 'assistant', projectId, onSe
       : 'Tell the agent what to do... (Ctrl+Enter to send)';
 
   return (
-    <div className="flex-shrink-0 border-t border-surface-700 bg-surface-850/80 px-4 pt-3 pb-4 w-full">
+    <div className="flex-shrink-0 px-4 pt-3 pb-4 w-full">
       {/* Search bar */}
       {searching && (
         <div className="flex items-center gap-2 mb-2">
@@ -173,75 +175,100 @@ export default function ChatInput({ mode, channel = 'assistant', projectId, onSe
         </div>
       )}
 
-      {/* Text input */}
-      <textarea
-        ref={textareaRef}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={handleKeyDown}
-        placeholder={placeholder}
-        disabled={disabled}
-        rows={1}
-        className="w-full bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-sm text-surface-200 resize-none outline-none focus:border-primary-500/50 focus:ring-1 focus:ring-primary-500/20 disabled:opacity-40 placeholder:text-surface-500 transition-colors"
-      />
+      {/* Card container for input + toolbar */}
+      <div className="bg-surface-800/50 border border-surface-700/50 rounded-2xl px-3 pt-2 pb-2">
+        {/* Text input */}
+        <textarea
+          ref={textareaRef}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder}
+          disabled={disabled}
+          rows={1}
+          className="w-full bg-transparent border-none px-1 py-2 text-sm text-surface-200 resize-none outline-none disabled:opacity-40 placeholder:text-surface-500"
+        />
 
-      {/* Hidden file input */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        accept="image/*,.pdf,.txt,.md,.csv,.json,.js,.ts,.html,.css,.xml,.doc,.docx"
-        onChange={handleFileSelect}
-        className="hidden"
-      />
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="image/*,.pdf,.txt,.md,.csv,.json,.js,.ts,.html,.css,.xml,.doc,.docx"
+          onChange={handleFileSelect}
+          className="hidden"
+        />
 
-      {/* Toolbar */}
-      <div className="flex items-center justify-between mt-2 w-full min-w-0">
-        <div className="flex items-center gap-1">
-          {/* Search button */}
+        {/* Toolbar */}
+        <div className="flex items-center justify-between w-full min-w-0 relative">
+          <div className="flex items-center gap-0.5">
+            {/* Search button */}
+            <button
+              onClick={() => setSearching(!searching)}
+              className="p-1.5 text-surface-500 hover:text-surface-200 rounded transition-colors"
+              title="Search chat"
+            >
+              <Search size={16} />
+            </button>
+
+            {/* Attach to chat button */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading || !projectId}
+              className={`p-1.5 rounded transition-colors ${
+                uploading
+                  ? 'text-primary-400'
+                  : 'text-surface-500 hover:text-surface-200'
+              } disabled:opacity-40`}
+              title="Attach files to message"
+            >
+              {uploading ? (
+                <Loader size={16} className="animate-spin" />
+              ) : (
+                <Paperclip size={16} />
+              )}
+            </button>
+
+            {/* Upload to container button */}
+            <button
+              onClick={() => setShowUploadPopover(!showUploadPopover)}
+              disabled={!projectId}
+              className={`p-1.5 rounded transition-colors ${
+                showUploadPopover
+                  ? 'text-primary-400'
+                  : 'text-surface-500 hover:text-surface-200'
+              } disabled:opacity-40`}
+              title="Upload files to container"
+            >
+              <Upload size={16} />
+            </button>
+          </div>
+
+          {/* Send button */}
           <button
-            onClick={() => setSearching(!searching)}
-            className="p-1.5 text-surface-500 hover:text-surface-200 rounded transition-colors"
-            title="Search chat"
+            onClick={handleSend}
+            disabled={(!text.trim() && attachments.length === 0) || disabled}
+            className={`p-2 rounded-lg transition-colors ${
+              (text.trim() || attachments.length > 0) && !disabled
+                ? channel === 'shell'
+                  ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                  : mode === 'plan'
+                  ? 'bg-purple-600 hover:bg-purple-500 text-white'
+                  : 'bg-green-600 hover:bg-green-500 text-white'
+                : 'bg-surface-700 text-surface-600'
+            }`}
           >
-            <Search size={16} />
+            <Send size={16} />
           </button>
 
-          {/* Attach file button */}
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading || !projectId}
-            className={`p-1.5 rounded transition-colors ${
-              uploading
-                ? 'text-primary-400'
-                : 'text-surface-500 hover:text-surface-200'
-            } disabled:opacity-40`}
-            title="Attach files (images, PDF, text)"
-          >
-            {uploading ? (
-              <Loader size={16} className="animate-spin" />
-            ) : (
-              <Paperclip size={16} />
-            )}
-          </button>
+          {/* Container upload popover */}
+          {showUploadPopover && projectId && (
+            <ContainerUploadPopover
+              projectId={projectId}
+              onClose={() => setShowUploadPopover(false)}
+            />
+          )}
         </div>
-
-        {/* Send button */}
-        <button
-          onClick={handleSend}
-          disabled={(!text.trim() && attachments.length === 0) || disabled}
-          className={`p-2 rounded-lg transition-colors ${
-            (text.trim() || attachments.length > 0) && !disabled
-              ? channel === 'shell'
-                ? 'bg-amber-600 hover:bg-amber-500 text-white'
-                : mode === 'plan'
-                ? 'bg-purple-600 hover:bg-purple-500 text-white'
-                : 'bg-green-600 hover:bg-green-500 text-white'
-              : 'bg-surface-800 text-surface-600'
-          }`}
-        >
-          <Send size={16} />
-        </button>
       </div>
 
       {/* Upload hint */}
