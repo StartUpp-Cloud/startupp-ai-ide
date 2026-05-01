@@ -81,9 +81,8 @@ function normalizeInput(session, input) {
   if (/^(left|arrow left|←)$/i.test(trimmed)) return '\x1b[D';
   if (/^(space|spacebar)$/i.test(trimmed)) return ' ';
   if (/^(escape|esc)$/i.test(trimmed)) return '\x1b';
-  if (yesNoDefaultYes && /^(y|yes)$/i.test(trimmed)) return '\r';
-  if ((yesNoDefaultYes || yesNoDefaultNo) && /^(n|no)$/i.test(trimmed)) return 'n\r';
-  if (yesNoDefaultNo && /^(y|yes)$/i.test(trimmed)) return 'y\r';
+  if ((yesNoDefaultYes || yesNoDefaultNo) && /^(y|yes)$/i.test(trimmed)) return 'y';
+  if ((yesNoDefaultYes || yesNoDefaultNo) && /^(n|no)$/i.test(trimmed)) return 'n';
   if (/^(enter|return)$/i.test(trimmed)) return '\r';
   if (/^(ctrl-c|control-c|interrupt)$/i.test(trimmed)) return '\x03';
 
