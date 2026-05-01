@@ -121,7 +121,7 @@ export default function ChatInput({ mode, channel = 'assistant', projectId, onSe
       : 'Tell the agent what to do... (Ctrl+Enter to send)';
 
   return (
-    <div className="flex-shrink-0 border-t border-surface-700 bg-surface-850/80 px-3 py-2 w-full">
+    <div className="flex-shrink-0 border-t border-surface-700 bg-surface-850/80 px-4 pt-3 pb-4 w-full">
       {/* Search bar */}
       {searching && (
         <div className="flex items-center gap-2 mb-2">
@@ -173,56 +173,58 @@ export default function ChatInput({ mode, channel = 'assistant', projectId, onSe
         </div>
       )}
 
-      {/* Input area */}
-      <div className="flex items-end gap-2 w-full min-w-0">
-        {/* Search button */}
-        <button
-          onClick={() => setSearching(!searching)}
-          className="p-1.5 text-surface-500 hover:text-surface-200 rounded"
-          title="Search chat"
-        >
-          <Search size={16} />
-        </button>
+      {/* Text input */}
+      <textarea
+        ref={textareaRef}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        disabled={disabled}
+        rows={1}
+        className="w-full bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-sm text-surface-200 resize-none outline-none focus:border-primary-500/50 focus:ring-1 focus:ring-primary-500/20 disabled:opacity-40 placeholder:text-surface-500 transition-colors"
+      />
 
-        {/* Attach file button */}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading || !projectId}
-          className={`p-1.5 rounded transition-colors ${
-            uploading
-              ? 'text-primary-400'
-              : 'text-surface-500 hover:text-surface-200'
-          } disabled:opacity-40`}
-          title="Attach files (images, PDF, text)"
-        >
-          {uploading ? (
-            <Loader size={16} className="animate-spin" />
-          ) : (
-            <Paperclip size={16} />
-          )}
-        </button>
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept="image/*,.pdf,.txt,.md,.csv,.json,.js,.ts,.html,.css,.xml,.doc,.docx"
+        onChange={handleFileSelect}
+        className="hidden"
+      />
 
-        {/* Hidden file input */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept="image/*,.pdf,.txt,.md,.csv,.json,.js,.ts,.html,.css,.xml,.doc,.docx"
-          onChange={handleFileSelect}
-          className="hidden"
-        />
+      {/* Toolbar */}
+      <div className="flex items-center justify-between mt-2 w-full min-w-0">
+        <div className="flex items-center gap-1">
+          {/* Search button */}
+          <button
+            onClick={() => setSearching(!searching)}
+            className="p-1.5 text-surface-500 hover:text-surface-200 rounded transition-colors"
+            title="Search chat"
+          >
+            <Search size={16} />
+          </button>
 
-        {/* Text input */}
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          disabled={disabled}
-          rows={1}
-          className="flex-1 min-w-0 bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 resize-none outline-none focus:border-primary-500/50 focus:ring-1 focus:ring-primary-500/20 disabled:opacity-40 placeholder:text-surface-500 transition-colors"
-        />
+          {/* Attach file button */}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading || !projectId}
+            className={`p-1.5 rounded transition-colors ${
+              uploading
+                ? 'text-primary-400'
+                : 'text-surface-500 hover:text-surface-200'
+            } disabled:opacity-40`}
+            title="Attach files (images, PDF, text)"
+          >
+            {uploading ? (
+              <Loader size={16} className="animate-spin" />
+            ) : (
+              <Paperclip size={16} />
+            )}
+          </button>
+        </div>
 
         {/* Send button */}
         <button
