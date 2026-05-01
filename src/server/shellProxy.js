@@ -40,8 +40,21 @@ function dockerPath() {
   return cachedDockerBinary;
 }
 
+function stripTerminalControls(data = '') {
+  return stripAnsi(String(data || '')
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B[P^_][\s\S]*?\x1B\\/g, ''))
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1B[()][A-Za-z0-9]/g, '')
+    .replace(/\x1B[78=><]/g, '')
+    .replace(/\x1B./g, '')
+    .replace(/␛\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/␛[78=><]?/g, '');
+}
+
 function cleanOutput(data, command = '') {
-  let text = stripAnsi(String(data || ''))
+  let text = stripTerminalControls(data)
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
@@ -58,10 +71,16 @@ function cleanOutput(data, command = '') {
 function normalizeInput(session, input) {
   const text = String(input || '');
   const trimmed = text.trim();
-  const tail = stripAnsi(session.outputTail || '').trimEnd();
+  const tail = stripTerminalControls(session.outputTail || '').trimEnd();
   const yesNoDefaultYes = /(?:\(|\[)Y\/n(?:\)|\])\s*$/i.test(tail);
   const yesNoDefaultNo = /(?:\(|\[)y\/N(?:\)|\])\s*$/i.test(tail);
 
+  if (/^(down|arrow down|↓)$/i.test(trimmed)) return '\x1b[B';
+  if (/^(up|arrow up|↑)$/i.test(trimmed)) return '\x1b[A';
+  if (/^(right|arrow right|→)$/i.test(trimmed)) return '\x1b[C';
+  if (/^(left|arrow left|←)$/i.test(trimmed)) return '\x1b[D';
+  if (/^(space|spacebar)$/i.test(trimmed)) return ' ';
+  if (/^(escape|esc)$/i.test(trimmed)) return '\x1b';
   if (yesNoDefaultYes && /^(y|yes)$/i.test(trimmed)) return '\r';
   if ((yesNoDefaultYes || yesNoDefaultNo) && /^(n|no)$/i.test(trimmed)) return 'n\r';
   if (yesNoDefaultNo && /^(y|yes)$/i.test(trimmed)) return 'y\r';
@@ -152,7 +171,7 @@ class ShellProxy extends EventEmitter {
     session.outputTail = (session.outputTail + data).slice(-5000);
     const clean = cleanOutput(data, session.currentCommand);
 
-    if (stripAnsi(data).includes(SHELL_PROMPT)) {
+    if (stripTerminalControls(data).includes(SHELL_PROMPT)) {
       session.atPrompt = true;
       session.currentCommand = '';
     }
@@ -164,7 +183,7 @@ class ShellProxy extends EventEmitter {
       chatSessionId: session.chatSessionId,
       data: clean,
       atPrompt: session.atPrompt,
-      tail: stripAnsi(session.outputTail).slice(-500),
+      tail: stripTerminalControls(session.outputTail).slice(-500),
     });
   }
 

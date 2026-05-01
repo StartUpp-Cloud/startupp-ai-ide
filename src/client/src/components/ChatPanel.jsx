@@ -582,7 +582,10 @@ function ChatSessionContent({
           streamingChunksRef.current = '';
           if (msg.message) {
             knownIdsRef.current.add(msg.message.id);
-            setMessages(prev => [...prev.filter(m => m.id !== msg.messageId), msg.message]);
+            setMessages(prev => [
+              ...prev.filter(m => m.id !== msg.messageId && m.id !== msg.message.id),
+              msg.message,
+            ]);
             setAgentBusy(false);
           }
           break;

@@ -955,10 +955,29 @@ class TerminalServer {
     return `[output truncated to last ${max} chars]\n` + text.slice(-max);
   }
 
+  stripShellControls(text) {
+    return stripAnsi(String(text || '')
+      .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+      .replace(/\x1B[P^_][\s\S]*?\x1B\\/g, ''))
+      .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/\x1B[()][A-Za-z0-9]/g, '')
+      .replace(/\x1B[78=><]/g, '')
+      .replace(/\x1B./g, '')
+      .replace(/␛\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/␛[78=><]?/g, '');
+  }
+
   detectShellPrompt(text) {
-    const clean = stripAnsi(String(text || '')).trimEnd();
+    const clean = this.stripShellControls(text).trimEnd();
     const lines = clean.split('\n').map(line => line.trim()).filter(Boolean);
     const lastLine = lines[lines.length - 1] || '';
+
+    if (/Use arrows to move/i.test(clean)) {
+      const questionLine = [...lines].reverse().find(line => /\?/.test(line)) || lastLine;
+      const selectedLine = [...lines].reverse().find(line => line.startsWith('>'));
+      const promptText = selectedLine ? `${questionLine}\n${selectedLine}` : questionLine;
+      return { type: 'menu', text: promptText.slice(-240), responses: ['enter', 'down', 'up', 'ctrl-c'] };
+    }
 
     if (/(?:\(|\[)[Yy]\/[Nn](?:\)|\])\s*$/.test(lastLine)) {
       return { type: 'yes-no', text: lastLine.slice(-240), responses: ['y', 'n', 'enter', 'ctrl-c'] };
