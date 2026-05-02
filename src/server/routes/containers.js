@@ -690,6 +690,40 @@ router.post("/:name/git-merge-pr", (req, res) => {
   }
 });
 
+/**
+ * POST /api/containers/:name/worktree-cleanup
+ * Remove a git worktree and optionally delete the local branch.
+ * Body: { branch }
+ */
+router.post("/:name/worktree-cleanup", (req, res) => {
+  try {
+    const { name } = req.params;
+    const { branch } = req.body;
+    if (!branch) return res.status(400).json({ error: "branch is required" });
+
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, "-");
+    const wtPath = `/workspace/.worktrees/${safeBranch}`;
+    const repoPath = containerManager.getWorkDir(name) || "/workspace";
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
+
+    // Remove the worktree
+    exec(`cd '${repoPath}' && git worktree remove '${wtPath}' --force 2>/dev/null`);
+
+    // Delete the local branch (safe — git refuses if it has unmerged changes)
+    exec(`cd '${repoPath}' && git branch -d '${branch}' 2>/dev/null`);
+
+    // Prune worktree metadata
+    exec(`cd '${repoPath}' && git worktree prune 2>/dev/null`);
+
+    res.json({ cleaned: true, branch, worktreePath: wtPath });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────────────────
 // CONTAINER FILE BROWSING & UPLOAD
 // ──────────────────────────────────────────────────────────────────────────────
