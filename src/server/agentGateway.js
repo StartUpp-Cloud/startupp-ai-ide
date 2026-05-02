@@ -1301,8 +1301,15 @@ RULES:
     // Include project rules so the LLM can flag relevant ones
     const rules = this._getProjectRules(projectId);
 
-    const prompt = `You are a context distiller for an AI coding assistant orchestrator. Analyze the conversation history below and produce a concise context brief that will be injected into the next message to the coding assistant.
+    // Include branch/worktree context if this session is branch-scoped
+    const sessionMeta = chatStore.getSession(projectId, chatSessionId);
+    const sessionBranch = sessionMeta?.branch || null;
+    const branchCtx = sessionBranch
+      ? `\nWORKING BRANCH: ${sessionBranch} (worktree at /workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')})\n`
+      : '';
 
+    const prompt = `You are a context distiller for an AI coding assistant orchestrator. Analyze the conversation history below and produce a concise context brief that will be injected into the next message to the coding assistant.
+${branchCtx}
 CONVERSATION HISTORY:
 ${transcript}
 
@@ -1316,7 +1323,7 @@ Extract ONLY what the coding assistant needs to handle the next message correctl
 3. Errors encountered and their resolutions
 4. Constraints or requirements established by the user
 5. Any unfinished work or pending items
-${rules ? '6. Which project rules are relevant to the current request (quote the rule number and text)' : ''}
+${sessionBranch ? `6. The working branch and worktree path (always include this)\n` : ''}${rules ? `${sessionBranch ? '7' : '6'}. Which project rules are relevant to the current request (quote the rule number and text)` : ''}
 
 Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the coding assistant can derive from the codebase itself. If the conversation is straightforward and the next message is self-contained, respond with just "SKIP".`;
 
@@ -1529,6 +1536,18 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
       ? String(skillContext.length) + '|' + skillContext.slice(0, 64)
       : '';
 
+    // Look up session branch for worktree context (used by all tools + follow-ups)
+    const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
+    const sessionBranch = sessionMeta?.branch || null;
+
+    // Build a short branch context reminder for follow-ups and Aider
+    const branchReminder = (() => {
+      if (!sessionBranch) return '';
+      const safeBranch = sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-');
+      const worktreePath = `/workspace/.worktrees/${safeBranch}`;
+      return `[Working on branch '${sessionBranch}' in ${worktreePath} — stay in this directory]`;
+    })();
+
     let fullMessage;
     if (tool === 'aider') {
       // Aider: always use a clean structured message. Rules are embedded with XML tags
@@ -1539,11 +1558,9 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
         if (!rules) return '';
         return `<project_rules>\n${rules}\n</project_rules>\n\n`;
       })();
-      fullMessage = `${aiderRulesPreamble}<task>\nThink carefully and thoroughly. Before making any changes, read all relevant project files to fully understand the existing code, patterns, and context.\n\n${message}\n</task>`;
+      const branchCtx = branchReminder ? `<working_branch>\n${branchReminder}\n</working_branch>\n\n` : '';
+      fullMessage = `${aiderRulesPreamble}${branchCtx}<task>\nThink carefully and thoroughly. Before making any changes, read all relevant project files to fully understand the existing code, patterns, and context.\n\n${message}\n</task>`;
     } else if (isFirstMessage) {
-      // Look up session branch for worktree instruction
-      const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
-      const sessionBranch = sessionMeta?.branch || null;
       const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings, sessionBranch);
       fullMessage = preamble + '\n\n---\n\n' + message;
       // Record the skill hash so we can detect changes on future messages
@@ -1556,11 +1573,14 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
       fullMessage = message;
     }
 
-    // Inject distilled context for follow-up messages
-    // This ensures the coding assistant retains key decisions, files, and constraints
-    // even if its own session memory was lost, compacted, or drifted.
-    if (!isFirstMessage && distilledContext) {
-      fullMessage = `[Session Context — do not repeat this back, use it to inform your response]\n${distilledContext}\n\n[User Request]\n${fullMessage}`;
+    // Inject distilled context + branch reminder for follow-up messages
+    // This ensures the coding assistant retains key decisions, files, constraints,
+    // and branch context even if its own session memory was lost or compacted.
+    if (!isFirstMessage && (distilledContext || branchReminder)) {
+      const contextParts = [];
+      if (branchReminder) contextParts.push(branchReminder);
+      if (distilledContext) contextParts.push(distilledContext);
+      fullMessage = `[Session Context — do not repeat this back, use it to inform your response]\n${contextParts.join('\n')}\n\n[User Request]\n${fullMessage}`;
     }
     const encoded = Buffer.from(fullMessage, 'utf8').toString('base64');
     const promptArg = `\"$(printf %s '${encoded}' | base64 -d)\"`;

@@ -24,11 +24,16 @@ class AgentShellPool extends EventEmitter {
 
     if (existing) {
       const session = ptyManager.getSession(existing.sessionId);
-      if (session && session.status === 'active') {
+      const cwdChanged = (cwdOverride || null) !== (existing.cwdOverride || null);
+      if (session && session.status === 'active' && !cwdChanged) {
         console.log(`[agentShellPool] Reusing session ${existing.sessionId} for ${key}`);
         return { sessionId: existing.sessionId, isNew: false };
       }
-      console.log(`[agentShellPool] Session ${existing.sessionId} is ${session?.status || 'gone'}, creating new for ${key}`);
+      if (cwdChanged) {
+        console.log(`[agentShellPool] CWD changed for ${key} (${existing.cwdOverride} -> ${cwdOverride}), creating new session`);
+      } else {
+        console.log(`[agentShellPool] Session ${existing.sessionId} is ${session?.status || 'gone'}, creating new for ${key}`);
+      }
       this.sessions.delete(key);
       this.outputBuffers.delete(existing.sessionId);
     }
@@ -67,6 +72,7 @@ class AgentShellPool extends EventEmitter {
       sessionId: result.sessionId,
       projectId,
       tool,
+      cwdOverride: cwdOverride || null,
       createdAt: new Date().toISOString(),
     });
     this.outputBuffers.set(result.sessionId, '');
