@@ -461,6 +461,236 @@ router.post("/:name/worktree", (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
+// GIT ACTIONS (pull, status, commit+push, PR)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** Helper: resolve effective repo path for git actions (worktree-aware) */
+function resolveGitPath(name, query) {
+  if (query.worktreePath) return query.worktreePath;
+  if (query.repoPath) return query.repoPath;
+  return containerManager.getWorkDir(name) || "/workspace";
+}
+
+/** Helper: validate container is running */
+function requireRunning(name) {
+  const status = containerManager.getContainerStatus(name);
+  if (!status) return { error: "Container not found", code: 404 };
+  if (status !== "running") return { error: "Container is not running", code: 409 };
+  return null;
+}
+
+/**
+ * GET /api/containers/:name/git-status
+ * Get branch status: current branch, dirty files, ahead/behind, PR status.
+ * Query: ?worktreePath=...&repoPath=...
+ */
+router.get("/:name/git-status", (req, res) => {
+  try {
+    const { name } = req.params;
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    const gitPath = resolveGitPath(name, req.query);
+    const exec = (cmd) => containerManager.execInContainer(name, cmd, { timeout: 10000 });
+
+    const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim() || null;
+    const statusRaw = exec(`cd '${gitPath}' && git status --porcelain 2>/dev/null`) || "";
+    const dirty = statusRaw.trim().split("\n").filter(Boolean);
+    const staged = dirty.filter(l => /^[MADRC]/.test(l)).length;
+    const unstaged = dirty.filter(l => /^.[MDRC?]/.test(l) || /^\?\?/.test(l)).length;
+
+    // Ahead/behind remote
+    let ahead = 0, behind = 0;
+    const tracking = exec(`cd '${gitPath}' && git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null`)?.trim();
+    if (tracking) {
+      const ab = exec(`cd '${gitPath}' && git rev-list --left-right --count '${tracking}...HEAD' 2>/dev/null`)?.trim();
+      if (ab) {
+        const [b, a] = ab.split(/\s+/).map(Number);
+        behind = b || 0;
+        ahead = a || 0;
+      }
+    }
+
+    // Check for GitHub PR via gh CLI (if installed)
+    let pr = null;
+    try {
+      const prJson = exec(`cd '${gitPath}' && gh pr view --json number,title,state,url 2>/dev/null`);
+      if (prJson) pr = JSON.parse(prJson.trim());
+    } catch { /* gh not installed or no PR */ }
+
+    res.json({ branch, dirty: dirty.length, staged, unstaged, ahead, behind, tracking: tracking || null, pr, repoPath: gitPath });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/containers/:name/git-pull
+ * Pull latest changes.
+ * Body: { worktreePath?, repoPath? }
+ */
+router.post("/:name/git-pull", (req, res) => {
+  try {
+    const { name } = req.params;
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    const gitPath = resolveGitPath(name, req.body);
+    const output = containerManager.execInContainer(name,
+      `cd '${gitPath}' && git pull --ff-only 2>&1`,
+      { timeout: 30000 },
+    );
+    res.json({ output: output || "Already up to date." });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/containers/:name/git-commit-push
+ * Stage all, commit with auto-generated message, and push.
+ * Body: { worktreePath?, repoPath?, message? }
+ * If message is omitted, generates one from the diff.
+ */
+router.post("/:name/git-commit-push", async (req, res) => {
+  try {
+    const { name } = req.params;
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    const gitPath = resolveGitPath(name, req.body);
+    const exec = (cmd, timeout = 15000) => containerManager.execInContainer(name, cmd, { timeout });
+
+    // Stage everything
+    exec(`cd '${gitPath}' && git add -A`);
+
+    // Check if there's anything to commit
+    const staged = exec(`cd '${gitPath}' && git diff --cached --stat 2>/dev/null`)?.trim();
+    if (!staged) return res.status(400).json({ error: "Nothing to commit" });
+
+    // Generate commit message if not provided
+    let message = req.body.message?.trim();
+    if (!message) {
+      const diffSummary = exec(`cd '${gitPath}' && git diff --cached --stat 2>/dev/null`)?.trim() || "";
+      const diffContent = exec(`cd '${gitPath}' && git diff --cached --no-color 2>/dev/null | head -200`)?.trim() || "";
+      const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim() || "unknown";
+
+      // Try LLM-generated message
+      try {
+        const { default: llmProvider } = await import("../llmProvider.js");
+        const prompt = `Generate a concise git commit message (max 72 chars for title, optional body after blank line) for these changes on branch '${branch}':\n\n${diffSummary}\n\n${diffContent}`;
+        const generated = await llmProvider.generateText(prompt, { maxTokens: 150 });
+        message = generated?.trim();
+      } catch { /* LLM unavailable */ }
+
+      if (!message) {
+        // Fallback: generate from diff stat
+        const files = staged.split("\n").filter(l => l.includes("|")).map(l => l.trim().split(/\s+/)[0]);
+        message = `Update ${files.slice(0, 3).join(", ")}${files.length > 3 ? ` and ${files.length - 3} more` : ""}`;
+      }
+    }
+
+    // Commit
+    const safeMsg = message.replace(/'/g, "'\\''");
+    exec(`cd '${gitPath}' && git commit -m '${safeMsg}'`, 15000);
+
+    // Push
+    const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim();
+    const pushOutput = exec(`cd '${gitPath}' && git push -u origin '${branch}' 2>&1`, 30000) || "";
+
+    res.json({ message, branch, pushOutput, staged });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/containers/:name/git-create-pr
+ * Create a GitHub PR for the current branch using gh CLI.
+ * Body: { worktreePath?, repoPath?, title?, body? }
+ */
+router.post("/:name/git-create-pr", async (req, res) => {
+  try {
+    const { name } = req.params;
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    const gitPath = resolveGitPath(name, req.body);
+    const exec = (cmd, timeout = 15000) => containerManager.execInContainer(name, cmd, { timeout });
+
+    const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim();
+    if (!branch || ["main", "master"].includes(branch)) {
+      return res.status(400).json({ error: "Cannot create PR from main/master" });
+    }
+
+    // Generate title/body if not provided
+    let title = req.body.title?.trim();
+    let body = req.body.body?.trim();
+
+    if (!title) {
+      // Get log of commits not on main
+      const baseBranch = exec(`cd '${gitPath}' && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`)?.trim() || "main";
+      const log = exec(`cd '${gitPath}' && git log '${baseBranch}..HEAD' --oneline 2>/dev/null`)?.trim() || "";
+      const diffStat = exec(`cd '${gitPath}' && git diff '${baseBranch}...HEAD' --stat 2>/dev/null`)?.trim() || "";
+
+      try {
+        const { default: llmProvider } = await import("../llmProvider.js");
+        const prompt = `Generate a GitHub PR title (max 70 chars) and a markdown body with a ## Summary section (2-3 bullet points) for branch '${branch}':\n\nCommits:\n${log}\n\nChanges:\n${diffStat}`;
+        const generated = await llmProvider.generateText(prompt, { maxTokens: 300 });
+        if (generated) {
+          const lines = generated.trim().split("\n");
+          title = lines[0].replace(/^#+\s*/, "").trim();
+          body = lines.slice(1).join("\n").trim() || undefined;
+        }
+      } catch { /* LLM unavailable */ }
+
+      if (!title) title = branch.replace(/[-_/]/g, " ").replace(/^\w/, c => c.toUpperCase());
+    }
+
+    const safeTitle = title.replace(/'/g, "'\\''");
+    const safeBody = (body || `Branch: ${branch}`).replace(/'/g, "'\\''");
+
+    const prOutput = exec(
+      `cd '${gitPath}' && gh pr create --title '${safeTitle}' --body '${safeBody}' 2>&1`,
+      30000,
+    );
+
+    // Try to parse the PR URL from output
+    const urlMatch = prOutput?.match(/https:\/\/github\.com\/[^\s]+/);
+
+    res.json({ title, body, output: prOutput, url: urlMatch?.[0] || null, branch });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/containers/:name/git-merge-pr
+ * Merge an open PR for the current branch using gh CLI.
+ * Body: { worktreePath?, repoPath?, method? (merge|squash|rebase) }
+ */
+router.post("/:name/git-merge-pr", (req, res) => {
+  try {
+    const { name } = req.params;
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    const gitPath = resolveGitPath(name, req.body);
+    const method = req.body.method || "squash";
+    const exec = (cmd, timeout = 15000) => containerManager.execInContainer(name, cmd, { timeout });
+
+    const output = exec(
+      `cd '${gitPath}' && gh pr merge --${method} --delete-branch 2>&1`,
+      30000,
+    );
+
+    res.json({ output, method });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
 // CONTAINER FILE BROWSING & UPLOAD
 // ──────────────────────────────────────────────────────────────────────────────
 

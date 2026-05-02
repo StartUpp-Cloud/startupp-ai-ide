@@ -96,8 +96,6 @@ export default function IDE() {
   const [currentBranch, setCurrentBranch] = useState(null);
   // Container repos state
   const [containerRepos, setContainerRepos] = useState([]);
-  // Active session's branch (for sidebar highlighting)
-  const [activeSessionBranch, setActiveSessionBranch] = useState(null);
 
   // Unread session IDs per project. Counts are derived so duplicate events stay idempotent.
   const [unreadSessions, setUnreadSessions] = useState({});
@@ -448,18 +446,8 @@ export default function IDE() {
               </div>
 
               {/* Repos + Branches */}
-              {selectedProject && (containerRepos.length > 0 || currentBranch || activeSessionBranch) && (
+              {selectedProject && (containerRepos.length > 0 || currentBranch) && (
                 <div className="flex-shrink-0 px-2 py-2 bg-surface-800/50 border-y border-surface-700 space-y-1 max-h-48 overflow-y-auto">
-                  {/* Active session worktree indicator */}
-                  {activeSessionBranch && (
-                    <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-primary-500/10 border border-primary-500/20">
-                      <GitBranch className="w-3.5 h-3.5 text-primary-400 flex-shrink-0" />
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-[11px] font-mono font-semibold text-primary-300 truncate">{activeSessionBranch}</span>
-                        <span className="text-[9px] text-primary-400/70">Session worktree</span>
-                      </div>
-                    </div>
-                  )}
                   {containerRepos.length > 0 ? (
                     containerRepos.map(repo => (
                       <div key={repo.path} className="px-2 py-1.5 rounded-md bg-surface-850 border border-surface-700/50">
@@ -572,11 +560,6 @@ export default function IDE() {
                   isActive={projectId === selectedProjectId}
                   onUnreadChange={handleUnreadChange}
                   onProjectRead={handleProjectRead}
-                  onActiveSessionChange={(sessionId, branch) => {
-                    if (projectId === selectedProjectId) {
-                      setActiveSessionBranch(branch || null);
-                    }
-                  }}
                 />
               </div>
             ))}

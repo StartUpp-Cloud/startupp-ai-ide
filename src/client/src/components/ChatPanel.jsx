@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
+import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch } from 'lucide-react';
 import {
@@ -168,11 +169,10 @@ function dedupeModelOptions(options) {
   });
 }
 
-function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange, containerName }) {
+function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange }) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
   const rawEffort = session?.effort || '';
-  const sessionBranch = session?.branch || '';
 
   // Dynamic Ollama model loading — queries host + container, shows installed models at top
   // Also loads for OpenCode and Aider since they support ollama/ provider prefix
@@ -234,53 +234,6 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       })
       .catch(() => { setOpencodeModels(null); });
   }, [effectiveTool, projectId]);
-
-  // Fetch available git branches from container
-  const [branchOptions, setBranchOptions] = useState(null);
-  const [branchLoading, setBranchLoading] = useState(false);
-  useEffect(() => {
-    if (!containerName) { setBranchOptions(null); return; }
-    setBranchLoading(true);
-    fetch(`/api/containers/${containerName}/branches`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data?.branches?.length > 0) {
-          // Combine local + remote (strip origin/ prefix, deduplicate)
-          const localSet = new Set(data.branches);
-          const remote = (data.remoteBranches || [])
-            .map(b => b.replace(/^origin\//, ''))
-            .filter(b => !localSet.has(b));
-          setBranchOptions([...data.branches, ...remote]);
-        } else {
-          setBranchOptions(null);
-        }
-      })
-      .catch(() => setBranchOptions(null))
-      .finally(() => setBranchLoading(false));
-  }, [containerName]);
-
-  const handleBranchChange = async (newBranch) => {
-    if (!containerName || newBranch === sessionBranch) return;
-    if (newBranch) {
-      // Ensure worktree exists before updating session
-      try {
-        const res = await fetch(`/api/containers/${containerName}/worktree`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ branch: newBranch }),
-        });
-        if (!res.ok) {
-          const err = await res.json();
-          console.error('Worktree creation failed:', err.error);
-          return;
-        }
-      } catch (err) {
-        console.error('Worktree error:', err);
-        return;
-      }
-    }
-    onUpdate({ branch: newBranch || null });
-  };
 
   // Only show the model/effort if it belongs to this tool's options — prevents
   // stale values from a previous tool leaking into the dropdown.
@@ -403,32 +356,8 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
         </>
       )}
 
-      {/* Branch selector — available for all channels when container has branches */}
-      {branchOptions && branchOptions.length > 0 && (
-        <div className="flex items-center gap-1.5 min-w-0">
-          <GitBranch size={12} className={sessionBranch ? 'text-green-400' : 'text-surface-500'} />
-          <select
-            value={sessionBranch}
-            disabled={disabled || branchLoading}
-            onChange={(e) => handleBranchChange(e.target.value)}
-            className={`max-w-[160px] bg-surface-800 border rounded px-2 py-1 text-[11px] outline-none focus:border-primary-500/50 disabled:opacity-50 ${
-              sessionBranch
-                ? 'border-green-500/40 text-green-300'
-                : 'border-surface-700 text-surface-200'
-            }`}
-          >
-            <option value="">Default (main workspace)</option>
-            {branchOptions.map(b => (
-              <option key={b} value={b}>{b}</option>
-            ))}
-          </select>
-        </div>
-      )}
-
       <div className="ml-auto text-[10px] text-surface-500 truncate">
-        {sessionBranch
-          ? `Worktree: /workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
-          : channel === 'shell'
+        {channel === 'shell'
           ? 'Interactive shell: full terminal PTY inside the project container'
           : effectiveTool === 'ollama'
           ? 'IDE orchestrator enabled: workspace scan, retrieval, stack guidance, task planning'
@@ -1148,7 +1077,6 @@ function ChatSessionContent({
         onUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
         channel={chatChannel}
         onChannelChange={setChatChannel}
-        containerName={containerName}
       />
 
       {chatChannel === 'shell' ? (
@@ -1245,6 +1173,15 @@ function ChatSessionContent({
           </button>
         )}
       </div>
+
+      {containerName && (
+        <BranchBar
+          containerName={containerName}
+          session={session}
+          projectId={projectId}
+          onBranchChange={(branch) => onUpdateSessionConfig?.(sessionId, { branch })}
+        />
+      )}
 
       <ChatInput
         mode={mode}
