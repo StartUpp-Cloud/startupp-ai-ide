@@ -406,9 +406,18 @@ RULES:
   // ── Run a shell command and format the result ──
 
   async _runShellCommand(projectId, sessionId, cmd, originalQuestion, broadcastFn, ctx, skipUnread = false) {
+    // Resolve worktree CWD override for branch-scoped sessions
+    const sessionMeta = sessionId && projectId ? chatStore.getSession(projectId, sessionId) : null;
+    const shellBranch = sessionMeta?.branch || null;
+    let shellCwdOverride = null;
+    if (shellBranch) {
+      const safeBranch = shellBranch.replace(/[^a-zA-Z0-9._-]/g, '-');
+      shellCwdOverride = `/workspace/.worktrees/${safeBranch}`;
+    }
+
     let shellSessionId;
     try {
-      const sess = await agentShellPool.getSession(projectId, sessionId || 'shell');
+      const sess = await agentShellPool.getSession(projectId, sessionId || 'shell', shellCwdOverride);
       shellSessionId = sess.sessionId;
       if (sess.isNew) await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
