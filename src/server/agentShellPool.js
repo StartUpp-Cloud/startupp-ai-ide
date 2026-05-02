@@ -18,7 +18,7 @@ class AgentShellPool extends EventEmitter {
     return `${projectId}:${tool || 'shell'}`;
   }
 
-  async getSession(projectId, tool = 'shell') {
+  async getSession(projectId, tool = 'shell', cwdOverride = null) {
     const key = this._key(projectId, tool);
     const existing = this.sessions.get(key);
 
@@ -47,9 +47,10 @@ class AgentShellPool extends EventEmitter {
         const started = containerManager.startContainer(containerName);
         if (!started) throw new Error(`Failed to start container ${containerName}`);
       }
-      workingDir = containerManager.getWorkDir(containerName) || '/workspace';
+      // Use worktree path override if provided (branch-per-session)
+      workingDir = cwdOverride || containerManager.getWorkDir(containerName) || '/workspace';
     } else if (project?.folderPath) {
-      workingDir = project.folderPath;
+      workingDir = cwdOverride || project.folderPath;
     }
 
     const result = ptyManager.createSession({

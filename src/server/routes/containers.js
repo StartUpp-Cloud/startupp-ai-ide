@@ -284,7 +284,7 @@ router.get("/:name/repos", (req, res) => {
       const folderName = dir.split("/").pop();
 
       // Check if it's a git repo
-      const isGit = containerManager.execInContainer(name, `test -d ${dir}/.git && echo yes`) === "yes";
+      const isGit = containerManager.execInContainer(name, `test -e ${dir}/.git && echo yes`) === "yes";
       let branch = null;
       let hasChanges = false;
 
@@ -311,6 +311,150 @@ router.get("/:name/repos", (req, res) => {
     }
 
     res.json({ repos });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GIT BRANCHES & WORKTREES
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/containers/:name/branches
+ * List git branches for a repo inside the container.
+ * Query: ?repoPath=/workspace/my-repo (default: auto-detect single repo or /workspace)
+ */
+router.get("/:name/branches", (req, res) => {
+  try {
+    const { name } = req.params;
+    const status = containerManager.getContainerStatus(name);
+    if (!status) return res.status(404).json({ error: "Container not found" });
+    if (status !== "running") return res.status(409).json({ error: "Container is not running" });
+
+    // Determine repo path
+    let repoPath = req.query.repoPath;
+    if (!repoPath) {
+      // Auto-detect: use getWorkDir or list repos
+      repoPath = containerManager.getWorkDir(name) || "/workspace";
+    }
+
+    // Get current branch
+    const current = containerManager.execInContainer(name,
+      `cd '${repoPath}' && git branch --show-current 2>/dev/null`,
+      { timeout: 5000 },
+    )?.trim() || null;
+
+    // Get all local branches
+    const rawBranches = containerManager.execInContainer(name,
+      `cd '${repoPath}' && git branch --list --format='%(refname:short)' 2>/dev/null`,
+      { timeout: 5000 },
+    );
+
+    const branches = rawBranches
+      ? rawBranches.split("\n").filter(Boolean).map(b => b.trim())
+      : [];
+
+    // Get remote branches (for creating new worktrees from remote tracking branches)
+    const rawRemote = containerManager.execInContainer(name,
+      `cd '${repoPath}' && git branch -r --format='%(refname:short)' 2>/dev/null`,
+      { timeout: 5000 },
+    );
+    const remoteBranches = rawRemote
+      ? rawRemote.split("\n").filter(Boolean).map(b => b.trim()).filter(b => !b.includes("HEAD"))
+      : [];
+
+    res.json({ repoPath, current, branches, remoteBranches });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/containers/:name/worktree
+ * Create or ensure a git worktree for a branch inside the container.
+ * Body: { branch, repoPath? }
+ * Returns: { worktreePath, created }
+ *
+ * Convention: worktrees live at /workspace/.worktrees/<sanitized-branch-name>
+ */
+router.post("/:name/worktree", (req, res) => {
+  try {
+    const { name } = req.params;
+    const { branch, repoPath } = req.body;
+
+    if (!branch) return res.status(400).json({ error: "branch is required" });
+
+    const status = containerManager.getContainerStatus(name);
+    if (!status) return res.status(404).json({ error: "Container not found" });
+    if (status !== "running") return res.status(409).json({ error: "Container is not running" });
+
+    const effectiveRepoPath = repoPath || containerManager.getWorkDir(name) || "/workspace";
+
+    // Sanitize branch name for directory path
+    const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, "-");
+    const worktreePath = `/workspace/.worktrees/${safeBranch}`;
+
+    // Check if worktree already exists
+    const exists = containerManager.execInContainer(name,
+      `test -d '${worktreePath}' && echo yes`,
+      { timeout: 5000 },
+    )?.trim() === "yes";
+
+    if (exists) {
+      // Verify it's a valid git worktree and on the right branch
+      const wtBranch = containerManager.execInContainer(name,
+        `cd '${worktreePath}' && git branch --show-current 2>/dev/null`,
+        { timeout: 5000 },
+      )?.trim();
+
+      if (wtBranch === branch) {
+        return res.json({ worktreePath, created: false, branch: wtBranch });
+      }
+      // Exists but wrong branch — remove and recreate
+      containerManager.execInContainer(name,
+        `cd '${effectiveRepoPath}' && git worktree remove '${worktreePath}' --force 2>/dev/null`,
+        { timeout: 10000 },
+      );
+    }
+
+    // Ensure parent directory exists
+    containerManager.execInContainer(name,
+      `mkdir -p /workspace/.worktrees`,
+      { timeout: 5000 },
+    );
+
+    // Check if branch exists locally
+    const localExists = containerManager.execInContainer(name,
+      `cd '${effectiveRepoPath}' && git show-ref --verify --quiet refs/heads/${branch} && echo yes`,
+      { timeout: 5000 },
+    )?.trim() === "yes";
+
+    // Check if branch exists on remote
+    const remoteExists = !localExists && containerManager.execInContainer(name,
+      `cd '${effectiveRepoPath}' && git show-ref --verify --quiet refs/remotes/origin/${branch} && echo yes`,
+      { timeout: 5000 },
+    )?.trim() === "yes";
+
+    let addCmd;
+    if (localExists) {
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' '${branch}'`;
+    } else if (remoteExists) {
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' -b '${branch}' 'origin/${branch}'`;
+    } else {
+      // Branch doesn't exist — create it from current HEAD
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add -b '${branch}' '${worktreePath}'`;
+    }
+
+    const output = containerManager.execInContainer(name, addCmd, { timeout: 30000 });
+
+    // Fix ownership
+    containerManager.execInContainer(name,
+      `chown -R dev:dev '${worktreePath}' 2>/dev/null`,
+      { timeout: 10000 },
+    );
+
+    res.json({ worktreePath, created: true, branch, output });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

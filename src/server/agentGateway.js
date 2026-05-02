@@ -699,10 +699,19 @@ RULES:
   async _attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
     const { job, onChunk, distilledContext } = streamOpts;
 
+    // Look up session branch for worktree CWD override
+    const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
+    const sessionBranch = sessionMeta?.branch || null;
+    let worktreeOverride = null;
+    if (sessionBranch) {
+      const safeBranch = sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-');
+      worktreeOverride = `/workspace/.worktrees/${safeBranch}`;
+    }
+
     // Get or create shell session
     let shellSessionId;
     try {
-      const sess = await agentShellPool.getSession(projectId, chatSessionId || 'shell');
+      const sess = await agentShellPool.getSession(projectId, chatSessionId || 'shell', worktreeOverride);
       shellSessionId = sess.sessionId;
       if (chatSessionId) this._activeShellSessions.set(chatSessionId, shellSessionId);
       if (sess.isNew) await new Promise(r => setTimeout(r, 1000));
@@ -1418,7 +1427,7 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
    * - Project rules
    * - Mode instruction (agent vs plan)
    */
-  _buildFirstMessagePreamble(tool, projectId, mode, assistantSettings = {}) {
+  _buildFirstMessagePreamble(tool, projectId, mode, assistantSettings = {}, sessionBranch = null) {
     const parts = [];
 
     // Skip skills for Ollama models and Aider — Ollama models output raw JSON instead of
@@ -1446,6 +1455,13 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
       } else {
         parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done\n- IMPORTANT: Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops). Complete your task with the information available in a single pass and report results immediately.');
       }
+    }
+
+    // Branch-per-session worktree instruction
+    if (sessionBranch) {
+      const safeBranch = sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-');
+      const worktreePath = `/workspace/.worktrees/${safeBranch}`;
+      parts.push(`\nWORKING BRANCH: You are assigned to branch '${sessionBranch}' in a git worktree at ${worktreePath}.\n- ALWAYS work within this directory. All file reads, edits, commands, and tests must target ${worktreePath}.\n- Do NOT modify files outside this worktree.\n- When committing, you are already on branch '${sessionBranch}' — do not switch branches.\n- Your current working directory has been set to ${worktreePath}.`);
     }
 
     // Profile
@@ -1525,7 +1541,10 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
       })();
       fullMessage = `${aiderRulesPreamble}<task>\nThink carefully and thoroughly. Before making any changes, read all relevant project files to fully understand the existing code, patterns, and context.\n\n${message}\n</task>`;
     } else if (isFirstMessage) {
-      const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings);
+      // Look up session branch for worktree instruction
+      const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
+      const sessionBranch = sessionMeta?.branch || null;
+      const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings, sessionBranch);
       fullMessage = preamble + '\n\n---\n\n' + message;
       // Record the skill hash so we can detect changes on future messages
       this._cliSessions.set(chatSessionId, { ...(cliState || {}), lastSkillHash: skillHash });

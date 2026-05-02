@@ -56,9 +56,10 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
 
     const updates = {};
     const wantsName = hasOwn(req.body, 'name');
+    const wantsBranch = hasOwn(req.body, 'branch');
     const wantsAssistantSettings = ['tool', 'model', 'effort'].some((field) => hasOwn(req.body, field));
 
-    if (!wantsName && !wantsAssistantSettings) {
+    if (!wantsName && !wantsAssistantSettings && !wantsBranch) {
       return res.status(400).json({ error: 'No supported session fields were provided' });
     }
 
@@ -66,6 +67,17 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
       if (!req.body.name?.trim()) return res.status(400).json({ error: 'name is required' });
       updates.name = req.body.name.trim();
       updates.manualName = true;
+    }
+
+    if (wantsBranch) {
+      const newBranch = req.body.branch?.trim() || null;
+      const previousBranch = session.branch || null;
+      updates.branch = newBranch;
+      // Reset CLI session when branch changes so the AI starts fresh in the new worktree
+      if (newBranch !== previousBranch && session.cliSessionId) {
+        updates.cliSessionId = null;
+        agentGateway.resetSession(sessionId);
+      }
     }
 
     if (wantsAssistantSettings) {
