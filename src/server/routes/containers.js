@@ -322,7 +322,7 @@ router.get("/:name/repos", (req, res) => {
 
 /**
  * GET /api/containers/:name/branches
- * List git branches for a repo inside the container.
+ * List git branches with PR status and author info for categorization.
  * Query: ?repoPath=/workspace/my-repo (default: auto-detect single repo or /workspace)
  */
 router.get("/:name/branches", (req, res) => {
@@ -332,39 +332,73 @@ router.get("/:name/branches", (req, res) => {
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
+
     // Determine repo path
     let repoPath = req.query.repoPath;
     if (!repoPath) {
-      // Auto-detect: use getWorkDir or list repos
       repoPath = containerManager.getWorkDir(name) || "/workspace";
     }
 
     // Get current branch
-    const current = containerManager.execInContainer(name,
-      `cd '${repoPath}' && git branch --show-current 2>/dev/null`,
-      { timeout: 5000 },
-    )?.trim() || null;
+    const current = exec(`cd '${repoPath}' && git branch --show-current 2>/dev/null`)?.trim() || null;
 
-    // Get all local branches
-    const rawBranches = containerManager.execInContainer(name,
-      `cd '${repoPath}' && git branch --list --format='%(refname:short)' 2>/dev/null`,
-      { timeout: 5000 },
+    // Get current git user for "mine vs others" categorization
+    const gitUser = exec(`cd '${repoPath}' && git config user.name 2>/dev/null`)?.trim() || null;
+    const gitEmail = exec(`cd '${repoPath}' && git config user.email 2>/dev/null`)?.trim() || null;
+
+    // Get all local branches with last commit author
+    const rawBranches = exec(
+      `cd '${repoPath}' && git branch --list --format='%(refname:short)|%(authorname)|%(authoremail)|%(creatordate:iso8601)' 2>/dev/null`,
     );
 
-    const branches = rawBranches
-      ? rawBranches.split("\n").filter(Boolean).map(b => b.trim())
+    const localBranches = rawBranches
+      ? rawBranches.split("\n").filter(Boolean).map(line => {
+        const [branchName, author, email, date] = line.split("|").map(s => s?.trim());
+        return { name: branchName, author: author || null, email: email || null, date: date || null };
+      })
       : [];
 
-    // Get remote branches (for creating new worktrees from remote tracking branches)
-    const rawRemote = containerManager.execInContainer(name,
+    // Get remote branches not already local
+    const localSet = new Set(localBranches.map(b => b.name));
+    const rawRemote = exec(
       `cd '${repoPath}' && git branch -r --format='%(refname:short)' 2>/dev/null`,
-      { timeout: 5000 },
     );
     const remoteBranches = rawRemote
-      ? rawRemote.split("\n").filter(Boolean).map(b => b.trim()).filter(b => !b.includes("HEAD"))
+      ? rawRemote.split("\n").filter(Boolean).map(b => b.trim())
+          .filter(b => !b.includes("HEAD"))
+          .map(b => b.replace(/^origin\//, ""))
+          .filter(b => !localSet.has(b))
       : [];
 
-    res.json({ repoPath, current, branches, remoteBranches });
+    // Fetch PR status for branches via gh CLI (batch query)
+    let prMap = {};
+    try {
+      const prJson = exec(
+        `cd '${repoPath}' && gh pr list --state all --limit 100 --json headRefName,number,state,author,title 2>/dev/null`,
+      );
+      if (prJson) {
+        const prs = JSON.parse(prJson.trim());
+        for (const pr of prs) {
+          prMap[pr.headRefName] = {
+            number: pr.number,
+            state: pr.state, // OPEN, CLOSED, MERGED
+            title: pr.title,
+            author: pr.author?.login || null,
+          };
+        }
+      }
+    } catch { /* gh not installed or not authenticated */ }
+
+    // Enrich branches with PR info and ownership
+    const enriched = localBranches.map(b => ({
+      ...b,
+      pr: prMap[b.name] || null,
+      isMine: !!(gitUser && b.author && b.author === gitUser) ||
+              !!(gitEmail && b.email && b.email.includes(gitEmail)),
+    }));
+
+    res.json({ repoPath, current, branches: enriched, remoteBranches, gitUser });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -2,30 +2,71 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   GitBranch, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Check,
   GitPullRequest, GitMerge, Loader, AlertCircle, RefreshCw, X,
-  Folder, Trash2,
+  Folder, Trash2, Search, User, Users, Circle,
 } from 'lucide-react';
+
+// PR state display config
+const PR_BADGE = {
+  OPEN:   { color: 'text-green-400 bg-green-500/10', icon: GitPullRequest, label: 'open' },
+  CLOSED: { color: 'text-red-400 bg-red-500/10', icon: GitPullRequest, label: 'closed' },
+  MERGED: { color: 'text-purple-400 bg-purple-500/10', icon: GitMerge, label: 'merged' },
+};
+
+function BranchItem({ branch, isActive, onSelect }) {
+  const pr = branch.pr;
+  const badge = pr ? PR_BADGE[pr.state] : null;
+  const BadgeIcon = badge?.icon;
+
+  return (
+    <button
+      onClick={() => onSelect(branch.name)}
+      className={`w-full text-left px-3 py-1.5 hover:bg-surface-700/50 transition-colors flex items-center gap-2 min-w-0 ${
+        isActive ? 'text-primary-400 bg-primary-500/5' : 'text-surface-300'
+      }`}
+    >
+      <span className="text-[11px] font-mono truncate flex-1">{branch.name}</span>
+      {badge && (
+        <span className={`flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] flex-shrink-0 ${badge.color}`}>
+          <BadgeIcon size={9} />
+          {badge.label}
+        </span>
+      )}
+      {isActive && <Check size={10} className="flex-shrink-0 text-primary-400" />}
+    </button>
+  );
+}
+
+function SectionHeader({ icon: Icon, label, count }) {
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-surface-700/50 bg-surface-850/50">
+      <Icon size={10} className="text-surface-500" />
+      <span className="text-[10px] uppercase tracking-wide text-surface-500">{label}</span>
+      <span className="text-[9px] text-surface-600 ml-auto">{count}</span>
+    </div>
+  );
+}
 
 /**
  * BranchBar — sits above ChatInput, shows current branch + working directory
- * and git quick actions. Similar to Claude Code desktop's branch indicator.
+ * and git quick actions.
  */
 export default function BranchBar({ containerName, session, projectId, onBranchChange }) {
   const sessionBranch = session?.branch || null;
   const [gitStatus, setGitStatus] = useState(null);
-  const [branches, setBranches] = useState(null);
+  const [branchData, setBranchData] = useState(null); // { branches, remoteBranches, gitUser }
   const [showSwitcher, setShowSwitcher] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const [actionLoading, setActionLoading] = useState(null);
   const [actionResult, setActionResult] = useState(null);
   const switcherRef = useRef(null);
+  const searchRef = useRef(null);
   const resultTimer = useRef(null);
 
-  // Derive the working directory path
   const worktreePath = sessionBranch
     ? `/workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
     : null;
   const displayPath = gitStatus?.repoPath || worktreePath || '/workspace';
 
-  // Resolve the git path based on session branch
   const gitPathQuery = worktreePath
     ? `worktreePath=${encodeURIComponent(worktreePath)}`
     : '';
@@ -45,22 +86,22 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
-  // Fetch branches for switcher
+  // Fetch enriched branches when switcher opens
   useEffect(() => {
     if (!containerName || !showSwitcher) return;
     fetch(`/api/containers/${containerName}/branches`)
       .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data?.branches) {
-          const localSet = new Set(data.branches);
-          const remote = (data.remoteBranches || [])
-            .map(b => b.replace(/^origin\//, ''))
-            .filter(b => !localSet.has(b));
-          setBranches([...data.branches, ...remote]);
-        }
-      })
+      .then(data => { if (data) setBranchData(data); })
       .catch(() => {});
   }, [containerName, showSwitcher]);
+
+  // Focus search when switcher opens
+  useEffect(() => {
+    if (showSwitcher) {
+      setSearchQuery('');
+      setTimeout(() => searchRef.current?.focus(), 50);
+    }
+  }, [showSwitcher]);
 
   // Close switcher on outside click
   useEffect(() => {
@@ -72,7 +113,6 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     return () => document.removeEventListener('mousedown', handler);
   }, [showSwitcher]);
 
-  // Auto-dismiss result after 4s
   const showResult = (type, success, message) => {
     setActionResult({ type, success, message });
     clearTimeout(resultTimer.current);
@@ -81,7 +121,6 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
 
   const bodyBase = worktreePath ? { worktreePath } : {};
 
-  // Clean up a worktree after merge or when switching away
   const cleanupWorktree = async (branchToClean) => {
     if (!branchToClean || !containerName) return;
     try {
@@ -141,10 +180,9 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
           data = await res.json();
           if (res.ok) {
             showResult('merge', true, 'PR merged! Switching to default workspace...');
-            // After merge: clean up the worktree and switch session back to default
             const mergedBranch = sessionBranch;
-            onBranchChange?.(null); // Switch to default workspace
-            cleanupWorktree(mergedBranch); // Clean up old worktree (fire-and-forget)
+            onBranchChange?.(null);
+            cleanupWorktree(mergedBranch);
           } else {
             showResult('merge', false, data.error);
           }
@@ -164,7 +202,6 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     if (branch === sessionBranch) return;
 
     if (branch && branch !== '') {
-      // Ensure worktree before switching
       try {
         const res = await fetch(`/api/containers/${containerName}/worktree`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -193,11 +230,44 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const hasAhead = gitStatus?.ahead > 0;
   const hasBehind = gitStatus?.behind > 0;
 
-  const prStateColors = {
-    OPEN: 'text-green-400',
-    CLOSED: 'text-red-400',
-    MERGED: 'text-purple-400',
+  // Build categorized branch list for the switcher
+  const buildGroups = () => {
+    if (!branchData) return null;
+    const { branches: enriched = [], remoteBranches = [] } = branchData;
+    const q = searchQuery.toLowerCase();
+
+    // Filter by search
+    const filtered = enriched.filter(b => !q || b.name.toLowerCase().includes(q));
+    const filteredRemote = remoteBranches.filter(b => !q || b.toLowerCase().includes(q));
+
+    // Separate mine vs others
+    const mine = filtered.filter(b => b.isMine);
+    const others = filtered.filter(b => !b.isMine);
+
+    // Within each group, sort: open PRs first, then no PR, then merged/closed
+    const prOrder = { OPEN: 0, undefined: 1, CLOSED: 2, MERGED: 3 };
+    const sortFn = (a, b) => {
+      const aOrder = prOrder[a.pr?.state] ?? 1;
+      const bOrder = prOrder[b.pr?.state] ?? 1;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return a.name.localeCompare(b.name);
+    };
+    mine.sort(sortFn);
+    others.sort(sortFn);
+
+    // Remote branches as simple objects
+    const remoteItems = filteredRemote.map(name => ({ name, pr: null, isMine: false }));
+
+    return { mine, others, remote: remoteItems };
   };
+
+  const groups = showSwitcher ? buildGroups() : null;
+  const totalResults = groups
+    ? groups.mine.length + groups.others.length + groups.remote.length
+    : 0;
+
+  const prBadge = pr ? PR_BADGE[pr.state] : null;
+  const PrIcon = prBadge?.icon;
 
   return (
     <div className="flex-shrink-0 px-4 pt-1.5 pb-0.5 w-full">
@@ -220,33 +290,85 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
             <ChevronDown size={10} />
           </button>
 
-          {/* Branch switcher dropdown */}
-          {showSwitcher && branches && (
-            <div className="absolute bottom-full left-0 mb-1 w-56 max-h-64 overflow-y-auto bg-surface-800 border border-surface-600 rounded-lg shadow-2xl z-50">
-              <div className="px-2 py-1.5 border-b border-surface-700 text-[10px] uppercase tracking-wide text-surface-500">
-                Switch branch
+          {/* Branch switcher panel */}
+          {showSwitcher && (
+            <div className="absolute bottom-full left-0 mb-1 w-80 bg-surface-800 border border-surface-600 rounded-xl shadow-2xl z-50 overflow-hidden">
+              {/* Search */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-surface-700">
+                <Search size={12} className="text-surface-500 flex-shrink-0" />
+                <input
+                  ref={searchRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search branches..."
+                  className="flex-1 bg-transparent text-[11px] text-surface-200 outline-none placeholder:text-surface-500"
+                />
+                {searchQuery && (
+                  <button onClick={() => setSearchQuery('')} className="text-surface-500 hover:text-surface-300">
+                    <X size={10} />
+                  </button>
+                )}
               </div>
-              <button
-                onClick={() => handleBranchSwitch('')}
-                className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-surface-700/50 transition-colors flex items-center gap-2 ${
-                  !sessionBranch ? 'text-primary-400' : 'text-surface-300'
-                }`}
-              >
-                Default workspace
-                {!sessionBranch && <Check size={10} className="ml-auto" />}
-              </button>
-              {branches.map(b => (
-                <button
-                  key={b}
-                  onClick={() => handleBranchSwitch(b)}
-                  className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-surface-700/50 transition-colors flex items-center gap-2 ${
-                    b === sessionBranch ? 'text-primary-400' : 'text-surface-300'
-                  }`}
-                >
-                  <span className="truncate">{b}</span>
-                  {b === sessionBranch && <Check size={10} className="ml-auto flex-shrink-0" />}
-                </button>
-              ))}
+
+              <div className="max-h-72 overflow-y-auto">
+                {/* Default workspace option */}
+                {(!searchQuery || 'default workspace'.includes(searchQuery.toLowerCase())) && (
+                  <button
+                    onClick={() => handleBranchSwitch('')}
+                    className={`w-full text-left px-3 py-2 text-[11px] hover:bg-surface-700/50 transition-colors flex items-center gap-2 border-b border-surface-700/30 ${
+                      !sessionBranch ? 'text-primary-400 bg-primary-500/5' : 'text-surface-300'
+                    }`}
+                  >
+                    <Folder size={11} className="flex-shrink-0" />
+                    <span className="flex-1">Default workspace</span>
+                    <span className="text-[9px] text-surface-500 font-mono">/workspace</span>
+                    {!sessionBranch && <Check size={10} className="flex-shrink-0 text-primary-400" />}
+                  </button>
+                )}
+
+                {!groups ? (
+                  <div className="flex items-center justify-center py-6">
+                    <Loader size={14} className="animate-spin text-surface-500" />
+                  </div>
+                ) : totalResults === 0 && searchQuery ? (
+                  <div className="px-3 py-4 text-center text-[11px] text-surface-500">
+                    No branches matching "{searchQuery}"
+                  </div>
+                ) : (
+                  <>
+                    {/* My branches */}
+                    {groups.mine.length > 0 && (
+                      <>
+                        <SectionHeader icon={User} label="My branches" count={groups.mine.length} />
+                        {groups.mine.map(b => (
+                          <BranchItem key={b.name} branch={b} isActive={b.name === sessionBranch} onSelect={handleBranchSwitch} />
+                        ))}
+                      </>
+                    )}
+
+                    {/* Other branches */}
+                    {groups.others.length > 0 && (
+                      <>
+                        <SectionHeader icon={Users} label="Other branches" count={groups.others.length} />
+                        {groups.others.map(b => (
+                          <BranchItem key={b.name} branch={b} isActive={b.name === sessionBranch} onSelect={handleBranchSwitch} />
+                        ))}
+                      </>
+                    )}
+
+                    {/* Remote-only branches */}
+                    {groups.remote.length > 0 && (
+                      <>
+                        <SectionHeader icon={Circle} label="Remote only" count={groups.remote.length} />
+                        {groups.remote.map(b => (
+                          <BranchItem key={`r-${b.name}`} branch={b} isActive={b.name === sessionBranch} onSelect={handleBranchSwitch} />
+                        ))}
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -274,18 +396,16 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
               {gitStatus.behind}&darr;
             </span>
           )}
-          {pr && (
+          {pr && PrIcon && (
             <a
               href={pr.url}
               target="_blank"
               rel="noopener noreferrer"
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-surface-700/50 hover:bg-surface-600/50 transition-colors ${
-                prStateColors[pr.state] || 'text-surface-400'
-              }`}
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] hover:bg-surface-600/50 transition-colors ${prBadge.color}`}
               title={`PR #${pr.number}: ${pr.title}`}
             >
-              {pr.state === 'MERGED' ? <GitMerge size={10} /> : <GitPullRequest size={10} />}
-              #{pr.number} {pr.state?.toLowerCase()}
+              <PrIcon size={10} />
+              #{pr.number} {prBadge.label}
             </a>
           )}
         </div>
@@ -347,7 +467,6 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
           </button>
         )}
 
-        {/* Cleanup worktree button — visible when on a feature branch with a merged PR */}
         {sessionBranch && pr?.state === 'MERGED' && (
           <button
             onClick={() => {
@@ -367,9 +486,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
       {/* Action result toast */}
       {actionResult && (
         <div className={`flex items-center gap-1.5 mt-1 px-2 py-1 rounded text-[10px] ${
-          actionResult.success
-            ? 'bg-green-500/10 text-green-400'
-            : 'bg-red-500/10 text-red-400'
+          actionResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
         }`}>
           {actionResult.success ? <Check size={10} /> : <AlertCircle size={10} />}
           <span className="truncate flex-1">{actionResult.message}</span>
