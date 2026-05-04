@@ -1022,9 +1022,11 @@ RULES:
       displayOutput = this._extractToolResponse(cleanOutput, cmd);
     }
 
-    // Check for lost context
-    if (/don't have context|no context|start of.*conversation|clarify what/i.test(displayOutput)) {
-      return { success: false, retry: true, retryReason: `${tool} lost context`, retryType: 'context-lost' };
+    // Check for CLI/session context resets without flagging normal domain ambiguity
+    // like "I don't have context on that API/product" as a lost conversation.
+    const lostContextPattern = /(?:^|\n)\s*(?:i (?:don'?t|do not) have (?:the )?(?:conversation|prior|previous|chat|session) context|i (?:can'?t|cannot) access (?:the )?(?:prior|previous|earlier) conversation|it (?:looks|seems) like (?:we'?re|we are) at the start of (?:a|the) conversation|please clarify what (?:we were|you(?:'re| are)) (?:working on|discussing))/i;
+    if (lostContextPattern.test(displayOutput)) {
+      return { success: false, retry: true, retryReason: `${tool} lost context`, retryType: 'context-lost', displayOutput };
     }
 
     return { success: true, displayOutput, cleanOutput };
