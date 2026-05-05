@@ -1180,6 +1180,7 @@ function ChatSessionContent({
           session={session}
           projectId={projectId}
           onBranchChange={(branch) => onUpdateSessionConfig?.(sessionId, { branch })}
+          onSessionUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
         />
       )}
 

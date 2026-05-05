@@ -50,26 +50,33 @@ function SectionHeader({ icon: Icon, label, count }) {
  * BranchBar — sits above ChatInput, shows current branch + working directory
  * and git quick actions.
  */
-export default function BranchBar({ containerName, session, projectId, onBranchChange }) {
+export default function BranchBar({ containerName, session, projectId, onBranchChange, onSessionUpdate }) {
   const sessionBranch = session?.branch || null;
+  const sessionRepoPath = session?.repoPath || null;
   const [gitStatus, setGitStatus] = useState(null);
-  const [branchData, setBranchData] = useState(null); // { branches, remoteBranches, gitUser }
+  const [branchData, setBranchData] = useState(null);
   const [showSwitcher, setShowSwitcher] = useState(false);
+  const [showFolderPicker, setShowFolderPicker] = useState(false);
+  const [folders, setFolders] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [actionLoading, setActionLoading] = useState(null);
   const [actionResult, setActionResult] = useState(null);
   const switcherRef = useRef(null);
+  const folderRef = useRef(null);
   const searchRef = useRef(null);
   const resultTimer = useRef(null);
 
   const worktreePath = sessionBranch
     ? `/workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
     : null;
-  const displayPath = gitStatus?.repoPath || worktreePath || '/workspace';
+  const displayPath = worktreePath || gitStatus?.repoPath || sessionRepoPath || '/workspace';
 
-  const gitPathQuery = worktreePath
-    ? `worktreePath=${encodeURIComponent(worktreePath)}`
-    : '';
+  // Build query params for git endpoints — includes repoPath override if set
+  const gitPathQuery = (() => {
+    if (worktreePath) return `worktreePath=${encodeURIComponent(worktreePath)}`;
+    if (sessionRepoPath) return `repoPath=${encodeURIComponent(sessionRepoPath)}`;
+    return '';
+  })();
 
   // Fetch git status
   const fetchStatus = useCallback(() => {
@@ -89,11 +96,31 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   // Fetch enriched branches when switcher opens
   useEffect(() => {
     if (!containerName || !showSwitcher) return;
-    fetch(`/api/containers/${containerName}/branches`)
+    const repoParam = sessionRepoPath ? `?repoPath=${encodeURIComponent(sessionRepoPath)}` : '';
+    fetch(`/api/containers/${containerName}/branches${repoParam}`)
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data) setBranchData(data); })
       .catch(() => {});
-  }, [containerName, showSwitcher]);
+  }, [containerName, showSwitcher, sessionRepoPath]);
+
+  // Fetch workspace folders when folder picker opens
+  useEffect(() => {
+    if (!containerName || !showFolderPicker) return;
+    fetch(`/api/containers/${containerName}/repos`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.repos) setFolders(data.repos); })
+      .catch(() => {});
+  }, [containerName, showFolderPicker]);
+
+  // Close folder picker on outside click
+  useEffect(() => {
+    if (!showFolderPicker) return;
+    const handler = (e) => {
+      if (folderRef.current && !folderRef.current.contains(e.target)) setShowFolderPicker(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showFolderPicker]);
 
   // Focus search when switcher opens
   useEffect(() => {
@@ -373,10 +400,70 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
           )}
         </div>
 
-        {/* Working directory path */}
-        <div className="flex items-center gap-1 min-w-0 text-[10px] text-surface-500 font-mono truncate" title={displayPath}>
-          <Folder size={10} className="flex-shrink-0" />
-          <span className="truncate">{displayPath}</span>
+        {/* Working directory — clickable to switch folders */}
+        <div className="relative min-w-0" ref={folderRef}>
+          <button
+            onClick={() => { if (!worktreePath) setShowFolderPicker(!showFolderPicker); }}
+            disabled={!!worktreePath}
+            className={`flex items-center gap-1 min-w-0 px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors ${
+              worktreePath
+                ? 'text-surface-500 cursor-default'
+                : 'text-surface-400 hover:text-surface-200 hover:bg-surface-700/50'
+            }`}
+            title={worktreePath ? `Worktree: ${displayPath}` : 'Click to change folder'}
+          >
+            <Folder size={10} className="flex-shrink-0" />
+            <span className="truncate">{displayPath}</span>
+            {!worktreePath && <ChevronDown size={9} className="flex-shrink-0 opacity-60" />}
+          </button>
+
+          {/* Folder picker dropdown */}
+          {showFolderPicker && (
+            <div className="absolute bottom-full left-0 mb-1 w-72 bg-surface-800 border border-surface-600 rounded-lg shadow-2xl z-50 overflow-hidden">
+              <div className="px-2 py-1.5 border-b border-surface-700 text-[10px] uppercase tracking-wide text-surface-500">
+                Working directory
+              </div>
+              {/* Default /workspace option */}
+              <button
+                onClick={() => { onSessionUpdate?.({ repoPath: null }); setShowFolderPicker(false); }}
+                className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-surface-700/50 transition-colors flex items-center gap-2 ${
+                  !sessionRepoPath ? 'text-primary-400' : 'text-surface-300'
+                }`}
+              >
+                <Folder size={11} className="flex-shrink-0" />
+                <span className="truncate flex-1">/workspace</span>
+                <span className="text-[9px] text-surface-500">auto-detect</span>
+                {!sessionRepoPath && <Check size={10} className="flex-shrink-0 text-primary-400" />}
+              </button>
+              {!folders ? (
+                <div className="flex items-center justify-center py-4">
+                  <Loader size={14} className="animate-spin text-surface-500" />
+                </div>
+              ) : folders.length === 0 ? (
+                <div className="px-3 py-3 text-[11px] text-surface-500 text-center">No subdirectories found</div>
+              ) : (
+                folders.map(f => (
+                  <button
+                    key={f.path}
+                    onClick={() => { onSessionUpdate?.({ repoPath: f.path }); setShowFolderPicker(false); }}
+                    className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-surface-700/50 transition-colors flex items-center gap-2 ${
+                      sessionRepoPath === f.path ? 'text-primary-400' : 'text-surface-300'
+                    }`}
+                  >
+                    <Folder size={11} className="flex-shrink-0" />
+                    <span className="truncate flex-1">{f.path}</span>
+                    {f.isGitRepo && (
+                      <span className="flex items-center gap-0.5 text-[9px] text-green-400 flex-shrink-0">
+                        <GitBranch size={8} />
+                        {f.branch || 'git'}
+                      </span>
+                    )}
+                    {sessionRepoPath === f.path && <Check size={10} className="flex-shrink-0 text-primary-400" />}
+                  </button>
+                ))
+              )}
+            </div>
+          )}
         </div>
 
         {/* Status badges */}

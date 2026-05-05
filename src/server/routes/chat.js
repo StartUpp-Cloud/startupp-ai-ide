@@ -57,9 +57,10 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     const updates = {};
     const wantsName = hasOwn(req.body, 'name');
     const wantsBranch = hasOwn(req.body, 'branch');
+    const wantsRepoPath = hasOwn(req.body, 'repoPath');
     const wantsAssistantSettings = ['tool', 'model', 'effort'].some((field) => hasOwn(req.body, field));
 
-    if (!wantsName && !wantsAssistantSettings && !wantsBranch) {
+    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath) {
       return res.status(400).json({ error: 'No supported session fields were provided' });
     }
 
@@ -78,6 +79,10 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
         updates.cliSessionId = null;
         agentGateway.resetSession(sessionId);
       }
+    }
+
+    if (wantsRepoPath) {
+      updates.repoPath = req.body.repoPath?.trim() || null;
     }
 
     if (wantsAssistantSettings) {
