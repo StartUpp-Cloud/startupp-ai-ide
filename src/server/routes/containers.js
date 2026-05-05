@@ -334,10 +334,10 @@ router.get("/:name/branches", (req, res) => {
 
     const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
 
-    // Determine repo path
+    // Determine repo path — detect actual git root if not specified
     let repoPath = req.query.repoPath;
     if (!repoPath) {
-      repoPath = containerManager.getWorkDir(name) || "/workspace";
+      repoPath = findGitRoot(name);
     }
 
     // Get current branch
@@ -423,7 +423,7 @@ router.post("/:name/worktree", (req, res) => {
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
-    const effectiveRepoPath = repoPath || containerManager.getWorkDir(name) || "/workspace";
+    const effectiveRepoPath = repoPath || findGitRoot(name);
 
     // Sanitize branch name for directory path
     const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -498,11 +498,37 @@ router.post("/:name/worktree", (req, res) => {
 // GIT ACTIONS (pull, status, commit+push, PR)
 // ──────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Helper: find the actual git repo root inside the container.
+ * Handles the common case where the repo is in a subdirectory of /workspace.
+ */
+function findGitRoot(name) {
+  const workDir = containerManager.getWorkDir(name) || "/workspace";
+  // Check if workDir itself is a git repo
+  const hasGit = containerManager.execInContainer(name,
+    `test -e '${workDir}/.git' && echo yes`,
+    { timeout: 5000 },
+  )?.trim();
+  if (hasGit === "yes") return workDir;
+
+  // workDir is /workspace but no .git there — scan subdirectories for a git repo
+  const gitDir = containerManager.execInContainer(name,
+    `find /workspace -maxdepth 2 -name .git -print -quit 2>/dev/null`,
+    { timeout: 5000 },
+  )?.trim();
+  if (gitDir) {
+    // Return the parent of .git (the repo root)
+    return gitDir.replace(/\/.git$/, "");
+  }
+
+  return workDir;
+}
+
 /** Helper: resolve effective repo path for git actions (worktree-aware) */
 function resolveGitPath(name, query) {
   if (query.worktreePath) return query.worktreePath;
   if (query.repoPath) return query.repoPath;
-  return containerManager.getWorkDir(name) || "/workspace";
+  return findGitRoot(name);
 }
 
 /** Helper: validate container is running */
@@ -740,7 +766,7 @@ router.post("/:name/worktree-cleanup", (req, res) => {
 
     const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, "-");
     const wtPath = `/workspace/.worktrees/${safeBranch}`;
-    const repoPath = containerManager.getWorkDir(name) || "/workspace";
+    const repoPath = findGitRoot(name);
     const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
 
     // Remove the worktree
