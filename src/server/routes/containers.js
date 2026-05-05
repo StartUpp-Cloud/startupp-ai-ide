@@ -482,6 +482,19 @@ router.post("/:name/worktree", (req, res) => {
 
     const output = containerManager.execInContainer(name, addCmd, { timeout: 30000 });
 
+    // Verify the worktree was actually created
+    const verified = containerManager.execInContainer(name,
+      `test -d '${worktreePath}' && echo yes`,
+      { timeout: 5000 },
+    )?.trim() === "yes";
+
+    if (!verified) {
+      return res.status(500).json({
+        error: `Worktree creation failed for branch '${branch}'`,
+        output: output || null,
+      });
+    }
+
     // Fix ownership
     containerManager.execInContainer(name,
       `chown -R dev:dev '${worktreePath}' 2>/dev/null`,

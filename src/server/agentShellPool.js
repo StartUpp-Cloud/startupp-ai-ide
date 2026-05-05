@@ -54,15 +54,44 @@ class AgentShellPool extends EventEmitter {
       }
       // Use worktree path override if provided (branch-per-session)
       workingDir = cwdOverride || containerManager.getWorkDir(containerName) || '/workspace';
-      // Verify the CWD exists in the container — fall back to /workspace if deleted
+      // Verify the CWD exists in the container — attempt to re-create worktree if missing
       if (workingDir !== '/workspace') {
         const exists = containerManager.execInContainer(containerName,
           `test -d '${workingDir}' && echo yes`,
           { timeout: 3000 },
         )?.trim();
         if (exists !== 'yes') {
-          console.log(`[agentShellPool] CWD '${workingDir}' does not exist, falling back to /workspace`);
-          workingDir = '/workspace';
+          console.log(`[agentShellPool] CWD '${workingDir}' does not exist, attempting to re-create worktree...`);
+          // Try to re-create: extract branch name from path (/workspace/.worktrees/<branch>)
+          const branchName = workingDir.split('/').pop();
+          if (branchName && workingDir.includes('.worktrees')) {
+            try {
+              const repoRoot = containerManager.execInContainer(containerName,
+                `find /workspace -maxdepth 2 -name .git -print -quit 2>/dev/null`,
+                { timeout: 5000 },
+              )?.trim()?.replace(/\/.git$/, '') || '/workspace';
+              containerManager.execInContainer(containerName, `mkdir -p /workspace/.worktrees`, { timeout: 3000 });
+              // Try local branch first, then remote
+              const addResult = containerManager.execInContainer(containerName,
+                `cd '${repoRoot}' && (git worktree add '${workingDir}' '${branchName}' 2>/dev/null || git worktree add '${workingDir}' -b '${branchName}' 'origin/${branchName}' 2>/dev/null)`,
+                { timeout: 15000 },
+              );
+              const recreated = containerManager.execInContainer(containerName,
+                `test -d '${workingDir}' && echo yes`, { timeout: 3000 },
+              )?.trim() === 'yes';
+              if (recreated) {
+                console.log(`[agentShellPool] Successfully re-created worktree at ${workingDir}`);
+              } else {
+                console.log(`[agentShellPool] Failed to re-create worktree, falling back to /workspace`);
+                workingDir = '/workspace';
+              }
+            } catch (e) {
+              console.log(`[agentShellPool] Worktree re-creation error: ${e.message}, falling back to /workspace`);
+              workingDir = '/workspace';
+            }
+          } else {
+            workingDir = '/workspace';
+          }
         }
       }
     } else if (project?.folderPath) {
