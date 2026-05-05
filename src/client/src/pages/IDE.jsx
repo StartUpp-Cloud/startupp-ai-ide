@@ -586,6 +586,7 @@ export default function IDE() {
             projectId={selectedProjectId}
             projectPath={selectedProject?.folderPath}
             selectedTool={selectedTool}
+            containerName={selectedProject?.containerName}
           />
         </div>
       </div>

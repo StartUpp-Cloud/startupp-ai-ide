@@ -784,6 +784,79 @@ router.post("/:name/worktree-cleanup", (req, res) => {
   }
 });
 
+/**
+ * GET /api/containers/:name/files
+ * List files in a directory with git status indicators.
+ * Query: ?path=/workspace/repo&depth=1
+ * Returns: { path, files: [{ name, type, gitStatus, size }] }
+ */
+router.get("/:name/files", (req, res) => {
+  try {
+    const { name } = req.params;
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    const dirPath = req.query.path || findGitRoot(name);
+    const depth = Math.min(parseInt(req.query.depth) || 1, 3);
+
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
+
+    // List files/dirs at path (with type and size)
+    const lsOutput = exec(
+      `find '${dirPath}' -maxdepth ${depth} -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/.git' -not -name '.git' -printf '%y|%s|%P\\n' 2>/dev/null | head -500`,
+    );
+
+    const entries = [];
+    if (lsOutput) {
+      for (const line of lsOutput.split("\n").filter(Boolean)) {
+        const [typeChar, size, relativePath] = line.split("|");
+        if (!relativePath) continue; // skip root dir itself
+        entries.push({
+          name: relativePath,
+          type: typeChar === "d" ? "directory" : "file",
+          size: parseInt(size) || 0,
+        });
+      }
+    }
+
+    // Get git status for the directory
+    const gitStatusRaw = exec(`cd '${dirPath}' && git status --porcelain --untracked-files=normal 2>/dev/null`);
+    const gitMap = {};
+    if (gitStatusRaw) {
+      for (const line of gitStatusRaw.split("\n").filter(Boolean)) {
+        const status = line.slice(0, 2);
+        const filePath = line.slice(3).trim().replace(/^"(.*)"$/, "$1"); // handle quoted paths
+        let label;
+        if (status === "??") label = "untracked";
+        else if (status.startsWith("A") || status.startsWith("M") || status[1] === "M") label = "modified";
+        else if (status.startsWith("D") || status[1] === "D") label = "deleted";
+        else if (status.startsWith("R")) label = "renamed";
+        else label = "modified";
+        gitMap[filePath] = label;
+      }
+    }
+
+    // Enrich entries with git status
+    const filesWithStatus = entries.map(e => ({
+      ...e,
+      gitStatus: gitMap[e.name] || (e.type === "directory" ? null : "tracked"),
+    }));
+
+    // Sort: directories first, then by name. Untracked/modified float up.
+    filesWithStatus.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+      const aWeight = (a.gitStatus === "untracked" || a.gitStatus === "modified") ? 0 : 1;
+      const bWeight = (b.gitStatus === "untracked" || b.gitStatus === "modified") ? 0 : 1;
+      if (aWeight !== bWeight) return aWeight - bWeight;
+      return a.name.localeCompare(b.name);
+    });
+
+    res.json({ path: dirPath, files: filesWithStatus, gitStatusCount: Object.keys(gitMap).length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────────────────
 // CONTAINER FILE BROWSING & UPLOAD
 // ──────────────────────────────────────────────────────────────────────────────
