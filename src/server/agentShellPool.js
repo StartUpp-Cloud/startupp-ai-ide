@@ -54,6 +54,17 @@ class AgentShellPool extends EventEmitter {
       }
       // Use worktree path override if provided (branch-per-session)
       workingDir = cwdOverride || containerManager.getWorkDir(containerName) || '/workspace';
+      // Verify the CWD exists in the container — fall back to /workspace if deleted
+      if (workingDir !== '/workspace') {
+        const exists = containerManager.execInContainer(containerName,
+          `test -d '${workingDir}' && echo yes`,
+          { timeout: 3000 },
+        )?.trim();
+        if (exists !== 'yes') {
+          console.log(`[agentShellPool] CWD '${workingDir}' does not exist, falling back to /workspace`);
+          workingDir = '/workspace';
+        }
+      }
     } else if (project?.folderPath) {
       workingDir = cwdOverride || project.folderPath;
     }
