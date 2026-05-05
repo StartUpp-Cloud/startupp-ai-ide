@@ -423,17 +423,17 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
               <div className="px-2 py-1.5 border-b border-surface-700 text-[10px] uppercase tracking-wide text-surface-500">
                 Working directory
               </div>
-              {/* Default /workspace option */}
+              {/* Default /workspace option — highlight if effective path is /workspace */}
               <button
                 onClick={() => { onSessionUpdate?.({ repoPath: null }); setShowFolderPicker(false); }}
                 className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-surface-700/50 transition-colors flex items-center gap-2 ${
-                  !sessionRepoPath ? 'text-primary-400' : 'text-surface-300'
+                  displayPath === '/workspace' ? 'text-primary-400' : 'text-surface-300'
                 }`}
               >
                 <Folder size={11} className="flex-shrink-0" />
                 <span className="truncate flex-1">/workspace</span>
                 <span className="text-[9px] text-surface-500">auto-detect</span>
-                {!sessionRepoPath && <Check size={10} className="flex-shrink-0 text-primary-400" />}
+                {displayPath === '/workspace' && <Check size={10} className="flex-shrink-0 text-primary-400" />}
               </button>
               {!folders ? (
                 <div className="flex items-center justify-center py-4">
@@ -447,7 +447,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
                     key={f.path}
                     onClick={() => { onSessionUpdate?.({ repoPath: f.path }); setShowFolderPicker(false); }}
                     className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-surface-700/50 transition-colors flex items-center gap-2 ${
-                      sessionRepoPath === f.path ? 'text-primary-400' : 'text-surface-300'
+                      displayPath === f.path ? 'text-primary-400' : 'text-surface-300'
                     }`}
                   >
                     <Folder size={11} className="flex-shrink-0" />
@@ -458,7 +458,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
                         {f.branch || 'git'}
                       </span>
                     )}
-                    {sessionRepoPath === f.path && <Check size={10} className="flex-shrink-0 text-primary-400" />}
+                    {displayPath === f.path && <Check size={10} className="flex-shrink-0 text-primary-400" />}
                   </button>
                 ))
               )}
