@@ -432,19 +432,20 @@ router.post("/:name/worktree", (req, res) => {
     const worktreePath = `/workspace/.worktrees/${safeBranch}`;
 
     // ── Step 1: Check if the branch is already checked out anywhere ──
-    // Use git worktree list to find if any existing worktree/checkout has this branch
+    // Collect all worktree paths, then verify the ACTUAL current branch at each
     const wtListRaw = exec(`cd '${effectiveRepoPath}' && git worktree list --porcelain 2>/dev/null; true`);
     if (wtListRaw) {
-      let currentWtPath = null;
+      const wtPaths = [];
       for (const line of wtListRaw.split("\n")) {
         if (line.startsWith("worktree ")) {
-          currentWtPath = line.slice(9).trim();
-        } else if (line.startsWith("branch refs/heads/") && currentWtPath) {
-          const wtBranch = line.slice(18).trim();
-          if (wtBranch === branch) {
-            // Found it — this branch is already checked out at currentWtPath
-            return res.json({ worktreePath: currentWtPath, created: false, branch, reused: true });
-          }
+          wtPaths.push(line.slice(9).trim());
+        }
+      }
+      // Check each worktree's actual current branch (not the registered ref)
+      for (const wtPath of wtPaths) {
+        const actualBranch = exec(`cd '${wtPath}' && git branch --show-current 2>/dev/null`)?.trim();
+        if (actualBranch === branch) {
+          return res.json({ worktreePath: wtPath, created: false, branch, reused: true });
         }
       }
     }

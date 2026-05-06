@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   GitBranch, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Check,
   GitPullRequest, GitMerge, Loader, AlertCircle, RefreshCw, X,
-  Folder, Trash2, Search, User, Users, Circle,
+  Folder, Trash2, Search, User, Users, Circle, Plus,
 } from 'lucide-react';
 
 // PR state display config
@@ -57,6 +57,8 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const [branchData, setBranchData] = useState(null);
   const [showSwitcher, setShowSwitcher] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
+  const [showCreateBranch, setShowCreateBranch] = useState(false);
+  const [newBranchName, setNewBranchName] = useState('');
   const [folders, setFolders] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [actionLoading, setActionLoading] = useState(null);
@@ -226,6 +228,39 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     }
   };
 
+  const handleCreateBranch = async () => {
+    const name = newBranchName.trim();
+    if (!name || !containerName) return;
+
+    setShowCreateBranch(false);
+    setShowSwitcher(false);
+    setNewBranchName('');
+
+    // The worktree endpoint already handles creating new branches from HEAD
+    // when the branch doesn't exist locally or on remote
+    try {
+      const res = await fetch(`/api/containers/${containerName}/worktree`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch: name }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        showResult('create', false, err.detail || err.error || 'Failed to create branch');
+        return;
+      }
+      const data = await res.json();
+      setGitStatus(null);
+      if (data.worktreePath && !data.worktreePath.includes('.worktrees')) {
+        onSessionUpdate?.({ branch: name, repoPath: data.worktreePath });
+      } else {
+        onBranchChange?.(name);
+      }
+      showResult('create', true, `Created branch '${name}'`);
+    } catch (err) {
+      showResult('create', false, err.message);
+    }
+  };
+
   const handleBranchSwitch = async (branch) => {
     setShowSwitcher(false);
     if (branch === sessionBranch) return;
@@ -264,8 +299,9 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
 
   if (!containerName) return null;
 
-  const branch = gitStatus?.branch || sessionBranch || 'main';
-  const isMain = !sessionBranch && ['main', 'master'].includes(branch);
+  // Session branch (user's explicit selection) takes priority over polled git status
+  const branch = sessionBranch || gitStatus?.branch || 'main';
+  const isMain = ['main', 'master'].includes(branch);
   const pr = gitStatus?.pr;
   const hasDirty = gitStatus?.dirty > 0;
   const hasAhead = gitStatus?.ahead > 0;
@@ -409,6 +445,44 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
                     )}
                   </>
                 )}
+
+                {/* Create Branch */}
+                <div className="border-t border-surface-700 px-2 py-2">
+                  {showCreateBranch ? (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        value={newBranchName}
+                        onChange={(e) => setNewBranchName(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleCreateBranch(); if (e.key === 'Escape') setShowCreateBranch(false); }}
+                        placeholder="feature/my-branch"
+                        className="flex-1 bg-surface-900 border border-surface-600 rounded px-2 py-1 text-[11px] font-mono text-surface-200 outline-none focus:border-primary-500/50"
+                        autoFocus
+                      />
+                      <button
+                        onClick={handleCreateBranch}
+                        disabled={!newBranchName.trim()}
+                        className="px-2 py-1 text-[10px] bg-primary-600 hover:bg-primary-500 text-white rounded disabled:opacity-40 transition-colors"
+                      >
+                        Create
+                      </button>
+                      <button
+                        onClick={() => { setShowCreateBranch(false); setNewBranchName(''); }}
+                        className="p-1 text-surface-500 hover:text-surface-300"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setShowCreateBranch(true)}
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[10px] text-primary-400 hover:text-primary-300 hover:bg-primary-500/10 rounded transition-colors"
+                    >
+                      <Plus size={11} />
+                      Create Branch
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
