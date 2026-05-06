@@ -470,18 +470,18 @@ router.post("/:name/worktree", (req, res) => {
       { timeout: 5000 },
     )?.trim() === "yes";
 
+    // Build the git worktree add command — use `; true` suffix so execInContainer
+    // doesn't throw on non-zero exit (we capture stdout+stderr for error reporting)
     let addCmd;
     if (localExists) {
-      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' '${branch}' 2>&1`;
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' '${branch}' 2>&1; true`;
     } else if (remoteExists) {
-      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' -b '${branch}' 'origin/${branch}' 2>&1`;
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' -b '${branch}' 'origin/${branch}' 2>&1; true`;
     } else {
-      // Branch doesn't exist — create it from current HEAD
-      addCmd = `cd '${effectiveRepoPath}' && git worktree add -b '${branch}' '${worktreePath}' 2>&1`;
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add -b '${branch}' '${worktreePath}' 2>&1; true`;
     }
 
-    // Use 2>&1 to capture stderr in stdout so errors aren't swallowed
-    const output = containerManager.execInContainer(name, addCmd, { timeout: 30000 });
+    const output = containerManager.execInContainer(name, addCmd, { timeout: 30000 }) || "";
 
     // Verify the worktree was actually created
     const verified = containerManager.execInContainer(name,
@@ -490,14 +490,16 @@ router.post("/:name/worktree", (req, res) => {
     )?.trim() === "yes";
 
     if (!verified) {
-      // If execInContainer returned null (threw), try to get the error separately
-      const errorDetail = output || containerManager.execInContainer(name,
-        `cd '${effectiveRepoPath}' && git worktree list 2>&1`,
-        { timeout: 5000 },
-      );
+      // Parse common git errors into user-friendly messages
+      let detail = output.trim();
+      if (detail.includes("already checked out")) {
+        detail = `Branch '${branch}' is already checked out in your main workspace. Switch to a different branch there first, or use the folder picker to work directly in that checkout.`;
+      } else if (!detail || detail.includes("usage:")) {
+        detail = `git worktree add failed. The branch may not exist or there may be a naming conflict.`;
+      }
       return res.status(500).json({
-        error: `Worktree creation failed for branch '${branch}'`,
-        detail: errorDetail || 'git worktree add produced no output (command may have timed out or the branch may already be checked out in another worktree)',
+        error: `Cannot create worktree for '${branch}'`,
+        detail,
         repoPath: effectiveRepoPath,
       });
     }
