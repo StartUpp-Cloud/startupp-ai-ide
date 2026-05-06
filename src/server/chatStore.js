@@ -44,11 +44,17 @@ function redactSecrets(text) {
  *
  * Messages file: data/chat/{projectId}/{sessionId}.jsonl
  */
+// Sessions older than this are moved to the archive file on compaction
+const ARCHIVE_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+// Maximum sessions in active index before forcing compaction
+const MAX_ACTIVE_SESSIONS = 50;
+
 class ChatStore {
   constructor() {
     // In-memory cache: projectId → { sessions, mtime }
-    // Avoids re-reading _sessions.json on every operation
     this._cache = new Map();
+    // Track which projects have been compacted this process lifetime
+    this._compacted = new Set();
   }
 
   _projectDir(projectId) {
@@ -63,6 +69,10 @@ class ChatStore {
     return path.join(this._projectDir(projectId), '_sessions.json');
   }
 
+  _archiveFile(projectId) {
+    return path.join(this._projectDir(projectId), '_sessions_archive.json');
+  }
+
   _ensureProjectDir(projectId) {
     const dir = this._projectDir(projectId);
     if (!fs.existsSync(dir)) {
@@ -70,6 +80,9 @@ class ChatStore {
     }
   }
 
+  /**
+   * Read the active sessions index (cached, auto-compacts on first read).
+   */
   _readIndex(projectId) {
     const indexPath = this._indexFile(projectId);
 
@@ -79,7 +92,7 @@ class ChatStore {
       try {
         const stat = fs.statSync(indexPath);
         if (stat.mtimeMs === cached.mtime) return JSON.parse(JSON.stringify(cached.sessions));
-      } catch {} // file may not exist — fall through
+      } catch {}
     }
 
     if (!fs.existsSync(indexPath)) return [];
@@ -87,7 +100,15 @@ class ChatStore {
       const sessions = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
       const stat = fs.statSync(indexPath);
       this._cache.set(projectId, { sessions, mtime: stat.mtimeMs });
-      return JSON.parse(JSON.stringify(sessions)); // return a copy
+
+      // Auto-compact once per process lifetime when active index is large
+      if (!this._compacted.has(projectId) && sessions.length > MAX_ACTIVE_SESSIONS) {
+        this._compacted.add(projectId);
+        // Defer to avoid blocking this read
+        setImmediate(() => this._compactIndex(projectId));
+      }
+
+      return JSON.parse(JSON.stringify(sessions));
     } catch {
       return [];
     }
@@ -96,11 +117,52 @@ class ChatStore {
   _writeIndex(projectId, sessions) {
     this._ensureProjectDir(projectId);
     fs.writeFileSync(this._indexFile(projectId), JSON.stringify(sessions, null, 2), 'utf-8');
-    // Update cache
     try {
       const stat = fs.statSync(this._indexFile(projectId));
       this._cache.set(projectId, { sessions: JSON.parse(JSON.stringify(sessions)), mtime: stat.mtimeMs });
     } catch {}
+  }
+
+  /**
+   * Move old, unpinned sessions to the archive file.
+   * Keeps the active index small for fast reads/writes.
+   */
+  _compactIndex(projectId) {
+    try {
+      const sessions = this._readIndex(projectId);
+      const now = Date.now();
+      const cutoff = now - ARCHIVE_AGE_MS;
+
+      const active = [];
+      const toArchive = [];
+
+      for (const s of sessions) {
+        const age = new Date(s.createdAt).getTime();
+        // Keep: pinned, has unread, recent, or has active CLI session
+        if (s.pinned || s.hasUnread || age > cutoff || s.cliSessionId) {
+          active.push(s);
+        } else {
+          toArchive.push(s);
+        }
+      }
+
+      if (toArchive.length === 0) return; // nothing to archive
+
+      // Append to archive file
+      const archivePath = this._archiveFile(projectId);
+      let archived = [];
+      if (fs.existsSync(archivePath)) {
+        try { archived = JSON.parse(fs.readFileSync(archivePath, 'utf-8')); } catch {}
+      }
+      archived.push(...toArchive);
+      fs.writeFileSync(archivePath, JSON.stringify(archived), 'utf-8');
+
+      // Write compacted active index
+      this._writeIndex(projectId, active);
+      console.log(`[chatStore] Compacted ${projectId}: archived ${toArchive.length} sessions, ${active.length} remain active`);
+    } catch (err) {
+      console.error(`[chatStore] Compaction failed for ${projectId}:`, err.message);
+    }
   }
 
   // ── Session management ──
@@ -128,10 +190,29 @@ class ChatStore {
   }
 
   /**
-   * List all sessions for a project (newest first).
+   * List sessions for a project (newest first).
+   * By default returns only active sessions. Pass includeArchived=true for all.
    */
-  getSessions(projectId) {
-    return this._readIndex(projectId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  getSessions(projectId, { includeArchived = false } = {}) {
+    const active = this._readIndex(projectId);
+    if (!includeArchived) {
+      return active.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    }
+    const archived = this._readArchive(projectId);
+    return [...active, ...archived].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /**
+   * Read archived sessions (cold storage, not cached).
+   */
+  _readArchive(projectId) {
+    const archivePath = this._archiveFile(projectId);
+    if (!fs.existsSync(archivePath)) return [];
+    try {
+      return JSON.parse(fs.readFileSync(archivePath, 'utf-8'));
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -234,10 +315,25 @@ class ChatStore {
 
   /**
    * Get a specific session by ID.
+   * Checks active sessions first, then archive.
    */
   getSession(projectId, sessionId) {
-    const sessions = this._readIndex(projectId);
-    return sessions.find(s => s.id === sessionId) || null;
+    const active = this._readIndex(projectId);
+    const found = active.find(s => s.id === sessionId);
+    if (found) return found;
+    // Check archive (cold path — only if not in active index)
+    const archived = this._readArchive(projectId);
+    const archivedSession = archived.find(s => s.id === sessionId);
+    if (archivedSession) {
+      // Promote back to active index since it's being accessed
+      active.push(archivedSession);
+      this._writeIndex(projectId, active);
+      // Remove from archive
+      const remaining = archived.filter(s => s.id !== sessionId);
+      fs.writeFileSync(this._archiveFile(projectId), JSON.stringify(remaining), 'utf-8');
+      return archivedSession;
+    }
+    return null;
   }
 
   /**

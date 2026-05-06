@@ -9,12 +9,14 @@ function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
 }
 
-// GET /api/projects/:projectId/chat/sessions — List all sessions
+// GET /api/projects/:projectId/chat/sessions — List sessions
+// Query: ?includeArchived=true to include old sessions
 router.get('/:projectId/chat/sessions', (req, res) => {
   try {
     const { projectId } = req.params;
+    const includeArchived = req.query.includeArchived === 'true';
     chatStore.migrateIfNeeded(projectId);
-    const sessions = chatStore.getSessions(projectId);
+    const sessions = chatStore.getSessions(projectId, { includeArchived });
     res.json({ sessions });
   } catch (error) {
     res.status(500).json({ error: error.message });

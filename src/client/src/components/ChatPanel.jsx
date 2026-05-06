@@ -1789,6 +1789,20 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
                     Close tabs to see them here
                   </div>
                 )}
+
+                {/* Load archived sessions */}
+                <button
+                  onClick={async () => {
+                    try {
+                      const r = await fetch(`/api/projects/${projectId}/chat/sessions?includeArchived=true`);
+                      const data = await r.json();
+                      if (data.sessions) setSessions(data.sessions);
+                    } catch {}
+                  }}
+                  className="w-full px-3 py-1.5 text-[10px] text-surface-500 hover:text-surface-300 hover:bg-surface-700/30 text-center border-t border-surface-700/50 transition-colors"
+                >
+                  Load older sessions
+                </button>
               </div>
             )}
           </div>
