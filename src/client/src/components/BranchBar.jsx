@@ -606,6 +606,43 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
           Pull
         </button>
 
+        {/* Create Branch — always visible in action bar */}
+        {showCreateBranch ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              value={newBranchName}
+              onChange={(e) => setNewBranchName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleCreateBranch(); if (e.key === 'Escape') { setShowCreateBranch(false); setNewBranchName(''); } }}
+              placeholder="feature/my-branch"
+              className="w-40 bg-surface-900 border border-surface-600 rounded px-1.5 py-0.5 text-[10px] font-mono text-surface-200 outline-none focus:border-primary-500/50"
+              autoFocus
+            />
+            <button
+              onClick={handleCreateBranch}
+              disabled={!newBranchName.trim()}
+              className="px-1.5 py-0.5 text-[10px] bg-primary-600 hover:bg-primary-500 text-white rounded disabled:opacity-40 transition-colors"
+            >
+              Create
+            </button>
+            <button
+              onClick={() => { setShowCreateBranch(false); setNewBranchName(''); }}
+              className="p-0.5 text-surface-500 hover:text-surface-300"
+            >
+              <X size={10} />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setShowCreateBranch(true)}
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-primary-400 hover:text-primary-300 hover:bg-primary-500/10 rounded transition-colors"
+            title="Create a new branch and switch to it"
+          >
+            <Plus size={11} />
+            Branch
+          </button>
+        )}
+
         {hasDirty && (
           <button
             onClick={() => handleAction('commit')}
