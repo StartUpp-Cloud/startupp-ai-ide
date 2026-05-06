@@ -1342,13 +1342,15 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       } catch {}
     };
 
-    const interval = setInterval(syncSessions, 2000);
+    const interval = setInterval(syncSessions, 10000);
     return () => clearInterval(interval);
   }, [projectId]);
 
   // Session actions
+  const creatingRef = useRef(false);
   const createNewSession = useCallback(async () => {
-    if (!projectId) return;
+    if (!projectId || creatingRef.current) return;
+    creatingRef.current = true;
     try {
       const r = await fetch(`/api/projects/${projectId}/chat/sessions`, {
         method: 'POST',
@@ -1360,7 +1362,9 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       setOpenTabs(prev => [...prev, session.id]);
       setActiveSessionId(session.id);
       setShowSessionList(false);
-    } catch {}
+    } catch {} finally {
+      creatingRef.current = false;
+    }
   }, [projectId, tool]);
 
   const deleteSession = useCallback(async (sessionId) => {

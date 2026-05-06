@@ -45,6 +45,12 @@ function redactSecrets(text) {
  * Messages file: data/chat/{projectId}/{sessionId}.jsonl
  */
 class ChatStore {
+  constructor() {
+    // In-memory cache: projectId → { sessions, mtime }
+    // Avoids re-reading _sessions.json on every operation
+    this._cache = new Map();
+  }
+
   _projectDir(projectId) {
     return path.join(CHAT_DIR, projectId);
   }
@@ -66,9 +72,22 @@ class ChatStore {
 
   _readIndex(projectId) {
     const indexPath = this._indexFile(projectId);
+
+    // Check cache freshness against file mtime
+    const cached = this._cache.get(projectId);
+    if (cached) {
+      try {
+        const stat = fs.statSync(indexPath);
+        if (stat.mtimeMs === cached.mtime) return JSON.parse(JSON.stringify(cached.sessions));
+      } catch {} // file may not exist — fall through
+    }
+
     if (!fs.existsSync(indexPath)) return [];
     try {
-      return JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+      const sessions = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+      const stat = fs.statSync(indexPath);
+      this._cache.set(projectId, { sessions, mtime: stat.mtimeMs });
+      return JSON.parse(JSON.stringify(sessions)); // return a copy
     } catch {
       return [];
     }
@@ -77,6 +96,11 @@ class ChatStore {
   _writeIndex(projectId, sessions) {
     this._ensureProjectDir(projectId);
     fs.writeFileSync(this._indexFile(projectId), JSON.stringify(sessions, null, 2), 'utf-8');
+    // Update cache
+    try {
+      const stat = fs.statSync(this._indexFile(projectId));
+      this._cache.set(projectId, { sessions: JSON.parse(JSON.stringify(sessions)), mtime: stat.mtimeMs });
+    } catch {}
   }
 
   // ── Session management ──
