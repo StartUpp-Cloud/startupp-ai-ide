@@ -637,9 +637,26 @@ RULES:
             message = `Context from our conversation:\n${contextSummary}\n\nUser's request: ${message}`;
           }
 
+          if (result.retryType === 'context-limit') {
+            // ── LLM-synthesized continuation (Approach B) ──
+            // The AI hit its context limit mid-implementation. We synthesize a
+            // developer handoff note from the raw tool output + git diff, then
+            // start a fresh session with a continuation prompt.
+            this._cliSessions.delete(chatSessionId);
+            this._addProgressMessage(projectId, chatSessionId,
+              '🔄 Context limit reached — synthesizing continuation context...', broadcastFn);
+
+            const continuation = await this._synthesizeContinuation(
+              projectId, chatSessionId, message, result.cleanOutput, tool,
+            );
+            message = continuation;
+            console.log(`[agentGateway] Context-limit recovery: synthesized ${continuation.length} char continuation for ${tool}`);
+          }
+
           // Use longer backoff for rate limits, shorter for transient errors
           const backoffMs = result.retryType === 'codex-rate-limit' ? 5000
             : result.retryType === 'codex-transient' ? 3000
+            : result.retryType === 'context-limit' ? 1000
             : 2000;
           const shouldContinue = await this._waitForRetryBackoff(ctx, backoffMs);
           if (!shouldContinue) return;
@@ -967,10 +984,10 @@ RULES:
         if (parsed.errorType === 'rate_limit') {
           return { success: false, retry: false, displayOutput, error: displayOutput };
         }
-        // Retry on context overflow with compaction
+        // Retry on context overflow with LLM-synthesized continuation
         const isOverflow = /context.*overflow|token.*limit|too many tokens/i.test(displayOutput);
         if (isOverflow) {
-          return { success: false, retry: true, retryReason: 'Context overflow', retryType: 'compaction' };
+          return { success: false, retry: true, retryReason: 'Context limit reached', retryType: 'context-limit', displayOutput, cleanOutput };
         }
         // Other errors can be retried
         return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
@@ -984,6 +1001,10 @@ RULES:
         const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
         this._cliSessions.set(chatSessionId, newState);
         chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
+      }
+      // Context limit: retryable with continuation context
+      if (parsed.finishReason === 'length' || parsed.finishReason === 'max_tokens') {
+        return { success: false, retry: true, retryReason: 'Context limit reached', retryType: 'context-limit', displayOutput, cleanOutput };
       }
       if (parsed.isError) {
         // Permanent errors (model not found, bad config) must not be retried
@@ -1352,6 +1373,95 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
    * Build a context summary from the session's chat history.
    * Used when Claude loses context and we need to re-inject it.
    */
+  /**
+   * Synthesize a continuation prompt for context-limit recovery.
+   * Analyzes what was done (tool calls, file changes) and produces a handoff
+   * note for a fresh session to continue the work.
+   */
+  async _synthesizeContinuation(projectId, chatSessionId, originalMessage, rawOutput, tool) {
+    // 1. Extract tool call summary from raw output
+    const toolCalls = [];
+    if (rawOutput) {
+      for (const line of rawOutput.split('\n')) {
+        const idx = line.indexOf('{');
+        if (idx < 0) continue;
+        try {
+          const json = JSON.parse(line.slice(idx));
+          if (json.type === 'tool_call' || json.type === 'tool_use' || json.part?.type === 'tool-call') {
+            const name = json.name || json.part?.name || json.tool || 'unknown';
+            const input = json.input || json.part?.input || {};
+            const summary = input.command?.slice(0, 80) || input.file_path || input.path || JSON.stringify(input).slice(0, 60);
+            toolCalls.push(`${name}: ${summary}`);
+          }
+        } catch {}
+      }
+    }
+
+    // 2. Get git diff from container to see actual file changes
+    let diffStat = '';
+    try {
+      const { default: Project } = await import('./models/Project.js');
+      const project = Project.findById(projectId);
+      if (project?.containerName) {
+        const { containerManager } = await import('./containerManager.js');
+        const sessionMeta = chatStore.getSession(projectId, chatSessionId);
+        const workDir = sessionMeta?.branch
+          ? `/workspace/.worktrees/${sessionMeta.branch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
+          : containerManager.getWorkDir(project.containerName) || '/workspace';
+        diffStat = containerManager.execInContainer(project.containerName,
+          `cd '${workDir}' && git diff --stat HEAD 2>/dev/null | tail -20`,
+          { timeout: 5000 },
+        ) || '';
+      }
+    } catch {}
+
+    // 3. Use LLM to synthesize a handoff note
+    const toolSummary = toolCalls.length > 0
+      ? `Tool calls executed (${toolCalls.length}):\n${toolCalls.slice(-15).map(t => `- ${t}`).join('\n')}`
+      : 'No tool calls captured.';
+
+    const diffSection = diffStat
+      ? `Files changed (git diff --stat):\n${diffStat}`
+      : 'No file changes detected yet.';
+
+    try {
+      const synthesisPrompt = `You are a developer handoff assistant. An AI coding assistant was implementing a task but hit its context limit midway. Analyze what was done and produce a concise continuation brief.
+
+ORIGINAL TASK:
+${originalMessage.slice(0, 500)}
+
+WORK COMPLETED:
+${toolSummary}
+
+${diffSection}
+
+INSTRUCTIONS:
+Write a continuation prompt that another AI coding session can use to pick up where this one left off. Include:
+1. What was the original goal (1 sentence)
+2. What was already completed (bullet list from the tool calls + diff)
+3. What likely remains to be done
+4. Any important context (file paths, patterns used, decisions made)
+
+Be concise — max 10 lines. Write as if briefing a colleague who will continue the implementation.`;
+
+      const result = await llmProvider.generateResponse(synthesisPrompt, { maxTokens: 500, temperature: 0.1 });
+      const brief = result.response?.trim();
+      if (brief && brief.length > 30) {
+        return `[CONTINUATION — the previous session hit its context limit. Here's what happened:]\n${brief}\n\n[Original task:]\n${originalMessage}`;
+      }
+    } catch {}
+
+    // Fallback: template-based continuation (no LLM)
+    const fallbackBrief = [
+      `The previous session hit its context limit while working on this task.`,
+      toolCalls.length > 0 ? `Work done: ${toolCalls.length} tool calls (${toolCalls.slice(-3).join('; ')})` : null,
+      diffStat ? `Files changed:\n${diffStat}` : null,
+      `Continue the remaining work.`,
+    ].filter(Boolean).join('\n');
+
+    return `[CONTINUATION — previous session hit context limit:]\n${fallbackBrief}\n\n[Original task:]\n${originalMessage}`;
+  }
+
   async _getContextSummary(projectId, chatSessionId) {
     const parts = [];
 
@@ -2409,7 +2519,12 @@ NEEDS_USER`,
     let sessionId = null;
     let isError = false;
     let isPermanentError = false;
+    let lastFinishReason = null;
+    let seenToolUse = false;
+    let hasPostToolText = false;
     const textParts = [];
+    const preToolParts = [];
+    const postToolParts = [];
 
     for (const line of cleanOutput.split('\n')) {
       const idx = line.indexOf('{');
@@ -2417,12 +2532,30 @@ NEEDS_USER`,
       try {
         const json = JSON.parse(line.slice(idx));
         if (json.sessionID && !sessionId) sessionId = json.sessionID;
+
+        // Track tool usage to detect planning-only responses
+        if (json.type === 'tool_call' || json.type === 'tool_use' || json.part?.type === 'tool-call' || json.part?.type === 'tool-result') {
+          seenToolUse = true;
+        }
+
         if (json.type === 'text' && json.part?.text) {
           textParts.push(json.part.text);
+          if (seenToolUse) {
+            postToolParts.push(json.part.text);
+            hasPostToolText = true;
+          } else {
+            preToolParts.push(json.part.text);
+          }
         }
+
+        // Track finish reason from step_finish events
+        if (json.type === 'step_finish' || json.part?.type === 'step_finish') {
+          const reason = json.finishReason || json.part?.finishReason || json.reason || json.part?.reason;
+          if (reason) lastFinishReason = reason;
+        }
+
         if (json.type === 'error' || json.part?.type === 'error') {
           isError = true;
-          // OpenCode nests the message at json.error.data.message
           const errMsg = json.error?.data?.message
             || json.error?.message
             || (typeof json.error === 'string' ? json.error : '')
@@ -2448,6 +2581,19 @@ NEEDS_USER`,
 
     text = textParts.join('');
 
+    // Handle context limit: step_finish with reason='length'
+    if (lastFinishReason === 'length' || lastFinishReason === 'max_tokens') {
+      if (text) {
+        text += '\n\n⚠️ Context limit reached — implementation may be incomplete. Send a follow-up to continue.';
+      }
+      return { text: text || '⚠️ Context limit reached — implementation may be incomplete.', sessionId, isError: true, isPermanentError: true, finishReason: lastFinishReason };
+    }
+
+    // Handle planning-only responses: tool calls ran but no post-tool summary text
+    if (seenToolUse && !hasPostToolText && text && lastFinishReason === 'stop') {
+      text += '\n\n✓ Task completed.';
+    }
+
     if (!text) {
       text = this._extractToolResponse(cleanOutput, cmd);
     }
@@ -2458,7 +2604,7 @@ NEEDS_USER`,
         : '⚠️ No response received from OpenCode. Please try again.';
     }
 
-    return { text, sessionId, isError, isPermanentError };
+    return { text, sessionId, isError, isPermanentError, finishReason: lastFinishReason };
   }
 
   /**
