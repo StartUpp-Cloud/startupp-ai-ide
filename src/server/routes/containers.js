@@ -472,14 +472,15 @@ router.post("/:name/worktree", (req, res) => {
 
     let addCmd;
     if (localExists) {
-      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' '${branch}'`;
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' '${branch}' 2>&1`;
     } else if (remoteExists) {
-      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' -b '${branch}' 'origin/${branch}'`;
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' -b '${branch}' 'origin/${branch}' 2>&1`;
     } else {
       // Branch doesn't exist — create it from current HEAD
-      addCmd = `cd '${effectiveRepoPath}' && git worktree add -b '${branch}' '${worktreePath}'`;
+      addCmd = `cd '${effectiveRepoPath}' && git worktree add -b '${branch}' '${worktreePath}' 2>&1`;
     }
 
+    // Use 2>&1 to capture stderr in stdout so errors aren't swallowed
     const output = containerManager.execInContainer(name, addCmd, { timeout: 30000 });
 
     // Verify the worktree was actually created
@@ -489,9 +490,15 @@ router.post("/:name/worktree", (req, res) => {
     )?.trim() === "yes";
 
     if (!verified) {
+      // If execInContainer returned null (threw), try to get the error separately
+      const errorDetail = output || containerManager.execInContainer(name,
+        `cd '${effectiveRepoPath}' && git worktree list 2>&1`,
+        { timeout: 5000 },
+      );
       return res.status(500).json({
         error: `Worktree creation failed for branch '${branch}'`,
-        output: output || null,
+        detail: errorDetail || 'git worktree add produced no output (command may have timed out or the branch may already be checked out in another worktree)',
+        repoPath: effectiveRepoPath,
       });
     }
 

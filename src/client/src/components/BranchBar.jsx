@@ -238,7 +238,10 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
         });
         if (!res.ok) {
           const err = await res.json();
-          showResult('switch', false, err.error || 'Failed to create worktree');
+          const msg = err.detail
+            ? `${err.error}: ${err.detail}`
+            : err.error || 'Failed to create worktree';
+          showResult('switch', false, msg);
           return;
         }
       } catch (err) {
