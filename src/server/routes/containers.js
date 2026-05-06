@@ -406,11 +406,12 @@ router.get("/:name/branches", (req, res) => {
 
 /**
  * POST /api/containers/:name/worktree
- * Create or ensure a git worktree for a branch inside the container.
- * Body: { branch, repoPath? }
- * Returns: { worktreePath, created }
+ * Ensure a working directory exists for a branch inside the container.
+ * If the branch is already checked out somewhere, returns that path.
+ * Otherwise creates a new git worktree.
  *
- * Convention: worktrees live at /workspace/.worktrees/<sanitized-branch-name>
+ * Body: { branch, repoPath? }
+ * Returns: { worktreePath, created, branch }
  */
 router.post("/:name/worktree", (req, res) => {
   try {
@@ -423,55 +424,54 @@ router.post("/:name/worktree", (req, res) => {
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
     const effectiveRepoPath = repoPath || findGitRoot(name);
 
     // Sanitize branch name for directory path
     const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, "-");
     const worktreePath = `/workspace/.worktrees/${safeBranch}`;
 
-    // Check if worktree already exists
-    const exists = containerManager.execInContainer(name,
-      `test -d '${worktreePath}' && echo yes`,
-      { timeout: 5000 },
-    )?.trim() === "yes";
+    // ── Step 1: Check if the branch is already checked out anywhere ──
+    // Use git worktree list to find if any existing worktree/checkout has this branch
+    const wtListRaw = exec(`cd '${effectiveRepoPath}' && git worktree list --porcelain 2>/dev/null; true`);
+    if (wtListRaw) {
+      let currentWtPath = null;
+      for (const line of wtListRaw.split("\n")) {
+        if (line.startsWith("worktree ")) {
+          currentWtPath = line.slice(9).trim();
+        } else if (line.startsWith("branch refs/heads/") && currentWtPath) {
+          const wtBranch = line.slice(18).trim();
+          if (wtBranch === branch) {
+            // Found it — this branch is already checked out at currentWtPath
+            return res.json({ worktreePath: currentWtPath, created: false, branch, reused: true });
+          }
+        }
+      }
+    }
 
+    // ── Step 2: Check if our expected worktree path already exists ──
+    const exists = exec(`test -d '${worktreePath}' && echo yes`)?.trim() === "yes";
     if (exists) {
-      // Verify it's a valid git worktree and on the right branch
-      const wtBranch = containerManager.execInContainer(name,
-        `cd '${worktreePath}' && git branch --show-current 2>/dev/null`,
-        { timeout: 5000 },
-      )?.trim();
-
+      const wtBranch = exec(`cd '${worktreePath}' && git branch --show-current 2>/dev/null`)?.trim();
       if (wtBranch === branch) {
         return res.json({ worktreePath, created: false, branch: wtBranch });
       }
       // Exists but wrong branch — remove and recreate
-      containerManager.execInContainer(name,
-        `cd '${effectiveRepoPath}' && git worktree remove '${worktreePath}' --force 2>/dev/null`,
-        { timeout: 10000 },
-      );
+      exec(`cd '${effectiveRepoPath}' && git worktree remove '${worktreePath}' --force 2>/dev/null`);
     }
 
-    // Ensure parent directory exists
-    containerManager.execInContainer(name,
-      `mkdir -p /workspace/.worktrees`,
-      { timeout: 5000 },
-    );
+    // ── Step 3: Create a new worktree ──
+    exec(`mkdir -p /workspace/.worktrees`, 5000);
 
-    // Check if branch exists locally
-    const localExists = containerManager.execInContainer(name,
+    // Check if branch exists locally or on remote
+    const localExists = exec(
       `cd '${effectiveRepoPath}' && git show-ref --verify --quiet refs/heads/${branch} && echo yes`,
-      { timeout: 5000 },
     )?.trim() === "yes";
 
-    // Check if branch exists on remote
-    const remoteExists = !localExists && containerManager.execInContainer(name,
+    const remoteExists = !localExists && exec(
       `cd '${effectiveRepoPath}' && git show-ref --verify --quiet refs/remotes/origin/${branch} && echo yes`,
-      { timeout: 5000 },
     )?.trim() === "yes";
 
-    // Build the git worktree add command — use `; true` suffix so execInContainer
-    // doesn't throw on non-zero exit (we capture stdout+stderr for error reporting)
     let addCmd;
     if (localExists) {
       addCmd = `cd '${effectiveRepoPath}' && git worktree add '${worktreePath}' '${branch}' 2>&1; true`;
@@ -481,19 +481,15 @@ router.post("/:name/worktree", (req, res) => {
       addCmd = `cd '${effectiveRepoPath}' && git worktree add -b '${branch}' '${worktreePath}' 2>&1; true`;
     }
 
-    const output = containerManager.execInContainer(name, addCmd, { timeout: 30000 }) || "";
+    const output = exec(addCmd, 30000) || "";
 
     // Verify the worktree was actually created
-    const verified = containerManager.execInContainer(name,
-      `test -d '${worktreePath}' && echo yes`,
-      { timeout: 5000 },
-    )?.trim() === "yes";
+    const verified = exec(`test -d '${worktreePath}' && echo yes`)?.trim() === "yes";
 
     if (!verified) {
-      // Parse common git errors into user-friendly messages
       let detail = output.trim();
       if (detail.includes("already checked out")) {
-        detail = `Branch '${branch}' is already checked out in your main workspace. Switch to a different branch there first, or use the folder picker to work directly in that checkout.`;
+        detail = `Branch '${branch}' is already checked out elsewhere but could not be located. Try running 'git worktree prune' in the container.`;
       } else if (!detail || detail.includes("usage:")) {
         detail = `git worktree add failed. The branch may not exist or there may be a naming conflict.`;
       }

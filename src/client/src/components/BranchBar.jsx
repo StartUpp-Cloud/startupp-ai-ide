@@ -244,12 +244,21 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
           showResult('switch', false, msg);
           return;
         }
+        const data = await res.json();
+        // If the branch is checked out at a non-standard location (e.g. main repo),
+        // also update the session repoPath so the folder picker reflects it
+        if (data.reused && data.worktreePath && !data.worktreePath.includes('.worktrees')) {
+          setGitStatus(null);
+          onSessionUpdate?.({ branch, repoPath: data.worktreePath });
+          return;
+        }
       } catch (err) {
         showResult('switch', false, err.message);
         return;
       }
     }
 
+    setGitStatus(null);
     onBranchChange?.(branch || null);
   };
 
