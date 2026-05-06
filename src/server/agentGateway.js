@@ -2523,8 +2523,6 @@ NEEDS_USER`,
     let seenToolUse = false;
     let hasPostToolText = false;
     const textParts = [];
-    const preToolParts = [];
-    const postToolParts = [];
 
     for (const line of cleanOutput.split('\n')) {
       const idx = line.indexOf('{');
@@ -2540,12 +2538,7 @@ NEEDS_USER`,
 
         if (json.type === 'text' && json.part?.text) {
           textParts.push(json.part.text);
-          if (seenToolUse) {
-            postToolParts.push(json.part.text);
-            hasPostToolText = true;
-          } else {
-            preToolParts.push(json.part.text);
-          }
+          if (seenToolUse) hasPostToolText = true;
         }
 
         // Track finish reason from step_finish events
@@ -2581,27 +2574,33 @@ NEEDS_USER`,
 
     text = textParts.join('');
 
-    // Handle context limit: step_finish with reason='length'
-    if (lastFinishReason === 'length' || lastFinishReason === 'max_tokens') {
-      if (text) {
-        text += '\n\n⚠️ Context limit reached — implementation may be incomplete. Send a follow-up to continue.';
-      }
-      return { text: text || '⚠️ Context limit reached — implementation may be incomplete.', sessionId, isError: true, isPermanentError: true, finishReason: lastFinishReason };
-    }
-
-    // Handle planning-only responses: tool calls ran but no post-tool summary text
-    if (seenToolUse && !hasPostToolText && text && lastFinishReason === 'stop') {
-      text += '\n\n✓ Task completed.';
-    }
-
     if (!text) {
       text = this._extractToolResponse(cleanOutput, cmd);
     }
 
-    if (!text || text.length < 10) {
-      text = sessionId
-        ? '⚠️ Response received but could not be parsed. OpenCode may still be processing.'
-        : '⚠️ No response received from OpenCode. Please try again.';
+    const isCleanStop = lastFinishReason === 'stop' || lastFinishReason === 'end-turn';
+    const isContextLimit = lastFinishReason === 'length' || lastFinishReason === 'max_tokens';
+
+    if (isContextLimit) {
+      const warning = '⚠️ Context limit reached — implementation may be incomplete. Send a follow-up to continue.';
+      text = text.trim() ? `${text}\n\n${warning}` : warning;
+      isError = true;
+      isPermanentError = true;
+    } else if (!text.trim()) {
+      // No text at all — derive a fallback from completion state
+      if (isCleanStop && sessionId && !isError) {
+        text = '✓ Done.';
+      } else {
+        text = sessionId
+          ? '⚠️ Response received but could not be parsed. OpenCode may still be processing.'
+          : '⚠️ No response received from OpenCode. Please try again.';
+      }
+    } else if (!isError) {
+      // We have text — append a status suffix when the AI didn't write a completion summary
+      if (seenToolUse && !hasPostToolText && isCleanStop) {
+        // Planning text only: AI described what it would do, ran tools, stopped without a summary
+        text += '\n\n✓ Task completed.';
+      }
     }
 
     return { text, sessionId, isError, isPermanentError, finishReason: lastFinishReason };
