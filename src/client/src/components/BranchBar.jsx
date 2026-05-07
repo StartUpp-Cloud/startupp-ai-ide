@@ -72,13 +72,15 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     ? `/workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
     : null;
   // Priority: worktree > explicit user selection > auto-detected > fallback
-  const effectivePath = worktreePath || sessionRepoPath || gitStatus?.repoPath || '/workspace';
+  // sessionRepoPath === '/workspace' means user explicitly chose root (not null/auto-detect)
+  const hasExplicitPath = sessionRepoPath !== null && sessionRepoPath !== undefined;
+  const effectivePath = worktreePath || (hasExplicitPath ? sessionRepoPath : null) || gitStatus?.repoPath || '/workspace';
   const displayPath = effectivePath;
 
   // Build query params for git endpoints — explicit path always sent
   const gitPathQuery = (() => {
     if (worktreePath) return `worktreePath=${encodeURIComponent(worktreePath)}`;
-    if (sessionRepoPath) return `repoPath=${encodeURIComponent(sessionRepoPath)}`;
+    if (hasExplicitPath) return `repoPath=${encodeURIComponent(sessionRepoPath)}`;
     return '';
   })();
 
@@ -513,7 +515,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
               </div>
               {/* Default /workspace option — highlight if effective path is /workspace */}
               <button
-                onClick={() => { setGitStatus(null); onSessionUpdate?.({ repoPath: null }); setShowFolderPicker(false); }}
+                onClick={() => { setGitStatus(null); onSessionUpdate?.({ repoPath: '/workspace' }); setShowFolderPicker(false); }}
                 className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-surface-700/50 transition-colors flex items-center gap-2 ${
                   displayPath === '/workspace' ? 'text-primary-400' : 'text-surface-300'
                 }`}
