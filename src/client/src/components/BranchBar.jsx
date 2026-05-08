@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   GitBranch, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Check,
   GitPullRequest, GitMerge, Loader, AlertCircle, RefreshCw, X,
-  Folder, Trash2, Search, User, Users, Circle, Plus,
+  Folder, Trash2, Search, User, Users, Circle, Plus, KeyRound,
 } from 'lucide-react';
 
 // PR state display config
@@ -66,6 +66,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const switcherRef = useRef(null);
   const folderRef = useRef(null);
   const searchRef = useRef(null);
+  const sshInputRef = useRef(null);
   const resultTimer = useRef(null);
 
   const worktreePath = sessionBranch
@@ -227,6 +228,34 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
       showResult(action, false, err.message);
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  const handleSshUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    if (!files.length || !containerName) return;
+
+    setActionLoading('ssh');
+    const formData = new FormData();
+    files.forEach(f => formData.append('files', f));
+
+    try {
+      const res = await fetch(`/api/containers/${containerName}/ssh-keys`, {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const ok = data.uploaded?.filter(u => !u.error).length || 0;
+        showResult('ssh', true, `${ok} SSH key${ok !== 1 ? 's' : ''} uploaded to ~/.ssh`);
+      } else {
+        showResult('ssh', false, data.error || 'SSH key upload failed');
+      }
+    } catch (err) {
+      showResult('ssh', false, err.message);
+    } finally {
+      setActionLoading(null);
+      if (sshInputRef.current) sshInputRef.current.value = '';
     }
   };
 
@@ -695,6 +724,24 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
             Clean up
           </button>
         )}
+
+        {/* SSH key upload */}
+        <input
+          ref={sshInputRef}
+          type="file"
+          multiple
+          onChange={handleSshUpload}
+          className="hidden"
+        />
+        <button
+          onClick={() => sshInputRef.current?.click()}
+          disabled={!!actionLoading}
+          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-surface-400 hover:text-surface-200 hover:bg-surface-700/50 rounded transition-colors disabled:opacity-40 ml-auto"
+          title="Upload SSH keys to container ~/.ssh"
+        >
+          {actionLoading === 'ssh' ? <Loader size={11} className="animate-spin" /> : <KeyRound size={11} />}
+          SSH Keys
+        </button>
       </div>
 
       {/* Action result toast */}

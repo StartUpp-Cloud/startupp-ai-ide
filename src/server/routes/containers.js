@@ -877,6 +877,102 @@ router.get("/:name/files", (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
+// SSH KEY MANAGEMENT
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/containers/:name/ssh-keys
+ * Upload SSH key files into the container's ~/.ssh directory with correct permissions.
+ * Accepts multipart files (private key, public key, config, known_hosts, etc.).
+ */
+router.post("/:name/ssh-keys", tmpUpload.array("files", 10), (req, res) => {
+  try {
+    const { name } = req.params;
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded" });
+    }
+
+    const exec = (cmd, timeout = 5000) => containerManager.execInContainer(name, cmd, { timeout });
+
+    // Ensure ~/.ssh directory exists with correct permissions
+    exec(`mkdir -p /home/dev/.ssh && chmod 700 /home/dev/.ssh && chown dev:dev /home/dev/.ssh`);
+
+    const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].join(path.delimiter);
+    const envWithDocker = { ...process.env, PATH: `${process.env.PATH || ""}${path.delimiter}${extraPaths}` };
+
+    const uploaded = [];
+    for (const file of req.files) {
+      const destPath = `/home/dev/.ssh/${file.originalname}`;
+      try {
+        rawExecSync(`docker cp '${file.path}' '${name}:${destPath}'`, {
+          encoding: "utf-8",
+          env: envWithDocker,
+          timeout: 10000,
+        });
+
+        // Set correct permissions based on file type
+        const isPublicKey = file.originalname.endsWith('.pub');
+        const isConfig = ['config', 'known_hosts', 'authorized_keys'].includes(file.originalname);
+        const perms = isPublicKey || isConfig ? '644' : '600';
+
+        exec(`chmod ${perms} '${destPath}' && chown dev:dev '${destPath}'`);
+        uploaded.push({ name: file.originalname, path: destPath, permissions: perms });
+      } catch (e) {
+        uploaded.push({ name: file.originalname, error: e.message });
+      } finally {
+        try { fs.unlinkSync(file.path); } catch {}
+      }
+    }
+
+    // Ensure known_hosts exists (prevents "Host key verification failed" prompts)
+    exec(`touch /home/dev/.ssh/known_hosts && chmod 644 /home/dev/.ssh/known_hosts && chown dev:dev /home/dev/.ssh/known_hosts`);
+
+    res.json({ uploaded, sshDir: "/home/dev/.ssh" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/containers/:name/ssh-keys
+ * List SSH key files in the container's ~/.ssh directory.
+ */
+router.get("/:name/ssh-keys", (req, res) => {
+  try {
+    const { name } = req.params;
+    const err = requireRunning(name);
+    if (err) return res.status(err.code).json({ error: err.error });
+
+    const output = containerManager.execInContainer(name,
+      `ls -la /home/dev/.ssh/ 2>/dev/null | tail -n +2`,
+      { timeout: 5000 },
+    );
+
+    const files = [];
+    if (output) {
+      for (const line of output.split("\n").filter(Boolean)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 9) {
+          const perms = parts[0];
+          const size = parseInt(parts[4]) || 0;
+          const fileName = parts.slice(8).join(" ");
+          if (fileName !== '.' && fileName !== '..') {
+            files.push({ name: fileName, permissions: perms, size });
+          }
+        }
+      }
+    }
+
+    res.json({ files, sshDir: "/home/dev/.ssh" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
 // CONTAINER FILE BROWSING & UPLOAD
 // ──────────────────────────────────────────────────────────────────────────────
 
