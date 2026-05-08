@@ -9,6 +9,9 @@ import { getDB } from "../db.js";
 
 const router = Router();
 
+// Multer for temporary upload to host before docker cp
+const tmpUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 50 * 1024 * 1024 } });
+
 /**
  * GET /api/containers/status
  * Check Docker availability and dev image status
@@ -1024,9 +1027,6 @@ router.get("/:name/browse", (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// Multer for temporary upload to host before docker cp
-const tmpUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 /**
  * POST /api/containers/:name/upload
