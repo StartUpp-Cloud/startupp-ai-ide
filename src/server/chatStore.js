@@ -38,6 +38,49 @@ function redactSecrets(text) {
   return redacted;
 }
 
+function readTailLines(filePath, maxLines) {
+  const safeMax = Math.max(1, maxLines || 1);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.size === 0) return [];
+
+    const chunkSize = 64 * 1024;
+    const chunks = [];
+    let position = stat.size;
+    let newlineCount = 0;
+
+    while (position > 0 && newlineCount <= safeMax) {
+      const readSize = Math.min(chunkSize, position);
+      position -= readSize;
+      const buffer = Buffer.allocUnsafe(readSize);
+      const bytesRead = fs.readSync(fd, buffer, 0, readSize, position);
+      const chunk = buffer.subarray(0, bytesRead);
+      chunks.unshift(chunk);
+
+      for (let i = 0; i < chunk.length; i++) {
+        if (chunk[i] === 10) newlineCount++;
+      }
+    }
+
+    const lines = Buffer.concat(chunks).toString('utf-8').split('\n');
+    if (lines[lines.length - 1] === '') lines.pop();
+    return lines.slice(-safeMax);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function snippetAround(text, query, maxLength = 180) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!value) return '';
+  const idx = value.toLowerCase().indexOf(query.toLowerCase());
+  if (idx < 0) return value.slice(0, maxLength);
+  const start = Math.max(0, idx - 60);
+  const end = Math.min(value.length, idx + query.length + 120);
+  return `${start > 0 ? '...' : ''}${value.slice(start, end)}${end < value.length ? '...' : ''}`;
+}
+
 /**
  * Session index file: data/chat/{projectId}/_sessions.json
  * Contains: [{ id, name, createdAt, messageCount }]
@@ -133,17 +176,36 @@ class ChatStore {
       const now = Date.now();
       const cutoff = now - ARCHIVE_AGE_MS;
 
-      const active = [];
+      let active = [];
       const toArchive = [];
 
       for (const s of sessions) {
         const age = new Date(s.createdAt).getTime();
-        // Keep: pinned, has unread, recent, or has active CLI session
-        if (s.pinned || s.hasUnread || age > cutoff || s.cliSessionId) {
+        // Keep pinned/unread/recent sessions active. CLI resume IDs are still
+        // preserved in the archive, so they should not block compaction forever.
+        if (s.pinned || s.hasUnread || age > cutoff) {
           active.push(s);
         } else {
           toArchive.push(s);
         }
+      }
+
+      if (active.length > MAX_ACTIVE_SESSIONS) {
+        const newestFirst = [...active].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const cappedActive = [];
+        const overflow = [];
+
+        for (const s of newestFirst) {
+          const protectedSession = s.pinned || s.hasUnread;
+          if (protectedSession || cappedActive.length < MAX_ACTIVE_SESSIONS) {
+            cappedActive.push(s);
+          } else {
+            overflow.push(s);
+          }
+        }
+
+        active = cappedActive;
+        toArchive.push(...overflow);
       }
 
       if (toArchive.length === 0) return; // nothing to archive
@@ -821,7 +883,10 @@ class ChatStore {
     const filePath = this._sessionFile(projectId, sessionId);
     if (!fs.existsSync(filePath)) return [];
 
-    const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    const safeLimit = Math.max(1, Math.min(parseInt(limit, 10) || 50, 500));
+    const lines = before
+      ? fs.readFileSync(filePath, 'utf-8').split('\n')
+      : readTailLines(filePath, Math.max(100, safeLimit * 3));
     const messages = [];
     const now = Date.now();
 
@@ -896,11 +961,63 @@ class ChatStore {
 
     if (before) {
       const idx = cleanedMessages.findIndex(m => m.id === before);
-      if (idx > 0) return cleanedMessages.slice(Math.max(0, idx - limit), idx).reverse();
+      if (idx > 0) return cleanedMessages.slice(Math.max(0, idx - safeLimit), idx).reverse();
       return [];
     }
 
-    return cleanedMessages.slice(-limit).reverse();
+    return cleanedMessages.slice(-safeLimit).reverse();
+  }
+
+  searchSessions(projectId, query, { includeArchived = true, limit = 30 } = {}) {
+    const q = String(query || '').trim();
+    if (!q) return [];
+
+    const safeLimit = Math.max(1, Math.min(parseInt(limit, 10) || 30, 100));
+    const sessions = this.getSessions(projectId, { includeArchived });
+    const lower = q.toLowerCase();
+    const bySubject = [];
+    const subjectIds = new Set();
+
+    for (const session of sessions) {
+      const subject = session.name || '';
+      if (subject.toLowerCase().includes(lower)) {
+        subjectIds.add(session.id);
+        bySubject.push({
+          ...session,
+          matchType: 'subject',
+          matchSnippet: subject,
+        });
+        if (bySubject.length >= safeLimit) return bySubject;
+      }
+    }
+
+    const byContent = [];
+    for (const session of sessions) {
+      if (subjectIds.has(session.id)) continue;
+      const filePath = this._sessionFile(projectId, session.id);
+      if (!fs.existsSync(filePath)) continue;
+
+      try {
+        const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+        for (const line of lines) {
+          const msg = deserialize(line);
+          if (!msg?.content) continue;
+          if (!msg.content.toLowerCase().includes(lower)) continue;
+
+          byContent.push({
+            ...session,
+            matchType: 'content',
+            matchSnippet: snippetAround(msg.content, q),
+            matchRole: msg.role,
+          });
+          break;
+        }
+      } catch {}
+
+      if (bySubject.length + byContent.length >= safeLimit) break;
+    }
+
+    return [...bySubject, ...byContent].slice(0, safeLimit);
   }
 
   search(projectId, query, { sessionId = null, limit = 20 } = {}) {
@@ -934,9 +1051,14 @@ class ChatStore {
       if (!active) return 0;
       sessionId = active.id;
     }
+    const session = this.getSessionMeta(projectId, sessionId);
+    if (Number.isFinite(session?.messageCount)) return session.messageCount;
+
     const filePath = this._sessionFile(projectId, sessionId);
     if (!fs.existsSync(filePath)) return 0;
-    return fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim()).length;
+    const count = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim()).length;
+    if (session) this.updateSessionMeta(projectId, sessionId, { messageCount: count });
+    return count;
   }
 
   /**

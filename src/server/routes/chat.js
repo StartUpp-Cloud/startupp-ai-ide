@@ -23,6 +23,23 @@ router.get('/:projectId/chat/sessions', (req, res) => {
   }
 });
 
+// GET /api/projects/:projectId/chat/sessions/search — Search session history
+// Ranks session name/subject matches before message content matches.
+router.get('/:projectId/chat/sessions/search', (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { q, limit = 30 } = req.query;
+    if (!q?.trim()) return res.json({ sessions: [] });
+    const sessions = chatStore.searchSessions(projectId, q, {
+      includeArchived: true,
+      limit: parseInt(limit, 10),
+    });
+    res.json({ sessions });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // POST /api/projects/:projectId/chat/sessions — Create a new session
 router.post('/:projectId/chat/sessions', (req, res) => {
   try {

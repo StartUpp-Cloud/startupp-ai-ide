@@ -49,6 +49,22 @@ function formatJobProgress(progress) {
   return text;
 }
 
+function mergeSessionLists(current, incoming) {
+  const byId = new Map(current.map(session => [session.id, session]));
+  const currentIds = new Set(current.map(session => session.id));
+
+  for (const session of incoming) {
+    if (!session?.id) continue;
+    byId.set(session.id, { ...(byId.get(session.id) || {}), ...session });
+  }
+
+  const merged = current.map(session => byId.get(session.id));
+  for (const session of incoming) {
+    if (session?.id && !currentIds.has(session.id)) merged.push(byId.get(session.id));
+  }
+  return merged;
+}
+
 /**
  * Working indicator with live timer and stop button.
  */
@@ -757,9 +773,9 @@ function ChatSessionContent({
     return scheduleScrollToBottom();
   }, [projectSwitchKey, isVisible, scheduleScrollToBottom]);
 
-  // Poll for new messages (runs even when hidden)
+  // Poll only the visible pane. Hidden sessions still receive WebSocket events.
   useEffect(() => {
-    if (!projectId || !sessionId) return;
+    if (!projectId || !sessionId || !isVisible) return;
 
     const poll = setInterval(() => {
       fetch(`/api/projects/${projectId}/chat?limit=20&sessionId=${sessionId}`)
@@ -819,7 +835,7 @@ function ChatSessionContent({
     }, 2000);
 
     return () => clearInterval(poll);
-  }, [projectId, sessionId]);
+  }, [projectId, sessionId, isVisible]);
 
   const effectiveTool = session?.tool || tool || 'claude';
   const sessionModel = session?.model || '';
@@ -1209,13 +1225,21 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   const [openTabs, setOpenTabs] = useState([]);
   const [splitCount, setSplitCount] = useState(1);
   const [showSessionList, setShowSessionList] = useState(false);
+  const [historySearch, setHistorySearch] = useState('');
+  const [historySearchResults, setHistorySearchResults] = useState([]);
+  const [historySearchLoading, setHistorySearchLoading] = useState(false);
   const sessionListRef = useRef(null);
   const sessionsRef = useRef([]);
+  const openTabsRef = useRef([]);
   const [projectSwitchKey, setProjectSwitchKey] = useState(0);
 
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    openTabsRef.current = openTabs;
+  }, [openTabs]);
 
   useEffect(() => {
     if (projectId) setProjectSwitchKey(k => k + 1);
@@ -1265,6 +1289,34 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  useEffect(() => {
+    const query = historySearch.trim();
+    if (!showSessionList || !projectId || query.length < 2) {
+      setHistorySearchResults([]);
+      setHistorySearchLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setHistorySearchLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/projects/${projectId}/chat/sessions/search?q=${encodeURIComponent(query)}&limit=40`);
+        const data = await r.json();
+        if (!cancelled) setHistorySearchResults(data.sessions || []);
+      } catch {
+        if (!cancelled) setHistorySearchResults([]);
+      } finally {
+        if (!cancelled) setHistorySearchLoading(false);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [historySearch, showSessionList, projectId]);
 
   // Load sessions when project changes
   useEffect(() => {
@@ -1326,7 +1378,11 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         // updates that are still in-flight (PATCH sent but response not yet back).
         setSessions(prev => {
           const localMap = new Map(prev.map(s => [s.id, s]));
-          return latest.map(serverSession => {
+          const latestIds = new Set(latest.map(s => s.id));
+          const preservedLocal = prev.filter(s => (
+            !latestIds.has(s.id) && (s.pending || openTabsRef.current.includes(s.id))
+          ));
+          const mergedLatest = latest.map(serverSession => {
             const local = localMap.get(serverSession.id);
             if (!local) return serverSession; // brand-new session from server
             return {
@@ -1338,6 +1394,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               effort: local.effort,
             };
           });
+          return [...preservedLocal, ...mergedLatest];
         });
       } catch {}
     };
@@ -1351,24 +1408,61 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
   const createNewSession = useCallback(async () => {
     if (!projectId || creatingRef.current) return;
     creatingRef.current = true;
+    const tempId = `pending-${Date.now()}`;
+    const previousActiveId = activeSessionId;
+    const optimisticSession = {
+      id: tempId,
+      name: 'New conversation',
+      createdAt: new Date().toISOString(),
+      messageCount: 0,
+      manualName: false,
+      tool,
+      pending: true,
+    };
+
+    setSessions(prev => [optimisticSession, ...prev]);
+    setOpenTabs(prev => (prev.includes(tempId) ? prev : [...prev, tempId]));
+    setActiveSessionId(tempId);
+    setShowSessionList(false);
+
     try {
       const r = await fetch(`/api/projects/${projectId}/chat/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tool })
       });
+      if (!r.ok) throw new Error('Failed to create session');
       const session = await r.json();
-      setSessions(prev => [session, ...prev]);
-      setOpenTabs(prev => [...prev, session.id]);
-      setActiveSessionId(session.id);
-      setShowSessionList(false);
-    } catch {} finally {
+      setSessions(prev => {
+        let replaced = false;
+        const next = prev.map(s => {
+          if (s.id !== tempId) return s;
+          replaced = true;
+          return session;
+        });
+        return replaced ? next : [session, ...prev];
+      });
+      setOpenTabs(prev => [...new Set(prev.map(id => (id === tempId ? session.id : id)))]);
+      setActiveSessionId(prev => (prev === tempId ? session.id : prev));
+    } catch {
+      setSessions(prev => prev.filter(s => s.id !== tempId));
+      setOpenTabs(prev => prev.filter(id => id !== tempId));
+      setActiveSessionId(prev => (prev === tempId ? previousActiveId : prev));
+    } finally {
       creatingRef.current = false;
     }
-  }, [projectId, tool]);
+  }, [projectId, tool, activeSessionId]);
 
   const deleteSession = useCallback(async (sessionId) => {
     if (!projectId) return;
+    const session = sessionsRef.current.find(s => s.id === sessionId);
+    if (session?.pending) {
+      const remainingTabs = openTabsRef.current.filter(id => id !== sessionId);
+      setOpenTabs(prev => prev.filter(id => id !== sessionId));
+      setSessions(prev => prev.filter(s => s.id !== sessionId));
+      setActiveSessionId(prev => (prev === sessionId ? (remainingTabs[remainingTabs.length - 1] || null) : prev));
+      return;
+    }
     try {
       await fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, { method: 'DELETE' });
       setOpenTabs(prev => prev.filter(id => id !== sessionId));
@@ -1412,6 +1506,12 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     setShowSessionList(false);
     markSessionRead(sessionId);
   }, [openTabs, markSessionRead]);
+
+  const openHistorySession = useCallback((session) => {
+    if (!session?.id) return;
+    setSessions(prev => mergeSessionLists(prev, [session]));
+    openSession(session.id);
+  }, [openSession]);
 
   const closeTab = useCallback((sessionId, e) => {
     e?.stopPropagation();
@@ -1550,6 +1650,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
 
   const closedSessions = sortedSessions.filter(s => !openTabs.includes(s.id));
   const openTabSessions = openTabs.map(id => sessions.find(s => s.id === id)).filter(Boolean);
+  const hasHistorySearch = historySearch.trim().length >= 2;
+  const displayedHistorySessions = hasHistorySearch ? historySearchResults : closedSessions;
   const visibleTabIds = useMemo(() => {
     const ordered = [activeSessionId, ...openTabs.filter(id => id !== activeSessionId)].filter(Boolean);
     return ordered.slice(0, Math.min(Math.max(splitCount, 1), 4));
@@ -1626,7 +1728,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
                 <span className="flex-shrink-0 w-1.5 h-1.5 rounded-full bg-primary-500 animate-pulse" />
               )}
               {/* Pin button - show on hover for active tab */}
-              {s.id === activeSessionId && (
+              {s.id === activeSessionId && !s.pending && (
                 <>
                   <button
                     onClick={(e) => togglePin(s.id, e)}
@@ -1703,15 +1805,30 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
             {showSessionList && (
               <div className="absolute top-full right-0 mt-1 w-72 bg-surface-800 border border-surface-700 rounded-lg shadow-modal z-50 overflow-hidden animate-scale-in">
                 <div className="px-3 py-2 text-[10px] text-surface-500 uppercase tracking-wider border-b border-surface-700/50 bg-surface-850/50">
-                  {closedSessions.length > 0 ? 'Closed Sessions' : 'All Sessions Open'}
+                  {hasHistorySearch ? 'History Search' : (closedSessions.length > 0 ? 'Closed Sessions' : 'All Sessions Open')}
                 </div>
 
-                {closedSessions.length > 0 ? (
+                <div className="p-2 border-b border-surface-700/50 bg-surface-850/30">
+                  <input
+                    type="text"
+                    value={historySearch}
+                    onChange={(e) => setHistorySearch(e.target.value)}
+                    placeholder="Search subjects, then content..."
+                    className="w-full px-2 py-1 text-[11px] bg-surface-900 border border-surface-700 rounded text-surface-200 placeholder:text-surface-600 focus:outline-none focus:border-primary-500/60"
+                  />
+                </div>
+
+                {historySearchLoading ? (
+                  <div className="px-3 py-4 text-[11px] text-surface-500 text-center flex items-center justify-center gap-2">
+                    <Loader size={12} className="animate-spin" />
+                    Searching history...
+                  </div>
+                ) : displayedHistorySessions.length > 0 ? (
                   <div className="max-h-56 overflow-y-auto">
-                    {closedSessions.map(s => (
+                    {displayedHistorySessions.map(s => (
                       <div
                         key={s.id}
-                        onClick={() => editingSessionId !== s.id && openSession(s.id)}
+                        onClick={() => editingSessionId !== s.id && (hasHistorySearch ? openHistorySession(s) : openSession(s.id))}
                         className="flex items-center gap-2 px-3 py-2 text-[11px] cursor-pointer transition-colors group text-surface-300 hover:bg-surface-750"
                       >
                         {s.pinned ? (
@@ -1719,24 +1836,31 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
                         ) : (
                           <MessageCircle size={11} className="text-surface-600 flex-shrink-0" />
                         )}
-                        {editingSessionId === s.id ? (
-                          <input
-                            ref={editInputRef}
-                            type="text"
-                            value={editingName}
-                            onChange={(e) => setEditingName(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') finishEditing();
-                              if (e.key === 'Escape') cancelEditing();
-                            }}
-                            onBlur={finishEditing}
-                            onClick={(e) => e.stopPropagation()}
-                            className="flex-1 min-w-0 bg-surface-700 border border-surface-600 rounded px-1.5 py-0.5 text-[11px] text-surface-100 focus:outline-none focus:border-primary-500"
-                            placeholder="Session name..."
-                          />
-                        ) : (
-                          <span className="flex-1 truncate">{s.name}</span>
-                        )}
+                        <div className="flex-1 min-w-0">
+                          {editingSessionId === s.id ? (
+                            <input
+                              ref={editInputRef}
+                              type="text"
+                              value={editingName}
+                              onChange={(e) => setEditingName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') finishEditing();
+                                if (e.key === 'Escape') cancelEditing();
+                              }}
+                              onBlur={finishEditing}
+                              onClick={(e) => e.stopPropagation()}
+                              className="w-full bg-surface-700 border border-surface-600 rounded px-1.5 py-0.5 text-[11px] text-surface-100 focus:outline-none focus:border-primary-500"
+                              placeholder="Session name..."
+                            />
+                          ) : (
+                            <>
+                              <div className="truncate">{s.name}</div>
+                              {hasHistorySearch && s.matchSnippet && s.matchType === 'content' && (
+                                <div className="truncate text-[10px] text-surface-500 mt-0.5">{s.matchSnippet}</div>
+                              )}
+                            </>
+                          )}
+                        </div>
                         {s.branch && (
                           <span className="flex items-center gap-0.5 px-1 py-0.5 rounded bg-green-500/10 text-green-400 text-[9px] font-mono flex-shrink-0">
                             <GitBranch size={8} />
@@ -1754,7 +1878,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
                         ) : (
                           <>
                             <span className="text-[9px] text-surface-600 flex-shrink-0 tabular-nums group-hover:hidden">
-                              {s.messageCount || 0} msg
+                              {hasHistorySearch ? (s.matchType || 'match') : `${s.messageCount || 0} msg`}
                             </span>
                             <button
                               onClick={(e) => togglePin(s.id, e)}
@@ -1786,7 +1910,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
                   </div>
                 ) : (
                   <div className="px-3 py-4 text-[11px] text-surface-500 text-center">
-                    Close tabs to see them here
+                    {hasHistorySearch ? 'No matching sessions found' : 'Close tabs to see them here'}
                   </div>
                 )}
 
@@ -1796,7 +1920,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
                     try {
                       const r = await fetch(`/api/projects/${projectId}/chat/sessions?includeArchived=true`);
                       const data = await r.json();
-                      if (data.sessions) setSessions(data.sessions);
+                      if (data.sessions) setSessions(prev => mergeSessionLists(prev, data.sessions));
                     } catch {}
                   }}
                   className="w-full px-3 py-1.5 text-[10px] text-surface-500 hover:text-surface-300 hover:bg-surface-700/30 text-center border-t border-surface-700/50 transition-colors"
@@ -1830,68 +1954,82 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           ...gridStyle,
         }}
       >
-        {openTabs.map(tabId => (
-          <div
-            key={tabId}
-            style={{
-              position: visibleTabIds.includes(tabId) ? 'relative' : 'absolute',
-              top: visibleTabIds.includes(tabId) ? 'auto' : 0,
-              left: visibleTabIds.includes(tabId) ? 'auto' : 0,
-              right: visibleTabIds.includes(tabId) ? 'auto' : 0,
-              bottom: visibleTabIds.includes(tabId) ? 'auto' : 0,
-              width: visibleTabIds.includes(tabId) ? 'auto' : 0,
-              height: visibleTabIds.includes(tabId) ? 'auto' : 0,
-              display: 'flex',
-              flexDirection: 'column',
-              overflow: 'hidden',
-              visibility: visibleTabIds.includes(tabId) ? 'visible' : 'hidden',
-              pointerEvents: visibleTabIds.includes(tabId) ? 'auto' : 'none',
-              zIndex: visibleTabIds.includes(tabId) ? 1 : 0,
-              backgroundColor: '#0d1117',
-              minHeight: 0,
-              border: visibleTabIds.length > 1 ? '1px solid rgba(71,85,105,0.35)' : 'none',
-              borderRadius: visibleTabIds.length > 1 ? 8 : 0,
-            }}
-          >
-            {visibleTabIds.length > 1 && visibleTabIds.includes(tabId) && (
-              <div className="px-2 py-1 border-b border-surface-700/40 bg-surface-850/70 text-[11px] text-surface-300 flex items-center gap-1.5 group/pane-hdr">
-                <MessageCircle size={10} className="text-primary-400 flex-shrink-0" />
-                <span className="truncate flex-1">{sessions.find(s => s.id === tabId)?.name || 'Chat'}</span>
-                {sessions.find(s => s.id === tabId)?.branch && (
-                  <span className="flex items-center gap-0.5 px-1 py-0.5 rounded bg-green-500/10 text-green-400 text-[9px] font-mono flex-shrink-0">
-                    <GitBranch size={8} />
-                    {sessions.find(s => s.id === tabId).branch}
-                  </span>
-                )}
-                <button
-                  onClick={(e) => togglePin(tabId, e)}
-                  className={`p-0.5 rounded flex-shrink-0 transition-all opacity-0 group-hover/pane-hdr:opacity-100 ${
-                    sessions.find(s => s.id === tabId)?.pinned
-                      ? 'text-amber-400 opacity-100'
-                      : 'text-surface-500 hover:text-amber-400'
-                  }`}
-                  title={sessions.find(s => s.id === tabId)?.pinned ? 'Unpin session' : 'Pin session'}
-                >
-                  <Pin size={9} className={sessions.find(s => s.id === tabId)?.pinned ? '-rotate-45' : ''} />
-                </button>
-              </div>
-            )}
-            <ChatSessionContent
-              projectId={projectId}
-              sessionId={tabId}
-              wsRef={wsRef}
-              mode={mode}
-              tool={tool}
-              session={sessions.find(s => s.id === tabId)}
-              isVisible={isActive && visibleTabIds.includes(tabId)}
-              projectSwitchKey={projectSwitchKey}
-              onSessionUpdate={handleSessionUpdate}
-              onUnreadChange={onUnreadChange}
-              onUpdateSessionConfig={updateSessionAssistantConfig}
-              containerName={containerName}
-            />
-          </div>
-        ))}
+        {openTabs.map(tabId => {
+          const tabSession = sessions.find(s => s.id === tabId);
+          const tabVisible = visibleTabIds.includes(tabId);
+
+          return (
+            <div
+              key={tabId}
+              style={{
+                position: tabVisible ? 'relative' : 'absolute',
+                top: tabVisible ? 'auto' : 0,
+                left: tabVisible ? 'auto' : 0,
+                right: tabVisible ? 'auto' : 0,
+                bottom: tabVisible ? 'auto' : 0,
+                width: tabVisible ? 'auto' : 0,
+                height: tabVisible ? 'auto' : 0,
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                visibility: tabVisible ? 'visible' : 'hidden',
+                pointerEvents: tabVisible ? 'auto' : 'none',
+                zIndex: tabVisible ? 1 : 0,
+                backgroundColor: '#0d1117',
+                minHeight: 0,
+                border: visibleTabIds.length > 1 ? '1px solid rgba(71,85,105,0.35)' : 'none',
+                borderRadius: visibleTabIds.length > 1 ? 8 : 0,
+              }}
+            >
+              {visibleTabIds.length > 1 && tabVisible && (
+                <div className="px-2 py-1 border-b border-surface-700/40 bg-surface-850/70 text-[11px] text-surface-300 flex items-center gap-1.5 group/pane-hdr">
+                  <MessageCircle size={10} className="text-primary-400 flex-shrink-0" />
+                  <span className="truncate flex-1">{tabSession?.name || 'Chat'}</span>
+                  {tabSession?.branch && (
+                    <span className="flex items-center gap-0.5 px-1 py-0.5 rounded bg-green-500/10 text-green-400 text-[9px] font-mono flex-shrink-0">
+                      <GitBranch size={8} />
+                      {tabSession.branch}
+                    </span>
+                  )}
+                  {!tabSession?.pending && (
+                    <button
+                      onClick={(e) => togglePin(tabId, e)}
+                      className={`p-0.5 rounded flex-shrink-0 transition-all opacity-0 group-hover/pane-hdr:opacity-100 ${
+                        tabSession?.pinned
+                          ? 'text-amber-400 opacity-100'
+                          : 'text-surface-500 hover:text-amber-400'
+                      }`}
+                      title={tabSession?.pinned ? 'Unpin session' : 'Pin session'}
+                    >
+                      <Pin size={9} className={tabSession?.pinned ? '-rotate-45' : ''} />
+                    </button>
+                  )}
+                </div>
+              )}
+              {tabSession?.pending ? (
+                <div className="flex-1 min-h-0 flex items-center justify-center text-surface-500 text-sm gap-2">
+                  <Loader size={16} className="animate-spin" />
+                  Creating session...
+                </div>
+              ) : (
+                <ChatSessionContent
+                  projectId={projectId}
+                  sessionId={tabId}
+                  wsRef={wsRef}
+                  mode={mode}
+                  tool={tool}
+                  session={tabSession}
+                  isVisible={isActive && tabVisible}
+                  projectSwitchKey={projectSwitchKey}
+                  onSessionUpdate={handleSessionUpdate}
+                  onUnreadChange={onUnreadChange}
+                  onUpdateSessionConfig={updateSessionAssistantConfig}
+                  containerName={containerName}
+                />
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
