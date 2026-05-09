@@ -4,6 +4,9 @@
   "description": "StartUpp AI IDE - AI-assisted development environment",
   "type": "module",
   "main": "src/server/index.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
     "server:dev": "nodemon --ignore data/ src/server/index.js",
@@ -18,6 +21,7 @@
     "pm2:reload": "pm2 reload ecosystem.config.cjs",
     "pm2:delete": "pm2 delete ecosystem.config.cjs",
     "pm2:logs": "pm2 logs",
+    "migrate:sqlite": "node scripts/migrate-to-sqlite.js",
     "pm2:monit": "pm2 monit",
     "pm2:status": "pm2 status",
     "pm2:start:prod": "pm2 start ecosystem.config.cjs --only ai-ide-api --env production",

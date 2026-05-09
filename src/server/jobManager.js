@@ -17,6 +17,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
+import { sqliteStore } from './sqliteStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const JOBS_DIR = path.join(__dirname, '../../data/jobs');
@@ -93,7 +94,7 @@ class JobManager extends EventEmitter {
         console.log(`[JobManager] Recovered CLI session ${recoveredSessionId} for job ${job.id}`);
 
         // Also update chat session metadata so --resume works
-        this._updateChatSessionWithCliSession(job.projectId, job.sessionId, recoveredSessionId);
+        this._updateChatSessionWithCliSession(job.projectId, job.sessionId, recoveredSessionId, job.tool || 'claude');
       }
 
       // Mark as failed/interrupted - can't resume process after restart
@@ -325,37 +326,17 @@ class JobManager extends EventEmitter {
     const active = this.activeJobs.get(jobId);
     if (active) return active.job;
 
-    // Load from disk
-    const jobPath = this._getJobPath(jobId);
-    if (fs.existsSync(jobPath)) {
-      try {
-        return JSON.parse(fs.readFileSync(jobPath, 'utf-8'));
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    const row = sqliteStore.db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+    return sqliteStore.rowToJob(row);
   }
 
   /**
    * Get all jobs for a session
    */
   getSessionJobs(projectId, sessionId, limit = 20) {
-    const jobs = [];
-    const files = fs.readdirSync(JOBS_DIR).filter(f => f.endsWith('.json'));
-
-    for (const file of files) {
-      try {
-        const job = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, file), 'utf-8'));
-        if (job.projectId === projectId && job.sessionId === sessionId) {
-          jobs.push(job);
-        }
-      } catch {}
-    }
-
-    return jobs
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, limit);
+    return sqliteStore.db.prepare(`SELECT * FROM jobs WHERE project_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?`)
+      .all(projectId, sessionId, Math.max(1, Math.min(parseInt(limit, 10) || 20, 100)))
+      .map(sqliteStore.rowToJob);
   }
 
   /**
@@ -375,27 +356,10 @@ class JobManager extends EventEmitter {
    */
   getResumableJobs(projectId, sessionId, maxAgeMinutes = 60) {
     const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000).toISOString();
-    const jobs = [];
-    const files = fs.readdirSync(JOBS_DIR).filter(f => f.endsWith('.json'));
-
-    for (const file of files) {
-      try {
-        const job = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, file), 'utf-8'));
-        // Check if this job belongs to the session, has a CLI session ID, and is recent
-        if (
-          job.projectId === projectId &&
-          job.sessionId === sessionId &&
-          job.cliSessionId &&
-          job.status === 'failed' &&
-          job.completedAt > cutoff &&
-          job.error?.includes('resumed') // Only jobs marked as resumable
-        ) {
-          jobs.push(job);
-        }
-      } catch {}
-    }
-
-    return jobs.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+    return sqliteStore.db.prepare(`SELECT * FROM jobs
+      WHERE project_id = ? AND session_id = ? AND cli_session_id IS NOT NULL
+        AND status = 'failed' AND completed_at > ? AND error LIKE '%resumed%'
+      ORDER BY completed_at DESC`).all(projectId, sessionId, cutoff).map(sqliteStore.rowToJob);
   }
 
   /**
@@ -454,23 +418,13 @@ class JobManager extends EventEmitter {
   }
 
   _saveJob(job) {
-    fs.writeFileSync(this._getJobPath(job.id), JSON.stringify(job, null, 2), 'utf-8');
+    sqliteStore.saveJob(job);
   }
 
   _findInterruptedJobs() {
-    const interrupted = [];
-    const files = fs.readdirSync(JOBS_DIR).filter(f => f.endsWith('.json'));
-
-    for (const file of files) {
-      try {
-        const job = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, file), 'utf-8'));
-        if (job.status === 'running' || job.status === 'pending') {
-          interrupted.push(job);
-        }
-      } catch {}
-    }
-
-    return interrupted;
+    return sqliteStore.db.prepare("SELECT * FROM jobs WHERE status IN ('running', 'pending')")
+      .all()
+      .map(sqliteStore.rowToJob);
   }
 
   /**
@@ -500,11 +454,19 @@ class JobManager extends EventEmitter {
   /**
    * Update chat session metadata with CLI session ID for --resume support.
    */
-  async _updateChatSessionWithCliSession(projectId, sessionId, cliSessionId) {
+  async _updateChatSessionWithCliSession(projectId, sessionId, cliSessionId, tool = 'claude') {
     try {
       const { chatStore } = await import('./chatStore.js');
-      chatStore.updateSessionMeta(projectId, sessionId, { cliSessionId });
-      console.log(`[JobManager] Updated chat session ${sessionId} with CLI session ${cliSessionId}`);
+      const session = chatStore.getSession(projectId, sessionId);
+      chatStore.updateSessionMeta(projectId, sessionId, {
+        cliSessionId,
+        cliSessionTool: tool,
+        toolSessions: {
+          ...(session?.toolSessions || {}),
+          [tool]: { cliSessionId, updatedAt: new Date().toISOString() },
+        },
+      });
+      console.log(`[JobManager] Updated chat session ${sessionId} with ${tool} CLI session ${cliSessionId}`);
     } catch (err) {
       console.warn(`[JobManager] Error updating chat session: ${err.message}`);
     }
@@ -676,22 +638,17 @@ class JobManager extends EventEmitter {
    */
   async cleanup(daysToKeep = 7) {
     const cutoff = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
-    const files = fs.readdirSync(JOBS_DIR).filter(f => f.endsWith('.json'));
+    const rows = sqliteStore.db.prepare(`SELECT id, completed_at, created_at, status FROM jobs WHERE status NOT IN ('running', 'pending')`).all();
     let cleaned = 0;
 
-    for (const file of files) {
+    for (const job of rows) {
       try {
-        const jobPath = path.join(JOBS_DIR, file);
-        const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8'));
-
-        if (job.status !== 'running' && job.status !== 'pending') {
-          const completedAt = new Date(job.completedAt || job.createdAt).getTime();
-          if (completedAt < cutoff) {
-            fs.unlinkSync(jobPath);
-            const outputPath = this._getOutputPath(job.id);
-            if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-            cleaned++;
-          }
+        const completedAt = new Date(job.completed_at || job.created_at).getTime();
+        if (completedAt < cutoff) {
+          sqliteStore.db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
+          const outputPath = this._getOutputPath(job.id);
+          if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+          cleaned++;
         }
       } catch {}
     }

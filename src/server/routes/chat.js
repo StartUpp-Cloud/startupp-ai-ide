@@ -5,8 +5,21 @@ import { mergeSessionAssistantSettings, resolveSessionAssistantSettings } from '
 
 const router = express.Router();
 
+const ROLE_PROMPT_IDS = new Set([
+  'principal-engineer',
+  'design-director',
+  'security-architect',
+  'operator-ceo',
+  'venture-capitalist',
+]);
+
 function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function normalizeRolePromptIds(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter(id => typeof id === 'string' && ROLE_PROMPT_IDS.has(id)))];
 }
 
 // GET /api/projects/:projectId/chat/sessions — List sessions
@@ -78,8 +91,9 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     const wantsBranch = hasOwn(req.body, 'branch');
     const wantsRepoPath = hasOwn(req.body, 'repoPath');
     const wantsAssistantSettings = ['tool', 'model', 'effort'].some((field) => hasOwn(req.body, field));
+    const wantsRolePrompts = hasOwn(req.body, 'activeRolePromptIds');
 
-    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath) {
+    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsRolePrompts) {
       return res.status(400).json({ error: 'No supported session fields were provided' });
     }
 
@@ -96,6 +110,8 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
       // Reset CLI session when branch changes so the AI starts fresh in the new worktree
       if (newBranch !== previousBranch && session.cliSessionId) {
         updates.cliSessionId = null;
+        updates.cliSessionTool = null;
+        updates.toolSessions = {};
         agentGateway.resetSession(sessionId);
       }
     }
@@ -108,14 +124,11 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
       const nextAssistantSettings = mergeSessionAssistantSettings(session, req.body, {
         tool: session.tool || 'claude',
       });
-      const previousTool = session.tool || 'claude';
-
       Object.assign(updates, nextAssistantSettings);
+    }
 
-      if (session.cliSessionId && nextAssistantSettings.tool !== previousTool) {
-        updates.cliSessionId = null;
-        agentGateway.resetSession(sessionId);
-      }
+    if (wantsRolePrompts) {
+      updates.activeRolePromptIds = normalizeRolePromptIds(req.body.activeRolePromptIds);
     }
 
     chatStore.updateSessionMeta(projectId, sessionId, updates);

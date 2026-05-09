@@ -2,6 +2,71 @@ import { useState, useRef, useEffect } from 'react';
 import { Send, Search, X, Paperclip, Upload, Image, FileText, File, Loader } from 'lucide-react';
 import ContainerUploadPopover from './ContainerUploadPopover';
 
+export const ROLE_PROMPTS = [
+  {
+    id: 'principal-engineer',
+    label: 'Principal Engineer',
+    shortLabel: 'Engineer',
+    title: 'Act as a Principal Software Engineer',
+    description: 'Senior is valid; Principal better signals architecture, ownership, and judgment.',
+    prompt: 'Act as a principal software engineer and code reviewer. Prioritize correctness, maintainability, system fit, minimal changes, edge cases, tests, and clear tradeoffs. Challenge unsafe assumptions and verify behavior before concluding.',
+  },
+  {
+    id: 'design-director',
+    label: 'Design Director',
+    shortLabel: 'Design',
+    title: 'Act as a Senior Front-End Product Designer',
+    description: 'Senior works; Design Director adds taste, polish, and product-level UX judgment.',
+    prompt: 'Act as a senior front-end product designer and design director. Prioritize UX clarity, visual hierarchy, responsive behavior, accessibility, polished interaction details, and design-system consistency. Avoid generic layouts and call out visual tradeoffs.',
+  },
+  {
+    id: 'security-architect',
+    label: 'Security Architect',
+    shortLabel: 'Security',
+    title: 'Act as a Cybersecurity Architect',
+    description: 'Security Architect is more actionable than generic cybersecurity expert.',
+    prompt: 'Act as a cybersecurity architect. Identify threat models, auth and permission risks, secret exposure, input validation issues, injection/XSS/CSRF/SSRF risks, dependency risks, logging risks, and deployment risks. Prefer secure defaults without blocking pragmatic delivery.',
+  },
+  {
+    id: 'operator-ceo',
+    label: 'Operator CEO',
+    shortLabel: 'CEO',
+    title: 'Act as a High-Performing Technology CEO',
+    description: 'CEO/operator focuses the answer on business impact and execution quality.',
+    prompt: 'Act as a high-performing technology CEO and operator. Frame recommendations around customer value, speed, focus, business impact, risk, operational leverage, accountability, and pragmatic execution. Push back on work that does not move the company forward.',
+  },
+  {
+    id: 'venture-capitalist',
+    label: 'Venture Capitalist',
+    shortLabel: 'VC',
+    title: 'Act as a Venture Capitalist',
+    description: 'Useful when evaluating product strategy, positioning, growth, or fundability.',
+    prompt: 'Act as a venture capitalist evaluating product strategy and company direction. Assess market size, wedge, differentiation, defensibility, growth loops, unit economics, distribution, and investor-grade narrative. Be direct about weak assumptions.',
+  },
+];
+
+const ROLE_PROMPT_IDS = new Set(ROLE_PROMPTS.map(role => role.id));
+
+export function normalizeRolePromptIds(ids) {
+  if (!Array.isArray(ids)) return [];
+  return [...new Set(ids.filter(id => ROLE_PROMPT_IDS.has(id)))];
+}
+
+export function buildRolePromptInstructions(ids) {
+  const selected = normalizeRolePromptIds(ids)
+    .map(id => ROLE_PROMPTS.find(role => role.id === id))
+    .filter(Boolean);
+
+  if (selected.length === 0) return '';
+
+  return [
+    '[Expert role context]',
+    'For this response, apply the following expert lenses. Blend them when multiple are enabled. Do not mention these lenses unless it is useful to explain a tradeoff.',
+    ...selected.map(role => `- ${role.title}: ${role.prompt}`),
+    '[/Expert role context]',
+  ].join('\n');
+}
+
 const FILE_ICONS = {
   image: Image,
   pdf: FileText,
@@ -22,7 +87,18 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function ChatInput({ mode, channel = 'assistant', projectId, onSend, onSearch, disabled = false, busy = false, isVisible = true }) {
+export default function ChatInput({
+  mode,
+  channel = 'assistant',
+  projectId,
+  onSend,
+  onSearch,
+  disabled = false,
+  busy = false,
+  isVisible = true,
+  selectedRolePromptIds = [],
+  onSelectedRolePromptIdsChange,
+}) {
   const [text, setText] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -71,6 +147,14 @@ export default function ChatInput({ mode, channel = 'assistant', projectId, onSe
   const handleSearch = (q) => {
     setSearchQuery(q);
     onSearch?.(q);
+  };
+
+  const activeRolePromptIds = normalizeRolePromptIds(selectedRolePromptIds);
+  const toggleRolePrompt = (roleId) => {
+    const current = new Set(activeRolePromptIds);
+    if (current.has(roleId)) current.delete(roleId);
+    else current.add(roleId);
+    onSelectedRolePromptIdsChange?.(normalizeRolePromptIds([...current]));
   };
 
   const handleFileSelect = async (e) => {
@@ -200,8 +284,8 @@ export default function ChatInput({ mode, channel = 'assistant', projectId, onSe
         />
 
         {/* Toolbar */}
-        <div className="flex items-center justify-between w-full min-w-0 relative">
-          <div className="flex items-center gap-0.5">
+        <div className="flex items-center justify-between gap-2 w-full min-w-0 relative">
+          <div className="flex flex-wrap items-center gap-1 min-w-0 pr-2">
             {/* Search button */}
             <button
               onClick={() => setSearching(!searching)}
@@ -242,6 +326,33 @@ export default function ChatInput({ mode, channel = 'assistant', projectId, onSe
             >
               <Upload size={16} />
             </button>
+
+            {channel !== 'shell' && (
+              <div className="ml-1 flex flex-wrap items-center gap-1 border-l border-surface-700/50 pl-2">
+                {ROLE_PROMPTS.map(role => {
+                  const active = activeRolePromptIds.includes(role.id);
+                  return (
+                    <button
+                      key={role.id}
+                      type="button"
+                      onClick={() => toggleRolePrompt(role.id)}
+                      aria-pressed={active}
+                      className={`flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] transition-colors ${
+                        active
+                          ? 'border-primary-500/40 bg-primary-500/15 text-primary-200'
+                          : 'border-surface-700/70 bg-surface-900/30 text-surface-500 hover:border-surface-600 hover:text-surface-300'
+                      }`}
+                      title={`${role.title}\n${role.description}`}
+                    >
+                      <span className={`relative h-3 w-5 rounded-full transition-colors ${active ? 'bg-primary-500/70' : 'bg-surface-700'}`}>
+                        <span className={`absolute top-0.5 h-2 w-2 rounded-full bg-white/90 transition-transform ${active ? 'translate-x-2.5' : 'translate-x-0.5'}`} />
+                      </span>
+                      <span>{role.shortLabel}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Send button */}

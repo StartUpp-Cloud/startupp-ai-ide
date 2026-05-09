@@ -17,6 +17,30 @@ import { slackService } from './slackService.js';
 import { mergeSessionAssistantSettings } from './sessionSettings.js';
 import { shellProxy } from './shellProxy.js';
 
+const ROLE_PROMPT_IDS = new Set([
+  'principal-engineer',
+  'design-director',
+  'security-architect',
+  'operator-ceo',
+  'venture-capitalist',
+]);
+
+function normalizeRolePromptIds(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter(id => typeof id === 'string' && ROLE_PROMPT_IDS.has(id)))];
+}
+
+function sanitizeRolePromptInstructions(value) {
+  const text = String(value || '').trim();
+  return text.length > 5000 ? text.slice(0, 5000) : text;
+}
+
+function appendRolePromptInstructions(content, instructions) {
+  const prompt = sanitizeRolePromptInstructions(instructions);
+  if (!prompt) return content;
+  return `${content || ''}\n\n---\n\n${prompt}`;
+}
+
 class TerminalServer {
   constructor() {
     this.wss = null;
@@ -188,7 +212,10 @@ class TerminalServer {
       ws.on('message', (message) => {
         try {
           const msg = JSON.parse(message.toString());
-          this.handleMessage(ws, msg);
+          this.handleMessage(ws, msg).catch((error) => {
+            console.error('Failed to handle WebSocket message:', error);
+            this.sendError(ws, error.message || 'Failed to handle message');
+          });
         } catch (error) {
           console.error('Failed to parse WebSocket message:', error);
           this.sendError(ws, 'Invalid message format');
@@ -591,6 +618,12 @@ class TerminalServer {
       case 'chat-send': {
         const { chatStore } = await import('./chatStore.js');
         const { agentGateway } = await import('./agentGateway.js');
+        const { agentOrchestrator } = await import('./agentOrchestrator.js');
+
+        if (!payload.projectId) {
+          this.sendError(ws, 'projectId is required');
+          break;
+        }
 
         // Ensure session exists
         chatStore.migrateIfNeeded(payload.projectId);
@@ -603,7 +636,9 @@ class TerminalServer {
           model: payload.model,
           effort: payload.effort,
         });
-        chatStore.updateSessionMeta(payload.projectId, chatSessionId, assistantSettings);
+        const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
+        const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, activeRolePromptIds });
 
         // Attach client to this chat session for isolated communication
         this.attachToChatSession(ws, chatSessionId);
@@ -611,6 +646,7 @@ class TerminalServer {
         // Build display content with attachment info
         let displayContent = payload.content || '';
         const attachments = payload.attachments || [];
+        const agentContent = appendRolePromptInstructions(payload.content, rolePromptInstructions);
         if (attachments.length > 0) {
           const attachmentList = attachments.map(a => `📎 ${a.name}`).join('\n');
           displayContent = displayContent ? `${displayContent}\n\n${attachmentList}` : attachmentList;
@@ -622,7 +658,7 @@ class TerminalServer {
           sessionId: chatSessionId,
           role: 'user',
           content: displayContent,
-          metadata: { mode: payload.mode, attachments, ...assistantSettings },
+          metadata: { mode: payload.mode, attachments, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, ...assistantSettings },
         });
 
         // Broadcast to all clients attached to this chat session
@@ -631,23 +667,26 @@ class TerminalServer {
         // Also broadcast globally for any listeners (backward compatibility)
         this.broadcast({ type: 'chat-message', message: userMsg });
 
-        // Dispatch to agent gateway (async — runs in background)
-        // Use per-session broadcast for isolated response delivery
-        agentGateway.handleTask({
+        const sharedBroadcast = (data) => {
+          // Broadcast to chat session clients first (isolated)
+          this.broadcastToChatSession(chatSessionId, data);
+          // Also broadcast globally (backward compatibility)
+          this.broadcast(data);
+        };
+
+        const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({ mode: payload.mode, content: payload.content });
+        const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
+
+        runner({
           projectId: payload.projectId,
           sessionId: chatSessionId,
-          content: payload.content,
+          content: agentContent,
           attachments,
           mode: payload.mode,
           tool: assistantSettings.tool,
           model: assistantSettings.model,
           effort: assistantSettings.effort,
-          broadcastFn: (data) => {
-            // Broadcast to chat session clients first (isolated)
-            this.broadcastToChatSession(chatSessionId, data);
-            // Also broadcast globally (backward compatibility)
-            this.broadcast(data);
-          },
+          broadcastFn: sharedBroadcast,
         }).catch(err => {
           const errMsg = chatStore.addMessage({
             projectId: payload.projectId,
@@ -663,6 +702,11 @@ class TerminalServer {
 
       case 'chat-shell-send': {
         const { chatStore } = await import('./chatStore.js');
+
+        if (!payload.projectId) {
+          this.sendError(ws, 'projectId is required');
+          break;
+        }
 
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
@@ -699,6 +743,12 @@ class TerminalServer {
       case 'chat-retry': {
         const { chatStore } = await import('./chatStore.js');
         const { agentGateway } = await import('./agentGateway.js');
+        const { agentOrchestrator } = await import('./agentOrchestrator.js');
+
+        if (!payload.projectId) {
+          this.sendError(ws, 'projectId is required');
+          break;
+        }
 
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
@@ -709,7 +759,9 @@ class TerminalServer {
           model: payload.model,
           effort: payload.effort,
         });
-        chatStore.updateSessionMeta(payload.projectId, chatSessionId, assistantSettings);
+        const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
+        const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, activeRolePromptIds });
         this.attachToChatSession(ws, chatSessionId);
 
         const retryContent = (payload.content || '').trim();
@@ -717,6 +769,7 @@ class TerminalServer {
           this.sendError(ws, 'Retry content is required');
           break;
         }
+        const agentRetryContent = appendRolePromptInstructions(retryContent, rolePromptInstructions);
 
         // Optional marker message to show user-initiated regeneration
         const retryMsg = chatStore.addMessage({
@@ -726,24 +779,33 @@ class TerminalServer {
           content: payload.executeReviewedPlan
             ? '✅ Plan approved. Executing with latest instructions...'
             : '🔁 Re-evaluating response with latest instructions...',
-          metadata: { retry: true, executeReviewedPlan: !!payload.executeReviewedPlan },
+          metadata: { retry: true, executeReviewedPlan: !!payload.executeReviewedPlan, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions },
         });
         this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: retryMsg });
         this.broadcast({ type: 'chat-message', message: retryMsg });
 
-        agentGateway.handleTask({
+        const sharedBroadcast = (data) => {
+          this.broadcastToChatSession(chatSessionId, data);
+          this.broadcast(data);
+        };
+        const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({
+          mode: payload.mode,
+          content: retryContent,
+          executeReviewedPlan: !!payload.executeReviewedPlan,
+        });
+        const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
+
+        runner({
           projectId: payload.projectId,
           sessionId: chatSessionId,
-          content: retryContent,
+          content: agentRetryContent,
           attachments: [],
           mode: payload.mode,
           tool: assistantSettings.tool,
           model: assistantSettings.model,
           effort: assistantSettings.effort,
-          broadcastFn: (data) => {
-            this.broadcastToChatSession(chatSessionId, data);
-            this.broadcast(data);
-          },
+          executeReviewedPlan: !!payload.executeReviewedPlan,
+          broadcastFn: sharedBroadcast,
         }).catch(err => {
           const errMsg = chatStore.addMessage({
             projectId: payload.projectId,
@@ -775,7 +837,9 @@ class TerminalServer {
 
       case 'chat-stop': {
         const { agentGateway } = await import('./agentGateway.js');
+        const { agentOrchestrator } = await import('./agentOrchestrator.js');
         // Abort by session ID (supports parallel sessions)
+        agentOrchestrator.abortSession(payload.sessionId || payload.projectId);
         agentGateway.abort(payload.sessionId || payload.projectId);
         this.broadcastToChatSession(payload.sessionId, { type: 'agent-status', projectId: payload.projectId, sessionId: payload.sessionId, busy: false });
         this.broadcast({ type: 'agent-status', projectId: payload.projectId, sessionId: payload.sessionId, busy: false });
@@ -801,6 +865,9 @@ class TerminalServer {
           model: payload.model,
           effort: payload.effort,
         });
+        const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
+        const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, activeRolePromptIds });
 
         this.attachToChatSession(ws, chatSessionId);
 
@@ -809,7 +876,7 @@ class TerminalServer {
           sessionId: chatSessionId,
           role: 'user',
           content: `Here is the recent terminal output for context:\n\n\`\`\`\n${terminalContent}\n\`\`\`\n\n${payload.instruction || 'Please analyze this output and continue.'}`,
-          metadata: { mode: 'agent', source: 'terminal-share', ...assistantSettings },
+          metadata: { mode: 'agent', source: 'terminal-share', activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, ...assistantSettings },
         });
 
         this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: contextMsg });
@@ -818,7 +885,7 @@ class TerminalServer {
         agentGateway.handleTask({
           projectId: payload.projectId,
           sessionId: chatSessionId,
-          content: contextMsg.content,
+          content: appendRolePromptInstructions(contextMsg.content, rolePromptInstructions),
           attachments: [],
           mode: 'agent',
           tool: assistantSettings.tool,
@@ -896,6 +963,9 @@ class TerminalServer {
           model: payload.model,
           effort: payload.effort,
         });
+        const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
+        const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, activeRolePromptIds });
 
         this.attachToChatSession(ws, chatSessionId);
 
@@ -906,7 +976,7 @@ class TerminalServer {
           sessionId: chatSessionId,
           role: 'user',
           content: `Here are the ${label} (last ${lines} lines):\n\n\`\`\`\n${logOutput}\n\`\`\`\n\n${instruction}`,
-          metadata: { mode: 'agent', source: 'log-capture', filePath, ...assistantSettings },
+          metadata: { mode: 'agent', source: 'log-capture', filePath, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, ...assistantSettings },
         });
 
         this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: logMsg });
@@ -915,7 +985,7 @@ class TerminalServer {
         agentGateway.handleTask({
           projectId: payload.projectId,
           sessionId: chatSessionId,
-          content: logMsg.content,
+          content: appendRolePromptInstructions(logMsg.content, rolePromptInstructions),
           attachments: [],
           mode: 'agent',
           tool: assistantSettings.tool,
@@ -1951,7 +2021,10 @@ class TerminalServer {
       if (looksIncomplete && ageMinutes < 120) {
         // Try to get CLI session ID from session metadata
         const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
-        const cliSessionId = sessionMeta?.cliSessionId || lastAssistant.metadata?.cliSessionId;
+        const tool = sessionMeta?.tool || 'claude';
+        const cliSessionId = sessionMeta?.toolSessions?.[tool]?.cliSessionId
+          || (sessionMeta?.cliSessionTool === tool ? sessionMeta?.cliSessionId : null)
+          || lastAssistant.metadata?.cliSessionId;
 
         if (cliSessionId) {
           return {
@@ -1989,10 +2062,17 @@ class TerminalServer {
       this.broadcast({ type: 'chat-message', message: recoveryMsg });
 
       // Ensure CLI session ID is stored
-      chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId });
       const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
       const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
         tool: sessionMeta?.tool || 'claude',
+      });
+      chatStore.updateSessionMeta(projectId, chatSessionId, {
+        cliSessionId,
+        cliSessionTool: assistantSettings.tool,
+        toolSessions: {
+          ...(sessionMeta?.toolSessions || {}),
+          [assistantSettings.tool]: { cliSessionId, updatedAt: new Date().toISOString() },
+        },
       });
 
       // Ask Claude to check on the status
@@ -2058,10 +2138,17 @@ class TerminalServer {
       this.broadcast({ type: 'chat-message', message: recoveryMsg });
 
       // Ensure the CLI session ID is stored in the chat session
-      chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: job.cliSessionId });
       const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
       const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
         tool: sessionMeta?.tool || job.tool || 'claude',
+      });
+      chatStore.updateSessionMeta(projectId, chatSessionId, {
+        cliSessionId: job.cliSessionId,
+        cliSessionTool: assistantSettings.tool,
+        toolSessions: {
+          ...(sessionMeta?.toolSessions || {}),
+          [assistantSettings.tool]: { cliSessionId: job.cliSessionId, updatedAt: new Date().toISOString() },
+        },
       });
 
       // Send a follow-up prompt to check on the interrupted work

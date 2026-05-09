@@ -1,13 +1,15 @@
-import { execSync } from "child_process";
+import { execSync, exec as execCallback } from "child_process";
 import crypto from "crypto";
 import { EventEmitter } from "events";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+import { promisify } from "util";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const execAsync = promisify(execCallback);
 
 const DEV_IMAGE = "startupp-ai-ide-dev:latest";
 const CONTAINER_PREFIX = "sai-";
@@ -44,6 +46,20 @@ function dockerExec(cmd, opts = {}) {
     ...opts,
     env: { ...EXEC_OPTS_BASE.env, ...(opts.env || {}) },
   });
+}
+
+/**
+ * Async variant for dashboard/status polling so Docker work does not block the
+ * API event loop while users create/open chat sessions.
+ */
+async function dockerExecAsync(cmd, opts = {}) {
+  const { stdout } = await execAsync(cmd, {
+    encoding: "utf-8",
+    maxBuffer: 10 * 1024 * 1024,
+    ...opts,
+    env: { ...EXEC_OPTS_BASE.env, ...(opts.env || {}) },
+  });
+  return stdout;
 }
 
 class ContainerManager extends EventEmitter {
@@ -338,6 +354,18 @@ class ContainerManager extends EventEmitter {
     }
   }
 
+  async getContainerStatusAsync(containerName) {
+    try {
+      const status = await dockerExecAsync(
+        `docker inspect ${containerName} --format '{{.State.Status}}'`,
+        { encoding: "utf-8" },
+      );
+      return status.trim();
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * List all IDE-managed containers
    */
@@ -381,6 +409,22 @@ class ContainerManager extends EventEmitter {
           timeout: options.timeout || 30000,
         },
       ).trim();
+    } catch {
+      return null;
+    }
+  }
+
+  async execInContainerAsync(containerName, command, options = {}) {
+    try {
+      const output = await dockerExecAsync(
+        `docker exec ${containerName} bash -c "${command.replace(/"/g, '\\"')}"`,
+        {
+          encoding: "utf-8",
+          timeout: options.timeout || 30000,
+          maxBuffer: options.maxBuffer || 10 * 1024 * 1024,
+        },
+      );
+      return output.trim();
     } catch {
       return null;
     }

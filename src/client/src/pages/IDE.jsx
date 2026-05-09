@@ -197,34 +197,43 @@ export default function IDE() {
       return;
     }
 
+    let cancelled = false;
     const fetchInfo = () => {
+      if (cancelled) return;
       if (selectedProject.containerName) {
         fetch(`/api/containers/${selectedProject.containerName}/repos`)
           .then(r => r.ok ? r.json() : { repos: [] })
           .then(data => {
+            if (cancelled) return;
             setContainerRepos(data.repos || []);
             const firstGit = (data.repos || []).find(r => r.isGitRepo);
             if (firstGit) setCurrentBranch({ branch: firstGit.branch, isMainBranch: ['main','master'].includes(firstGit.branch), hasChanges: firstGit.hasChanges });
             else setCurrentBranch(null);
           })
-          .catch(() => { setContainerRepos([]); setCurrentBranch(null); });
+          .catch(() => { if (!cancelled) { setContainerRepos([]); setCurrentBranch(null); } });
       } else if (selectedProject.folderPath) {
         fetch(`/api/orchestrator/git-info?projectPath=${encodeURIComponent(selectedProject.folderPath)}`)
           .then(r => r.json())
           .then(data => {
+            if (cancelled) return;
             if (data.isGitRepo) setCurrentBranch(data);
             else setCurrentBranch(null);
           })
-          .catch(() => setCurrentBranch(null));
+          .catch(() => { if (!cancelled) setCurrentBranch(null); });
         setContainerRepos([]);
       } else {
         setCurrentBranch(null);
         setContainerRepos([]);
       }
     };
-    fetchInfo();
+    // Repo/script detection is side data. Delay it so project/session UI paints first.
+    const initialTimer = setTimeout(fetchInfo, 500);
     const interval = setInterval(fetchInfo, 15000);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
   }, [selectedProject?.containerName, selectedProject?.folderPath]);
 
   // ── Unread counts fetching ──

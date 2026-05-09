@@ -269,15 +269,15 @@ router.post("/:name/exec", (req, res) => {
  * GET /api/containers/:name/repos
  * List repos inside the container with their git branch and detected scripts
  */
-router.get("/:name/repos", (req, res) => {
+router.get("/:name/repos", async (req, res) => {
   try {
     const { name } = req.params;
-    const status = containerManager.getContainerStatus(name);
+    const status = await containerManager.getContainerStatusAsync(name);
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(400).json({ error: "Container is not running" });
 
     // List directories in /workspace
-    const dirsOutput = containerManager.execInContainer(name, "ls -d /workspace/*/ 2>/dev/null");
+    const dirsOutput = await containerManager.execInContainerAsync(name, "ls -d /workspace/*/ 2>/dev/null");
     if (!dirsOutput) return res.json({ repos: [] });
 
     const dirs = dirsOutput.split("\n").filter(Boolean).map(d => d.replace(/\/$/, ""));
@@ -287,13 +287,13 @@ router.get("/:name/repos", (req, res) => {
       const folderName = dir.split("/").pop();
 
       // Check if it's a git repo
-      const isGit = containerManager.execInContainer(name, `test -e ${dir}/.git && echo yes`) === "yes";
+      const isGit = await containerManager.execInContainerAsync(name, `test -e '${dir}/.git' && echo yes`) === "yes";
       let branch = null;
       let hasChanges = false;
 
       if (isGit) {
-        branch = containerManager.execInContainer(name, `cd ${dir} && git branch --show-current 2>/dev/null`) || null;
-        const gitStatus = containerManager.execInContainer(name, `cd ${dir} && git status --porcelain 2>/dev/null`);
+        branch = await containerManager.execInContainerAsync(name, `cd '${dir}' && git branch --show-current 2>/dev/null`) || null;
+        const gitStatus = await containerManager.execInContainerAsync(name, `cd '${dir}' && git status --porcelain 2>/dev/null`);
         hasChanges = !!(gitStatus && gitStatus.trim());
       }
 
@@ -301,13 +301,13 @@ router.get("/:name/repos", (req, res) => {
       let scripts = {};
       let packageManager = "npm";
       try {
-        const pkgContent = containerManager.execInContainer(name, `cat ${dir}/package.json 2>/dev/null`);
+        const pkgContent = await containerManager.execInContainerAsync(name, `cat '${dir}/package.json' 2>/dev/null`);
         if (pkgContent) {
           const pkg = JSON.parse(pkgContent);
           scripts = pkg.scripts || {};
         }
-        if (containerManager.execInContainer(name, `test -f ${dir}/pnpm-lock.yaml && echo yes`) === "yes") packageManager = "pnpm";
-        else if (containerManager.execInContainer(name, `test -f ${dir}/yarn.lock && echo yes`) === "yes") packageManager = "yarn";
+        if (await containerManager.execInContainerAsync(name, `test -f '${dir}/pnpm-lock.yaml' && echo yes`) === "yes") packageManager = "pnpm";
+        else if (await containerManager.execInContainerAsync(name, `test -f '${dir}/yarn.lock' && echo yes`) === "yes") packageManager = "yarn";
       } catch { /* no package.json */ }
 
       repos.push({ path: dir, name: folderName, isGitRepo: isGit, branch, hasChanges, scripts, packageManager });
@@ -328,30 +328,30 @@ router.get("/:name/repos", (req, res) => {
  * List git branches with PR status and author info for categorization.
  * Query: ?repoPath=/workspace/my-repo (default: auto-detect single repo or /workspace)
  */
-router.get("/:name/branches", (req, res) => {
+router.get("/:name/branches", async (req, res) => {
   try {
     const { name } = req.params;
-    const status = containerManager.getContainerStatus(name);
+    const status = await containerManager.getContainerStatusAsync(name);
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
-    const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
     // Determine repo path — detect actual git root if not specified
     let repoPath = req.query.repoPath;
     if (!repoPath) {
-      repoPath = findGitRoot(name);
+      repoPath = await findGitRootAsync(name);
     }
 
     // Get current branch
-    const current = exec(`cd '${repoPath}' && git branch --show-current 2>/dev/null`)?.trim() || null;
+    const current = (await exec(`cd '${repoPath}' && git branch --show-current 2>/dev/null`))?.trim() || null;
 
     // Get current git user for "mine vs others" categorization
-    const gitUser = exec(`cd '${repoPath}' && git config user.name 2>/dev/null`)?.trim() || null;
-    const gitEmail = exec(`cd '${repoPath}' && git config user.email 2>/dev/null`)?.trim() || null;
+    const gitUser = (await exec(`cd '${repoPath}' && git config user.name 2>/dev/null`))?.trim() || null;
+    const gitEmail = (await exec(`cd '${repoPath}' && git config user.email 2>/dev/null`))?.trim() || null;
 
     // Get all local branches with last commit author
-    const rawBranches = exec(
+    const rawBranches = await exec(
       `cd '${repoPath}' && git branch --list --format='%(refname:short)|%(authorname)|%(authoremail)|%(creatordate:iso8601)' 2>/dev/null`,
     );
 
@@ -364,7 +364,7 @@ router.get("/:name/branches", (req, res) => {
 
     // Get remote branches not already local
     const localSet = new Set(localBranches.map(b => b.name));
-    const rawRemote = exec(
+    const rawRemote = await exec(
       `cd '${repoPath}' && git branch -r --format='%(refname:short)' 2>/dev/null`,
     );
     const remoteBranches = rawRemote
@@ -377,7 +377,7 @@ router.get("/:name/branches", (req, res) => {
     // Fetch PR status for branches via gh CLI (batch query)
     let prMap = {};
     try {
-      const prJson = exec(
+      const prJson = await exec(
         `cd '${repoPath}' && gh pr list --state all --limit 100 --json headRefName,number,state,author,title 2>/dev/null`,
       );
       if (prJson) {
@@ -540,8 +540,25 @@ function findGitRoot(name) {
   )?.trim();
   if (gitDir) {
     // Return the parent of .git (the repo root)
-    return gitDir.replace(/\/.git$/, "");
+    return gitDir.replace(/\/\.git$/, "");
   }
+
+  return workDir;
+}
+
+async function findGitRootAsync(name) {
+  const workDir = containerManager.getWorkDir(name) || "/workspace";
+  const hasGit = (await containerManager.execInContainerAsync(name,
+    `test -e '${workDir}/.git' && echo yes`,
+    { timeout: 5000 },
+  ))?.trim();
+  if (hasGit === "yes") return workDir;
+
+  const gitDir = (await containerManager.execInContainerAsync(name,
+    `find /workspace -maxdepth 2 -name .git -print -quit 2>/dev/null`,
+    { timeout: 5000 },
+  ))?.trim();
+  if (gitDir) return gitDir.replace(/\/\.git$/, "");
 
   return workDir;
 }
@@ -553,9 +570,22 @@ function resolveGitPath(name, query) {
   return findGitRoot(name);
 }
 
+async function resolveGitPathAsync(name, query) {
+  if (query.worktreePath) return query.worktreePath;
+  if (query.repoPath) return query.repoPath;
+  return findGitRootAsync(name);
+}
+
 /** Helper: validate container is running */
 function requireRunning(name) {
   const status = containerManager.getContainerStatus(name);
+  if (!status) return { error: "Container not found", code: 404 };
+  if (status !== "running") return { error: "Container is not running", code: 409 };
+  return null;
+}
+
+async function requireRunningAsync(name) {
+  const status = await containerManager.getContainerStatusAsync(name);
   if (!status) return { error: "Container not found", code: 404 };
   if (status !== "running") return { error: "Container is not running", code: 409 };
   return null;
@@ -566,26 +596,26 @@ function requireRunning(name) {
  * Get branch status: current branch, dirty files, ahead/behind, PR status.
  * Query: ?worktreePath=...&repoPath=...
  */
-router.get("/:name/git-status", (req, res) => {
+router.get("/:name/git-status", async (req, res) => {
   try {
     const { name } = req.params;
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
-    const gitPath = resolveGitPath(name, req.query);
-    const exec = (cmd) => containerManager.execInContainer(name, cmd, { timeout: 10000 });
+    const gitPath = await resolveGitPathAsync(name, req.query);
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
-    const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim() || null;
-    const statusRaw = exec(`cd '${gitPath}' && git status --porcelain 2>/dev/null`) || "";
+    const branch = (await exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`))?.trim() || null;
+    const statusRaw = await exec(`cd '${gitPath}' && git status --porcelain 2>/dev/null`) || "";
     const dirty = statusRaw.trim().split("\n").filter(Boolean);
     const staged = dirty.filter(l => /^[MADRC]/.test(l)).length;
     const unstaged = dirty.filter(l => /^.[MDRC?]/.test(l) || /^\?\?/.test(l)).length;
 
     // Ahead/behind remote
     let ahead = 0, behind = 0;
-    const tracking = exec(`cd '${gitPath}' && git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null`)?.trim();
+    const tracking = (await exec(`cd '${gitPath}' && git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null`))?.trim();
     if (tracking) {
-      const ab = exec(`cd '${gitPath}' && git rev-list --left-right --count '${tracking}...HEAD' 2>/dev/null`)?.trim();
+      const ab = (await exec(`cd '${gitPath}' && git rev-list --left-right --count '${tracking}...HEAD' 2>/dev/null`))?.trim();
       if (ab) {
         const [b, a] = ab.split(/\s+/).map(Number);
         behind = b || 0;
@@ -596,7 +626,7 @@ router.get("/:name/git-status", (req, res) => {
     // Check for GitHub PR via gh CLI (if installed)
     let pr = null;
     try {
-      const prJson = exec(`cd '${gitPath}' && gh pr view --json number,title,state,url 2>/dev/null`);
+      const prJson = await exec(`cd '${gitPath}' && gh pr view --json number,title,state,url 2>/dev/null`, 5000);
       if (prJson) pr = JSON.parse(prJson.trim());
     } catch { /* gh not installed or no PR */ }
 

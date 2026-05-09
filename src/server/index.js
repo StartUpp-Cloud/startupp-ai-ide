@@ -98,7 +98,7 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 // Initialize database and start server
 async function startServer() {
   try {
-    // Initialize LowDB
+    // Initialize SQLite-backed data store
     await initDB();
     console.log("Database ready");
 

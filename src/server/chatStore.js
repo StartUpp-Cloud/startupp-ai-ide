@@ -2,20 +2,13 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { v4 as uuidv4 } from 'uuid';
-import { createMessage, serialize, deserialize } from './models/ChatMessage.js';
+import { createMessage } from './models/ChatMessage.js';
 import { resolveSessionAssistantSettings } from './sessionSettings.js';
+import { sqliteStore } from './sqliteStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CHAT_DIR = path.join(__dirname, '../../data/chat');
+const JOBS_DIR = path.join(__dirname, '../../data/jobs');
 
-if (!fs.existsSync(CHAT_DIR)) {
-  fs.mkdirSync(CHAT_DIR, { recursive: true, mode: 0o700 });
-} else {
-  try { fs.chmodSync(CHAT_DIR, 0o700); } catch {}
-}
-
-// Patterns that look like secrets — redacted before writing to disk
 const SECRET_PATTERNS = [
   /(?:sk-|pk-|api[_-]?key|token|secret|password|bearer)\s*[:=]\s*['"]?([A-Za-z0-9_\-/.]{20,})['"]?/gi,
   /ghp_[A-Za-z0-9]{36,}/g,
@@ -38,37 +31,9 @@ function redactSecrets(text) {
   return redacted;
 }
 
-function readTailLines(filePath, maxLines) {
-  const safeMax = Math.max(1, maxLines || 1);
-  const fd = fs.openSync(filePath, 'r');
-  try {
-    const stat = fs.fstatSync(fd);
-    if (stat.size === 0) return [];
-
-    const chunkSize = 64 * 1024;
-    const chunks = [];
-    let position = stat.size;
-    let newlineCount = 0;
-
-    while (position > 0 && newlineCount <= safeMax) {
-      const readSize = Math.min(chunkSize, position);
-      position -= readSize;
-      const buffer = Buffer.allocUnsafe(readSize);
-      const bytesRead = fs.readSync(fd, buffer, 0, readSize, position);
-      const chunk = buffer.subarray(0, bytesRead);
-      chunks.unshift(chunk);
-
-      for (let i = 0; i < chunk.length; i++) {
-        if (chunk[i] === 10) newlineCount++;
-      }
-    }
-
-    const lines = Buffer.concat(chunks).toString('utf-8').split('\n');
-    if (lines[lines.length - 1] === '') lines.pop();
-    return lines.slice(-safeMax);
-  } finally {
-    fs.closeSync(fd);
-  }
+function safeJson(value) {
+  if (value == null) return null;
+  return JSON.parse(redactSecrets(JSON.stringify(value)));
 }
 
 function snippetAround(text, query, maxLength = 180) {
@@ -81,372 +46,120 @@ function snippetAround(text, query, maxLength = 180) {
   return `${start > 0 ? '...' : ''}${value.slice(start, end)}${end < value.length ? '...' : ''}`;
 }
 
-/**
- * Session index file: data/chat/{projectId}/_sessions.json
- * Contains: [{ id, name, createdAt, messageCount }]
- *
- * Messages file: data/chat/{projectId}/{sessionId}.jsonl
- */
-// Sessions older than this are moved to the archive file on compaction
-const ARCHIVE_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-// Maximum sessions in active index before forcing compaction
-const MAX_ACTIVE_SESSIONS = 50;
-
 class ChatStore {
-  constructor() {
-    // In-memory cache: projectId → { sessions, mtime }
-    this._cache = new Map();
-    // Track which projects have been compacted this process lifetime
-    this._compacted = new Set();
+  _db() {
+    return sqliteStore.db;
   }
 
-  _projectDir(projectId) {
-    return path.join(CHAT_DIR, projectId);
+  _getSessionRow(projectId, sessionId) {
+    return this._db().prepare('SELECT * FROM chat_sessions WHERE project_id = ? AND id = ?').get(projectId, sessionId);
   }
 
-  _sessionFile(projectId, sessionId) {
-    return path.join(this._projectDir(projectId), `${sessionId}.jsonl`);
+  _ensureSession(projectId, sessionId = null) {
+    if (sessionId && this._getSessionRow(projectId, sessionId)) return this.getSession(projectId, sessionId);
+    if (sessionId) return sqliteStore.saveChatSession({ id: sessionId, name: `Chat ${new Date().toLocaleDateString()}` }, projectId);
+    return this.getActiveSession(projectId);
   }
 
-  _indexFile(projectId) {
-    return path.join(this._projectDir(projectId), '_sessions.json');
-  }
-
-  _archiveFile(projectId) {
-    return path.join(this._projectDir(projectId), '_sessions_archive.json');
-  }
-
-  _ensureProjectDir(projectId) {
-    const dir = this._projectDir(projectId);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
-  }
-
-  /**
-   * Read the active sessions index (cached, auto-compacts on first read).
-   */
-  _readIndex(projectId) {
-    const indexPath = this._indexFile(projectId);
-
-    // Check cache freshness against file mtime
-    const cached = this._cache.get(projectId);
-    if (cached) {
-      try {
-        const stat = fs.statSync(indexPath);
-        if (stat.mtimeMs === cached.mtime) return JSON.parse(JSON.stringify(cached.sessions));
-      } catch {}
-    }
-
-    if (!fs.existsSync(indexPath)) return [];
-    try {
-      const sessions = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-      const stat = fs.statSync(indexPath);
-      this._cache.set(projectId, { sessions, mtime: stat.mtimeMs });
-
-      // Auto-compact once per process lifetime when active index is large
-      if (!this._compacted.has(projectId) && sessions.length > MAX_ACTIVE_SESSIONS) {
-        this._compacted.add(projectId);
-        // Defer to avoid blocking this read
-        setImmediate(() => this._compactIndex(projectId));
-      }
-
-      return JSON.parse(JSON.stringify(sessions));
-    } catch {
-      return [];
-    }
-  }
-
-  _writeIndex(projectId, sessions) {
-    this._ensureProjectDir(projectId);
-    fs.writeFileSync(this._indexFile(projectId), JSON.stringify(sessions, null, 2), 'utf-8');
-    try {
-      const stat = fs.statSync(this._indexFile(projectId));
-      this._cache.set(projectId, { sessions: JSON.parse(JSON.stringify(sessions)), mtime: stat.mtimeMs });
-    } catch {}
-  }
-
-  /**
-   * Move old, unpinned sessions to the archive file.
-   * Keeps the active index small for fast reads/writes.
-   */
-  _compactIndex(projectId) {
-    try {
-      const sessions = this._readIndex(projectId);
-      const now = Date.now();
-      const cutoff = now - ARCHIVE_AGE_MS;
-
-      let active = [];
-      const toArchive = [];
-
-      for (const s of sessions) {
-        const age = new Date(s.createdAt).getTime();
-        // Keep pinned/unread/recent sessions active. CLI resume IDs are still
-        // preserved in the archive, so they should not block compaction forever.
-        if (s.pinned || s.hasUnread || age > cutoff) {
-          active.push(s);
-        } else {
-          toArchive.push(s);
-        }
-      }
-
-      if (active.length > MAX_ACTIVE_SESSIONS) {
-        const newestFirst = [...active].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-        const cappedActive = [];
-        const overflow = [];
-
-        for (const s of newestFirst) {
-          const protectedSession = s.pinned || s.hasUnread;
-          if (protectedSession || cappedActive.length < MAX_ACTIVE_SESSIONS) {
-            cappedActive.push(s);
-          } else {
-            overflow.push(s);
-          }
-        }
-
-        active = cappedActive;
-        toArchive.push(...overflow);
-      }
-
-      if (toArchive.length === 0) return; // nothing to archive
-
-      // Append to archive file
-      const archivePath = this._archiveFile(projectId);
-      let archived = [];
-      if (fs.existsSync(archivePath)) {
-        try { archived = JSON.parse(fs.readFileSync(archivePath, 'utf-8')); } catch {}
-      }
-      archived.push(...toArchive);
-      fs.writeFileSync(archivePath, JSON.stringify(archived), 'utf-8');
-
-      // Write compacted active index
-      this._writeIndex(projectId, active);
-      console.log(`[chatStore] Compacted ${projectId}: archived ${toArchive.length} sessions, ${active.length} remain active`);
-    } catch (err) {
-      console.error(`[chatStore] Compaction failed for ${projectId}:`, err.message);
-    }
-  }
-
-  // ── Session management ──
-
-  /**
-   * Create a new chat session for a project.
-   * Returns the new session object.
-   */
   createSession(projectId, name = null, assistantSettings = {}) {
-    const resolvedAssistant = resolveSessionAssistantSettings(assistantSettings, {
-      tool: 'claude',
-    });
-    const session = {
-      id: uuidv4(),
+    const resolvedAssistant = resolveSessionAssistantSettings(assistantSettings, { tool: 'claude' });
+    return sqliteStore.saveChatSession({
       name: name || `Chat ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
       createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       messageCount: 0,
       manualName: false,
       ...resolvedAssistant,
-    };
-    const sessions = this._readIndex(projectId);
-    sessions.push(session);
-    this._writeIndex(projectId, sessions);
-    return session;
+    }, projectId);
   }
 
-  /**
-   * List sessions for a project (newest first).
-   * By default returns only active sessions. Pass includeArchived=true for all.
-   */
   getSessions(projectId, { includeArchived = false } = {}) {
-    const active = this._readIndex(projectId);
-    if (!includeArchived) {
-      return active.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    }
-    const archived = this._readArchive(projectId);
-    return [...active, ...archived].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const rows = includeArchived
+      ? this._db().prepare('SELECT * FROM chat_sessions WHERE project_id = ? ORDER BY created_at DESC').all(projectId)
+      : this._db().prepare('SELECT * FROM chat_sessions WHERE project_id = ? AND archived = 0 ORDER BY created_at DESC').all(projectId);
+    return rows.map(sqliteStore.rowToSession);
   }
 
-  /**
-   * Read archived sessions (cold storage, not cached).
-   */
-  _readArchive(projectId) {
-    const archivePath = this._archiveFile(projectId);
-    if (!fs.existsSync(archivePath)) return [];
-    try {
-      return JSON.parse(fs.readFileSync(archivePath, 'utf-8'));
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Update arbitrary metadata on a session (e.g., cliSessionId for --resume).
-   */
   updateSessionMeta(projectId, sessionId, meta) {
-    const sessions = this._readIndex(projectId);
-    const session = sessions.find(s => s.id === sessionId);
-    if (session) {
-      Object.assign(session, meta);
-      this._writeIndex(projectId, sessions);
-    }
+    const session = this.getSession(projectId, sessionId);
+    if (!session) return;
+    sqliteStore.saveChatSession({ ...session, ...meta, updatedAt: new Date().toISOString() }, projectId, { archived: session.archived });
   }
 
-  /**
-   * Get session metadata (including cliSessionId for --resume).
-   */
   getSessionMeta(projectId, sessionId) {
-    const sessions = this._readIndex(projectId);
-    return sessions.find(s => s.id === sessionId) || null;
+    return this.getSession(projectId, sessionId);
   }
 
-  /**
-   * Mark a session as having unread messages.
-   * Called when an agent response is received.
-   */
   markSessionUnread(projectId, sessionId) {
-    const sessions = this._readIndex(projectId);
-    const session = sessions.find(s => s.id === sessionId);
+    const session = this.getSession(projectId, sessionId);
     if (session && !session.hasUnread) {
-      session.hasUnread = true;
-      session.unreadSince = new Date().toISOString();
-      this._writeIndex(projectId, sessions);
-      return true; // State changed
+      this.updateSessionMeta(projectId, sessionId, { hasUnread: true, unreadSince: new Date().toISOString() });
+      return true;
     }
-    return false; // Already unread or not found
+    return false;
   }
 
-  /**
-   * Mark a session as read.
-   * Called when user views the session.
-   */
   markSessionRead(projectId, sessionId) {
-    const sessions = this._readIndex(projectId);
-    const session = sessions.find(s => s.id === sessionId);
+    const session = this.getSession(projectId, sessionId);
     if (session && session.hasUnread) {
-      session.hasUnread = false;
-      delete session.unreadSince;
-      this._writeIndex(projectId, sessions);
-      return true; // State changed
+      const updated = { ...session, hasUnread: false };
+      delete updated.unreadSince;
+      sqliteStore.saveChatSession(updated, projectId, { archived: session.archived });
+      return true;
     }
-    return false; // Already read or not found
+    return false;
   }
 
-  /**
-   * Get all unread sessions for a project.
-   */
   getUnreadSessions(projectId) {
-    const sessions = this._readIndex(projectId);
-    return sessions.filter(s => s.hasUnread === true);
+    return this._db().prepare('SELECT * FROM chat_sessions WHERE project_id = ? AND has_unread = 1 ORDER BY unread_since DESC')
+      .all(projectId)
+      .map(sqliteStore.rowToSession);
   }
 
-  /**
-   * Get unread counts for all projects.
-   * Returns { projectId: unreadCount, ... }
-   */
   getAllUnreadCounts() {
-    const counts = {};
-    const projectDirs = fs.readdirSync(CHAT_DIR).filter(f => {
-      const stat = fs.statSync(path.join(CHAT_DIR, f));
-      return stat.isDirectory();
-    });
-
-    for (const projectId of projectDirs) {
-      const sessions = this._readIndex(projectId);
-      const unreadCount = sessions.filter(s => s.hasUnread === true).length;
-      if (unreadCount > 0) {
-        counts[projectId] = unreadCount;
-      }
-    }
-
-    return counts;
+    const rows = this._db().prepare('SELECT project_id, COUNT(*) AS count FROM chat_sessions WHERE has_unread = 1 GROUP BY project_id').all();
+    return Object.fromEntries(rows.filter(r => r.count > 0).map(r => [r.project_id, r.count]));
   }
 
   getAllUnreadSessionIds() {
+    const rows = this._db().prepare('SELECT project_id, id FROM chat_sessions WHERE has_unread = 1 ORDER BY unread_since DESC').all();
     const unread = {};
-    const projectDirs = fs.readdirSync(CHAT_DIR).filter(f => {
-      const stat = fs.statSync(path.join(CHAT_DIR, f));
-      return stat.isDirectory();
-    });
-
-    for (const projectId of projectDirs) {
-      const sessions = this._readIndex(projectId);
-      const ids = sessions.filter(s => s.hasUnread === true).map(s => s.id);
-      if (ids.length > 0) unread[projectId] = ids;
+    for (const row of rows) {
+      if (!unread[row.project_id]) unread[row.project_id] = [];
+      unread[row.project_id].push(row.id);
     }
-
     return unread;
   }
 
-  /**
-   * Get a specific session by ID.
-   * Checks active sessions first, then archive.
-   */
   getSession(projectId, sessionId) {
-    const active = this._readIndex(projectId);
-    const found = active.find(s => s.id === sessionId);
-    if (found) return found;
-    // Check archive (cold path — only if not in active index)
-    const archived = this._readArchive(projectId);
-    const archivedSession = archived.find(s => s.id === sessionId);
-    if (archivedSession) {
-      // Promote back to active index since it's being accessed
-      active.push(archivedSession);
-      this._writeIndex(projectId, active);
-      // Remove from archive
-      const remaining = archived.filter(s => s.id !== sessionId);
-      fs.writeFileSync(this._archiveFile(projectId), JSON.stringify(remaining), 'utf-8');
-      return archivedSession;
-    }
-    return null;
+    const row = this._getSessionRow(projectId, sessionId);
+    if (!row) return null;
+    return sqliteStore.rowToSession(row);
   }
 
-  /**
-   * Rename a session.
-   */
   renameSession(projectId, sessionId, name, opts = {}) {
-    const sessions = this._readIndex(projectId);
-    const session = sessions.find(s => s.id === sessionId);
-    if (session) {
-      session.name = name;
-      if (opts.manual === true) session.manualName = true;
-      this._writeIndex(projectId, sessions);
-    }
+    const meta = { name };
+    if (opts.manual === true) meta.manualName = true;
+    this.updateSessionMeta(projectId, sessionId, meta);
   }
 
-  /**
-   * Delete a session and its messages.
-   */
   deleteSession(projectId, sessionId) {
-    const sessions = this._readIndex(projectId);
-    const filtered = sessions.filter(s => s.id !== sessionId);
-    this._writeIndex(projectId, filtered);
-    const msgFile = this._sessionFile(projectId, sessionId);
-    if (fs.existsSync(msgFile)) fs.unlinkSync(msgFile);
+    this._db().prepare('DELETE FROM chat_chunks WHERE project_id = ? AND message_id IN (SELECT id FROM chat_messages WHERE project_id = ? AND session_id = ?)')
+      .run(projectId, projectId, sessionId);
+    this._db().prepare('DELETE FROM chat_messages_fts WHERE message_id IN (SELECT id FROM chat_messages WHERE project_id = ? AND session_id = ?)')
+      .run(projectId, sessionId);
+    this._db().prepare('DELETE FROM chat_messages WHERE project_id = ? AND session_id = ?').run(projectId, sessionId);
+    this._db().prepare('DELETE FROM chat_sessions WHERE project_id = ? AND id = ?').run(projectId, sessionId);
   }
 
-  /**
-   * Get or create the active session for a project.
-   * If no sessions exist, creates one automatically.
-   * Returns the most recent session.
-   */
   getActiveSession(projectId) {
     const sessions = this.getSessions(projectId);
     if (sessions.length > 0) return sessions[0];
     return this.createSession(projectId);
   }
 
-  // ── Streaming message support ──
-  // These methods allow persisting responses as they stream in,
-  // so responses survive disconnections and restarts.
-
-  /**
-   * Create a streaming message placeholder that will be updated as chunks arrive.
-   * Returns the message ID for subsequent chunk appends.
-   */
   createStreamingMessage({ projectId, sessionId, role, initialContent = '', metadata = {} }) {
-    if (!sessionId) {
-      sessionId = this.getActiveSession(projectId).id;
-    }
-    this._ensureProjectDir(projectId);
-
+    const session = this._ensureSession(projectId, sessionId);
     const msg = createMessage({
       projectId,
       role,
@@ -458,197 +171,83 @@ class ChatStore {
         chunks: [],
       },
     });
-    msg.sessionId = sessionId;
-
-    const line = serialize(msg) + '\n';
-    fs.appendFileSync(this._sessionFile(projectId, sessionId), line, 'utf-8');
-
-    // Update message count in index
-    const sessions = this._readIndex(projectId);
-    const session = sessions.find(s => s.id === sessionId);
-    if (session) {
-      session.messageCount = (session.messageCount || 0) + 1;
-      this._writeIndex(projectId, sessions);
-    }
-
+    msg.sessionId = session.id;
+    sqliteStore.saveChatMessage(msg);
+    this._incrementMessageCount(projectId, session.id, 1);
     return msg;
   }
 
-  /**
-   * Append a chunk to a streaming message.
-   * The chunk is saved to a separate chunks file for durability.
-   */
-  appendStreamChunk({ projectId, sessionId, messageId, chunk, chunkIndex }) {
-    const chunksDir = path.join(this._projectDir(projectId), '_chunks');
-    if (!fs.existsSync(chunksDir)) {
-      fs.mkdirSync(chunksDir, { recursive: true, mode: 0o700 });
-    }
-
-    const chunkFile = path.join(chunksDir, `${messageId}.chunks`);
-    const chunkData = JSON.stringify({
-      index: chunkIndex,
-      content: redactSecrets(chunk),
-      timestamp: new Date().toISOString(),
-    }) + '\n';
-
-    fs.appendFileSync(chunkFile, chunkData, 'utf-8');
+  appendStreamChunk({ projectId, messageId, chunk, chunkIndex }) {
+    this._db().prepare(`INSERT OR REPLACE INTO chat_chunks (message_id, project_id, chunk_index, content, created_at)
+      VALUES (?, ?, ?, ?, ?)`).run(messageId, projectId, chunkIndex, redactSecrets(chunk), new Date().toISOString());
   }
 
-  /**
-   * Finalize a streaming message by combining all chunks and updating the message.
-   * This replaces the placeholder with the complete content.
-   */
   finalizeStreamingMessage({ projectId, sessionId, messageId, finalContent, metadata = {} }) {
-    const filePath = this._sessionFile(projectId, sessionId);
-    if (!fs.existsSync(filePath)) return null;
-
-    // Read all messages
-    const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
-    const updatedLines = [];
-    let foundMessage = null;
-
-    for (const line of lines) {
-      if (!line.trim()) {
-        updatedLines.push(line);
-        continue;
-      }
-
-      const msg = deserialize(line);
-      if (msg && msg.id === messageId) {
-        // Update the message with final content
-        msg.content = redactSecrets(finalContent);
-        msg.metadata = {
-          ...msg.metadata,
-          ...metadata,
-          streaming: false,
-          streamCompletedAt: new Date().toISOString(),
-        };
-        delete msg.metadata.chunks; // Remove chunks array from metadata
-        foundMessage = msg;
-        updatedLines.push(serialize(msg));
-      } else {
-        updatedLines.push(line);
-      }
-    }
-
-    // Write back
-    fs.writeFileSync(filePath, updatedLines.join('\n'), 'utf-8');
-
-    // Clean up chunks file
-    const chunksDir = path.join(this._projectDir(projectId), '_chunks');
-    const chunkFile = path.join(chunksDir, `${messageId}.chunks`);
-    if (fs.existsSync(chunkFile)) {
-      fs.unlinkSync(chunkFile);
-    }
-
-    return foundMessage;
+    const msg = this._getMessage(projectId, sessionId, messageId);
+    if (!msg) return null;
+    msg.content = redactSecrets(finalContent);
+    msg.metadata = {
+      ...(msg.metadata || {}),
+      ...safeJson(metadata),
+      streaming: false,
+      streamCompletedAt: new Date().toISOString(),
+    };
+    delete msg.metadata.chunks;
+    sqliteStore.saveChatMessage(msg);
+    this._db().prepare('DELETE FROM chat_chunks WHERE project_id = ? AND message_id = ?').run(projectId, messageId);
+    return msg;
   }
 
-  /**
-   * Get all chunks for a streaming message (for recovery).
-   */
   getStreamChunks({ projectId, messageId }) {
-    const chunksDir = path.join(this._projectDir(projectId), '_chunks');
-    const chunkFile = path.join(chunksDir, `${messageId}.chunks`);
-
-    if (!fs.existsSync(chunkFile)) return [];
-
-    const lines = fs.readFileSync(chunkFile, 'utf-8').split('\n');
-    const chunks = [];
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        chunks.push(JSON.parse(line));
-      } catch {}
-    }
-
-    return chunks.sort((a, b) => a.index - b.index);
+    return this._db().prepare('SELECT chunk_index AS "index", content, created_at AS timestamp FROM chat_chunks WHERE project_id = ? AND message_id = ? ORDER BY chunk_index ASC')
+      .all(projectId, messageId);
   }
 
-  /**
-   * Get the timestamp of the last chunk for a streaming message.
-   * Used to determine if streaming is still active.
-   */
   getLastChunkTimestamp({ projectId, messageId }) {
-    const chunksDir = path.join(this._projectDir(projectId), '_chunks');
-    const chunkFile = path.join(chunksDir, `${messageId}.chunks`);
-
-    if (!fs.existsSync(chunkFile)) return null;
-
-    // Read last few lines efficiently
-    const content = fs.readFileSync(chunkFile, 'utf-8');
-    const lines = content.trim().split('\n');
-
-    // Work backwards to find the last valid chunk with a timestamp
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      try {
-        const chunk = JSON.parse(line);
-        if (chunk.timestamp) {
-          return new Date(chunk.timestamp).getTime();
-        }
-      } catch {}
-    }
-
-    return null;
+    const row = this._db().prepare('SELECT created_at FROM chat_chunks WHERE project_id = ? AND message_id = ? ORDER BY chunk_index DESC LIMIT 1')
+      .get(projectId, messageId);
+    return row?.created_at ? new Date(row.created_at).getTime() : null;
   }
 
-  /**
-   * Recover a streaming message by combining saved chunks.
-   * Used when a connection drops mid-stream.
-   * Parses raw terminal output to extract the actual response text.
-   * Also extracts CLI session ID so conversation can be resumed.
-   */
   recoverStreamingMessage({ projectId, sessionId, messageId }) {
     const chunks = this.getStreamChunks({ projectId, messageId });
-
-    // Also try to get job output if available
     let rawContent = chunks.map(c => c.content).join('');
 
-    // Try to get more data from job output file
     try {
       const msg = this._getMessage(projectId, sessionId, messageId);
       if (msg?.metadata?.jobId) {
-        const jobOutputPath = path.join(__dirname, '../../data/jobs', `${msg.metadata.jobId}.output`);
+        const jobOutputPath = path.join(JOBS_DIR, `${msg.metadata.jobId}.output`);
         if (fs.existsSync(jobOutputPath)) {
           const jobOutput = fs.readFileSync(jobOutputPath, 'utf-8');
-          if (jobOutput.length > rawContent.length) {
-            rawContent = jobOutput; // Use job output if it has more data
-          }
+          if (jobOutput.length > rawContent.length) rawContent = jobOutput;
         }
       }
     } catch {}
 
     if (!rawContent || rawContent.length < 50) return null;
 
-    // Parse the raw terminal output to extract the actual response AND session ID
     const { content: cleanedContent, cliSessionId } = this._parseRawChunksWithSessionId(rawContent);
-
-    // If we found a CLI session ID, save it so conversation can be resumed
     if (cliSessionId) {
-      this.updateSessionMeta(projectId, sessionId, { cliSessionId });
-      console.log(`[chatStore] Recovered CLI session ID: ${cliSessionId}`);
+      const session = this.getSession(projectId, sessionId);
+      this.updateSessionMeta(projectId, sessionId, {
+        cliSessionId,
+        cliSessionTool: 'claude',
+        toolSessions: {
+          ...(session?.toolSessions || {}),
+          claude: { cliSessionId, updatedAt: new Date().toISOString() },
+        },
+      });
     }
 
     if (!cleanedContent || cleanedContent.length < 10) {
-      // Not enough content to recover - but we might have the session ID
-      const failureMsg = cliSessionId
-        ? '🔄 Connection was briefly interrupted. Resuming conversation automatically...'
-        : '🔄 Reconnecting and recovering progress...';
-
       return this.finalizeStreamingMessage({
         projectId,
         sessionId,
         messageId,
-        finalContent: failureMsg,
-        metadata: {
-          recovered: true,
-          recoveryPending: true, // Changed from recoveryFailed - system will auto-resume
-          chunkCount: chunks.length,
-          cliSessionId: cliSessionId || null,
-        },
+        finalContent: cliSessionId
+          ? '🔄 Connection was briefly interrupted. Resuming conversation automatically...'
+          : '🔄 Reconnecting and recovering progress...',
+        metadata: { recovered: true, recoveryPending: true, chunkCount: chunks.length, cliSessionId: cliSessionId || null },
       });
     }
 
@@ -657,36 +256,18 @@ class ChatStore {
       sessionId,
       messageId,
       finalContent: cleanedContent,
-      metadata: {
-        recovered: true,
-        chunkCount: chunks.length,
-        cliSessionId: cliSessionId || null,
-      },
+      metadata: { recovered: true, chunkCount: chunks.length, cliSessionId: cliSessionId || null },
     });
   }
 
-  /**
-   * Get a single message by ID (for recovery purposes)
-   */
   _getMessage(projectId, sessionId, messageId) {
-    const filePath = this._sessionFile(projectId, sessionId);
-    if (!fs.existsSync(filePath)) return null;
-
-    const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
-    for (const line of lines) {
-      const msg = deserialize(line);
-      if (msg?.id === messageId) return msg;
-    }
-    return null;
+    const row = this._db().prepare('SELECT * FROM chat_messages WHERE project_id = ? AND session_id = ? AND id = ?')
+      .get(projectId, sessionId, messageId);
+    return sqliteStore.rowToMessage(row);
   }
 
-  /**
-   * Parse raw terminal output to extract BOTH content AND CLI session ID.
-   * Returns { content, cliSessionId }
-   */
   _parseRawChunksWithSessionId(rawContent) {
-    // Strip ANSI codes
-    let clean = rawContent
+    const clean = rawContent
       .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
       .replace(/\x1b\][^\x07]*\x07/g, '')
       .replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '')
@@ -695,182 +276,93 @@ class ChatStore {
 
     let resultText = '';
     let cliSessionId = null;
-    let partialTextBlocks = [];
+    const partialTextBlocks = [];
 
-    // Scan ALL JSON events - extract session_id, result, and partial content
     for (const line of clean.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed.startsWith('{')) continue;
-
       try {
         const json = JSON.parse(trimmed);
-
-        // Extract session_id from any event that has it
-        if (json.session_id) {
-          cliSessionId = json.session_id;
-        }
-
-        // The result event has the final response text
-        if (json.type === 'result' && json.result) {
-          resultText = json.result;
-        }
-
-        // Capture text blocks from streaming content (partial responses)
-        if (json.type === 'content_block_delta' && json.delta?.text) {
-          partialTextBlocks.push(json.delta.text);
-        }
-        if (json.type === 'content' && json.text) {
-          partialTextBlocks.push(json.text);
-        }
-
-        // Assistant message content blocks
-        if (json.type === 'assistant' && json.message?.content) {
-          const content = json.message.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === 'text' && block.text) {
-                partialTextBlocks.push(block.text);
-              }
-            }
+        if (json.session_id) cliSessionId = json.session_id;
+        if (json.type === 'result' && json.result) resultText = json.result;
+        if (json.type === 'content_block_delta' && json.delta?.text) partialTextBlocks.push(json.delta.text);
+        if (json.type === 'content' && json.text) partialTextBlocks.push(json.text);
+        if (json.type === 'assistant' && Array.isArray(json.message?.content)) {
+          for (const block of json.message.content) {
+            if (block.type === 'text' && block.text) partialTextBlocks.push(block.text);
           }
         }
       } catch {}
     }
 
-    // If we found a complete result, use it
     if (resultText) {
       return {
-        content: resultText
-          .replace(/\\n/g, '\n')
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, '\\')
-          .trim(),
+        content: resultText.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim(),
         cliSessionId,
       };
     }
 
-    // If we have partial text blocks, combine them (partial response recovery)
     if (partialTextBlocks.length > 0) {
       const partialContent = partialTextBlocks.join('').trim();
       if (partialContent.length > 20) {
-        return {
-          content: partialContent + '\n\n---\n🔄 *Recovered partial response. The system will continue automatically.*',
-          cliSessionId,
-        };
+        return { content: `${partialContent}\n\n---\n🔄 *Recovered partial response. The system will continue automatically.*`, cliSessionId };
       }
     }
 
-    // Fallback to filtering meaningful lines
-    return {
-      content: this._filterMeaningfulLines(clean),
-      cliSessionId,
-    };
+    return { content: this._filterMeaningfulLines(clean), cliSessionId };
   }
 
-  /**
-   * Parse raw terminal output (with JSON events, ANSI codes) to extract clean response text.
-   * Handles Claude's stream-json format.
-   */
   _parseRawChunksToContent(rawContent) {
     return this._parseRawChunksWithSessionId(rawContent).content;
   }
 
-  /**
-   * Filter meaningful lines from cleaned output (fallback when JSON parsing fails)
-   */
   _filterMeaningfulLines(clean) {
-
-    // Find where JSON output starts (skip command echo)
     const lines = clean.split('\n');
     const firstJsonIdx = lines.findIndex(l => {
       const t = l.trim();
       return t.startsWith('{') && (t.includes('"type"') || t.includes('"session_id"'));
     });
-
-    // If we found JSON, everything before it is command echo
     const outputLines = firstJsonIdx > 0 ? lines.slice(firstJsonIdx) : lines;
-
-    // Filter out JSON lines, command echoes, and preamble content
-    const meaningfulLines = outputLines.filter(line => {
+    return outputLines.filter(line => {
       const t = line.trim();
       if (!t) return false;
       if (t.startsWith('{') && (t.includes('"type"') || t.includes('"session_id"'))) return false;
       if (t.startsWith('claude -p')) return false;
       if (t.startsWith('copilot -p')) return false;
       if (t.startsWith('aider ')) return false;
-      if (/^[>#$]\s*$/.test(t)) return false; // Shell prompts
-      if (/^\w+@[\w.-]+:.*[$#]\s*$/.test(t)) return false; // user@host:path$
-      // All echoed preamble content starts with > (from shell continuation)
+      if (/^[>#$]\s*$/.test(t)) return false;
+      if (/^\w+@[\w.-]+:.*[$#]\s*$/.test(t)) return false;
       if (t.startsWith('> ')) return false;
-      // Filter out command-line arguments
       if (t.includes('--output-format')) return false;
       if (t.includes('--dangerously-skip-permissions')) return false;
       if (t.includes('--yolo')) return false;
       if (t.includes('--verbose')) return false;
       if (t.includes("--resume '")) return false;
       return true;
-    });
-
-    return meaningfulLines.join('\n').trim();
+    }).join('\n').trim();
   }
 
-  /**
-   * Get any incomplete streaming messages for a session (for recovery on reconnect).
-   */
   getIncompleteStreamingMessages(projectId, sessionId) {
-    const filePath = this._sessionFile(projectId, sessionId);
-    if (!fs.existsSync(filePath)) return [];
-
-    const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
-    const incomplete = [];
-
-    for (const line of lines) {
-      const msg = deserialize(line);
-      if (msg && msg.metadata?.streaming === true) {
-        // Get any saved chunks
-        const chunks = this.getStreamChunks({ projectId, messageId: msg.id });
-        incomplete.push({
-          message: msg,
-          chunks,
-          partialContent: chunks.map(c => c.content).join(''),
-        });
-      }
-    }
-
-    return incomplete;
+    const rows = this._db().prepare(`SELECT * FROM chat_messages
+      WHERE project_id = ? AND session_id = ? AND metadata LIKE '%"streaming":true%' ORDER BY created_at ASC`).all(projectId, sessionId);
+    return rows.map(row => {
+      const message = sqliteStore.rowToMessage(row);
+      const chunks = this.getStreamChunks({ projectId, messageId: message.id });
+      return { message, chunks, partialContent: chunks.map(c => c.content).join('') };
+    });
   }
 
-  // ── Message operations (now session-scoped) ──
-
-  /**
-   * Add a message to a specific session.
-   * If sessionId is null, uses the most recent session (or creates one).
-   */
   addMessage({ projectId, sessionId = null, role, content, metadata }) {
-    if (!sessionId) {
-      sessionId = this.getActiveSession(projectId).id;
-    }
-    this._ensureProjectDir(projectId);
-
+    const session = this._ensureSession(projectId, sessionId);
     const msg = createMessage({
       projectId,
       role,
       content: redactSecrets(content),
-      metadata: metadata ? JSON.parse(redactSecrets(JSON.stringify(metadata))) : null,
+      metadata: metadata ? safeJson(metadata) : null,
     });
-    msg.sessionId = sessionId;
-
-    const line = serialize(msg) + '\n';
-    fs.appendFileSync(this._sessionFile(projectId, sessionId), line, 'utf-8');
-
-    // Update message count in index
-    const sessions = this._readIndex(projectId);
-    const session = sessions.find(s => s.id === sessionId);
-    if (session) {
-      session.messageCount = (session.messageCount || 0) + 1;
-      this._writeIndex(projectId, sessions);
-    }
-
+    msg.sessionId = session.id;
+    sqliteStore.saveChatMessage(msg);
+    this._incrementMessageCount(projectId, session.id, 1);
     return msg;
   }
 
@@ -880,169 +372,119 @@ class ChatStore {
       if (!active) return [];
       sessionId = active.id;
     }
-    const filePath = this._sessionFile(projectId, sessionId);
-    if (!fs.existsSync(filePath)) return [];
-
     const safeLimit = Math.max(1, Math.min(parseInt(limit, 10) || 50, 500));
-    const lines = before
-      ? fs.readFileSync(filePath, 'utf-8').split('\n')
-      : readTailLines(filePath, Math.max(100, safeLimit * 3));
-    const messages = [];
+    let rows;
+    if (before) {
+      const beforeRow = this._db().prepare('SELECT created_at FROM chat_messages WHERE project_id = ? AND session_id = ? AND id = ?')
+        .get(projectId, sessionId, before);
+      if (!beforeRow) return [];
+      rows = this._db().prepare(`SELECT * FROM chat_messages WHERE project_id = ? AND session_id = ? AND created_at < ?
+        ORDER BY created_at DESC LIMIT ?`).all(projectId, sessionId, beforeRow.created_at, safeLimit * 3);
+    } else {
+      rows = this._db().prepare(`SELECT * FROM chat_messages WHERE project_id = ? AND session_id = ?
+        ORDER BY created_at DESC LIMIT ?`).all(projectId, sessionId, safeLimit * 3);
+    }
+
     const now = Date.now();
-
-    for (const line of lines) {
-      const msg = deserialize(line);
-      if (msg) {
-        // Handle incomplete streaming messages
-        if (msg.metadata?.streaming === true) {
-          // Check the LAST CHUNK timestamp, not when streaming started.
-          // Claude can work for 30+ minutes - we need to know if it's STILL active.
-          const lastChunkTime = this.getLastChunkTimestamp({ projectId, messageId: msg.id });
-          const streamStarted = msg.metadata?.streamStartedAt
-            ? new Date(msg.metadata.streamStartedAt).getTime()
-            : new Date(msg.createdAt).getTime();
-
-          // Use last chunk time if available, otherwise fall back to stream start
-          // Consider "stale" if no activity for 5 minutes (Claude pauses can be long)
-          const lastActivityTime = lastChunkTime || streamStarted;
-          const silenceMs = now - lastActivityTime;
-          const isStale = silenceMs > 5 * 60 * 1000; // 5 minutes of silence
-
-          if (isStale) {
-            // Try to auto-recover this stale incomplete message
-            const recovered = this.recoverStreamingMessage({
-              projectId,
-              sessionId,
-              messageId: msg.id,
-            });
-            if (recovered) {
-              messages.push(recovered);
-              continue;
-            }
-          }
-
-          // Skip streaming messages entirely (both active and unrecoverable stale ones)
-          // Active ones will be shown via WebSocket streaming
-          // Stale unrecoverable ones would just show garbage
-          continue;
+    const messages = [];
+    for (const msg of rows.map(sqliteStore.rowToMessage).reverse()) {
+      if (msg.metadata?.streaming === true) {
+        const lastChunkTime = this.getLastChunkTimestamp({ projectId, messageId: msg.id });
+        const streamStarted = msg.metadata?.streamStartedAt
+          ? new Date(msg.metadata.streamStartedAt).getTime()
+          : new Date(msg.createdAt).getTime();
+        const silenceMs = now - (lastChunkTime || streamStarted);
+        if (silenceMs > 5 * 60 * 1000) {
+          const recovered = this.recoverStreamingMessage({ projectId, sessionId, messageId: msg.id });
+          if (recovered) messages.push(recovered);
         }
-        messages.push(msg);
+        continue;
       }
+      messages.push(msg);
     }
 
-    // Clean up orphaned progress messages (progress messages at the end with no following agent/error response)
-    // These are stale from previous interrupted sessions
-    let cleanedMessages = messages;
-    while (cleanedMessages.length > 0) {
-      const last = cleanedMessages[cleanedMessages.length - 1];
-      if (last.role === 'progress') {
-        cleanedMessages = cleanedMessages.slice(0, -1);
-      } else {
-        break;
-      }
-    }
+    const cleanedMessages = this._cleanProgressMessages(messages);
+    return cleanedMessages.slice(-safeLimit).reverse();
+  }
 
-    // Also remove progress messages that appear after the last user message if there's no agent response after them
-    // Find the last user message index
-    const lastUserIdx = cleanedMessages.findLastIndex(m => m.role === 'user');
+  _cleanProgressMessages(messages) {
+    let cleaned = messages;
+    while (cleaned.length > 0 && cleaned[cleaned.length - 1].role === 'progress') {
+      cleaned = cleaned.slice(0, -1);
+    }
+    const lastUserIdx = cleaned.findLastIndex(m => m.role === 'user');
     if (lastUserIdx >= 0) {
-      // Check if there's an agent/error response after the last user message
-      const hasResponseAfterUser = cleanedMessages.slice(lastUserIdx + 1).some(m =>
-        m.role === 'agent' || m.role === 'error'
-      );
+      const hasResponseAfterUser = cleaned.slice(lastUserIdx + 1).some(m => m.role === 'agent' || m.role === 'error');
       if (!hasResponseAfterUser) {
-        // Remove all progress messages after the last user (they're orphaned)
-        cleanedMessages = [
-          ...cleanedMessages.slice(0, lastUserIdx + 1),
-          ...cleanedMessages.slice(lastUserIdx + 1).filter(m => m.role !== 'progress')
+        cleaned = [
+          ...cleaned.slice(0, lastUserIdx + 1),
+          ...cleaned.slice(lastUserIdx + 1).filter(m => m.role !== 'progress'),
         ];
       }
     }
-
-    if (before) {
-      const idx = cleanedMessages.findIndex(m => m.id === before);
-      if (idx > 0) return cleanedMessages.slice(Math.max(0, idx - safeLimit), idx).reverse();
-      return [];
-    }
-
-    return cleanedMessages.slice(-safeLimit).reverse();
+    return cleaned;
   }
 
   searchSessions(projectId, query, { includeArchived = true, limit = 30 } = {}) {
     const q = String(query || '').trim();
     if (!q) return [];
-
     const safeLimit = Math.max(1, Math.min(parseInt(limit, 10) || 30, 100));
-    const sessions = this.getSessions(projectId, { includeArchived });
-    const lower = q.toLowerCase();
-    const bySubject = [];
-    const subjectIds = new Set();
+    const like = `%${q}%`;
+    const archiveSql = includeArchived ? '' : 'AND archived = 0';
+    const bySubject = this._db().prepare(`SELECT * FROM chat_sessions WHERE project_id = ? ${archiveSql} AND name LIKE ? ORDER BY created_at DESC LIMIT ?`)
+      .all(projectId, like, safeLimit)
+      .map(row => ({ ...sqliteStore.rowToSession(row), matchType: 'subject', matchSnippet: row.name }));
+    if (bySubject.length >= safeLimit) return bySubject;
 
-    for (const session of sessions) {
-      const subject = session.name || '';
-      if (subject.toLowerCase().includes(lower)) {
-        subjectIds.add(session.id);
-        bySubject.push({
-          ...session,
-          matchType: 'subject',
-          matchSnippet: subject,
-        });
-        if (bySubject.length >= safeLimit) return bySubject;
-      }
-    }
-
+    const ftsQuery = sqliteStore.ftsQueryFromText(q);
+    if (!ftsQuery) return bySubject;
+    const subjectIds = new Set(bySubject.map(s => s.id));
+    const rows = this._db().prepare(`
+      SELECT s.*, m.content AS match_content, m.role AS match_role
+      FROM chat_messages_fts f
+      JOIN chat_messages m ON m.id = f.message_id
+      JOIN chat_sessions s ON s.id = m.session_id
+      WHERE chat_messages_fts MATCH ? AND m.project_id = ? ${includeArchived ? '' : 'AND s.archived = 0'}
+      GROUP BY s.id
+      ORDER BY MAX(m.created_at) DESC
+      LIMIT ?
+    `).all(ftsQuery, projectId, safeLimit * 2);
     const byContent = [];
-    for (const session of sessions) {
-      if (subjectIds.has(session.id)) continue;
-      const filePath = this._sessionFile(projectId, session.id);
-      if (!fs.existsSync(filePath)) continue;
-
-      try {
-        const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
-        for (const line of lines) {
-          const msg = deserialize(line);
-          if (!msg?.content) continue;
-          if (!msg.content.toLowerCase().includes(lower)) continue;
-
-          byContent.push({
-            ...session,
-            matchType: 'content',
-            matchSnippet: snippetAround(msg.content, q),
-            matchRole: msg.role,
-          });
-          break;
-        }
-      } catch {}
-
+    for (const row of rows) {
+      if (subjectIds.has(row.id)) continue;
+      byContent.push({
+        ...sqliteStore.rowToSession(row),
+        matchType: 'content',
+        matchSnippet: snippetAround(row.match_content, q),
+        matchRole: row.match_role,
+      });
       if (bySubject.length + byContent.length >= safeLimit) break;
     }
-
     return [...bySubject, ...byContent].slice(0, safeLimit);
   }
 
   search(projectId, query, { sessionId = null, limit = 20 } = {}) {
-    if (!query) return [];
-
-    // Search across all sessions if no sessionId specified
-    const sessions = sessionId ? [{ id: sessionId }] : this.getSessions(projectId);
-    const results = [];
-
-    for (const s of sessions) {
-      const filePath = this._sessionFile(projectId, s.id);
-      if (!fs.existsSync(filePath)) continue;
-
-      const lowerQuery = query.toLowerCase();
-      const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
-      for (const line of lines) {
-        const msg = deserialize(line);
-        if (msg && msg.content.toLowerCase().includes(lowerQuery)) {
-          results.push(msg);
-          if (results.length >= limit) return results;
-        }
-      }
+    const q = String(query || '').trim();
+    if (!q) return [];
+    const safeLimit = Math.max(1, Math.min(parseInt(limit, 10) || 20, 100));
+    const ftsQuery = sqliteStore.ftsQueryFromText(q);
+    if (ftsQuery) {
+      const rows = sessionId
+        ? this._db().prepare(`SELECT m.* FROM chat_messages_fts f JOIN chat_messages m ON m.id = f.message_id
+          WHERE chat_messages_fts MATCH ? AND m.project_id = ? AND m.session_id = ? ORDER BY m.created_at DESC LIMIT ?`)
+          .all(ftsQuery, projectId, sessionId, safeLimit)
+        : this._db().prepare(`SELECT m.* FROM chat_messages_fts f JOIN chat_messages m ON m.id = f.message_id
+          WHERE chat_messages_fts MATCH ? AND m.project_id = ? ORDER BY m.created_at DESC LIMIT ?`)
+          .all(ftsQuery, projectId, safeLimit);
+      return rows.map(sqliteStore.rowToMessage);
     }
-
-    return results;
+    const like = `%${q}%`;
+    const rows = sessionId
+      ? this._db().prepare('SELECT * FROM chat_messages WHERE project_id = ? AND session_id = ? AND content LIKE ? ORDER BY created_at DESC LIMIT ?')
+        .all(projectId, sessionId, like, safeLimit)
+      : this._db().prepare('SELECT * FROM chat_messages WHERE project_id = ? AND content LIKE ? ORDER BY created_at DESC LIMIT ?')
+        .all(projectId, like, safeLimit);
+    return rows.map(sqliteStore.rowToMessage);
   }
 
   getCount(projectId, sessionId = null) {
@@ -1051,46 +493,25 @@ class ChatStore {
       if (!active) return 0;
       sessionId = active.id;
     }
-    const session = this.getSessionMeta(projectId, sessionId);
-    if (Number.isFinite(session?.messageCount)) return session.messageCount;
-
-    const filePath = this._sessionFile(projectId, sessionId);
-    if (!fs.existsSync(filePath)) return 0;
-    const count = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim()).length;
-    if (session) this.updateSessionMeta(projectId, sessionId, { messageCount: count });
-    return count;
+    const row = this._db().prepare('SELECT message_count FROM chat_sessions WHERE project_id = ? AND id = ?').get(projectId, sessionId);
+    if (Number.isFinite(row?.message_count)) return row.message_count;
+    return this._db().prepare('SELECT COUNT(*) AS count FROM chat_messages WHERE project_id = ? AND session_id = ?').get(projectId, sessionId)?.count || 0;
   }
 
-  /**
-   * Delete all chat data for a project.
-   */
   deleteProject(projectId) {
-    const dir = this._projectDir(projectId);
-    if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    this._db().prepare('DELETE FROM chat_chunks WHERE project_id = ?').run(projectId);
+    this._db().prepare('DELETE FROM chat_messages_fts WHERE project_id = ?').run(projectId);
+    this._db().prepare('DELETE FROM chat_messages WHERE project_id = ?').run(projectId);
+    this._db().prepare('DELETE FROM chat_sessions WHERE project_id = ?').run(projectId);
   }
 
-  // ── Migration: move old single-file chats to session format ──
+  migrateIfNeeded() {
+    // Legacy JSONL migration now runs once during SQLite initialization.
+  }
 
-  migrateIfNeeded(projectId) {
-    const oldFile = path.join(CHAT_DIR, `${projectId}.jsonl`);
-    if (!fs.existsSync(oldFile)) return;
-
-    // Old format exists — migrate to session format
-    const session = this.createSession(projectId, 'Migrated Chat');
-    const content = fs.readFileSync(oldFile, 'utf-8');
-    this._ensureProjectDir(projectId);
-    fs.writeFileSync(this._sessionFile(projectId, session.id), content, 'utf-8');
-
-    // Count messages
-    const count = content.split('\n').filter(l => l.trim()).length;
-    const sessions = this._readIndex(projectId);
-    const s = sessions.find(x => x.id === session.id);
-    if (s) { s.messageCount = count; this._writeIndex(projectId, sessions); }
-
-    // Remove old file
-    fs.unlinkSync(oldFile);
+  _incrementMessageCount(projectId, sessionId, by) {
+    this._db().prepare('UPDATE chat_sessions SET message_count = message_count + ?, updated_at = ? WHERE project_id = ? AND id = ?')
+      .run(by, new Date().toISOString(), projectId, sessionId);
   }
 }
 

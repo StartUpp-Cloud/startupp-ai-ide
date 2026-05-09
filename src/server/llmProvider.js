@@ -498,7 +498,7 @@ class LLMProvider extends EventEmitter {
         const content = data.message?.content || '';
 
         return {
-          response: content.trim(),
+          response: this.cleanModelText(content),
           provider: 'ollama',
           model,
           tokensUsed: data.eval_count,
@@ -594,7 +594,7 @@ class LLMProvider extends EventEmitter {
 
       const data = await response.json();
       const rawContent = data.choices[0]?.message?.content || '';
-      const generatedResponse = context.systemPrompt ? rawContent.trim() : this.cleanResponse(rawContent);
+      const generatedResponse = context.systemPrompt ? this.cleanModelText(rawContent) : this.cleanResponse(rawContent);
 
       return {
         response: generatedResponse,
@@ -657,7 +657,7 @@ class LLMProvider extends EventEmitter {
 
       const data = await response.json();
       const rawContent = data.choices[0]?.message?.content || '';
-      const generatedResponse = context.systemPrompt ? rawContent.trim() : this.cleanResponse(rawContent);
+      const generatedResponse = context.systemPrompt ? this.cleanModelText(rawContent) : this.cleanResponse(rawContent);
 
       return {
         response: generatedResponse,
@@ -721,7 +721,7 @@ class LLMProvider extends EventEmitter {
 
       const data = await response.json();
       const rawContent = data.choices[0]?.message?.content || '';
-      const generatedResponse = context.systemPrompt ? rawContent.trim() : this.cleanResponse(rawContent);
+      const generatedResponse = context.systemPrompt ? this.cleanModelText(rawContent) : this.cleanResponse(rawContent);
 
       return {
         response: generatedResponse,
@@ -763,7 +763,7 @@ class LLMProvider extends EventEmitter {
       }
 
       return {
-        response: context.systemPrompt ? response : this.cleanResponse(response),
+        response: context.systemPrompt ? this.cleanModelText(response) : this.cleanResponse(response),
         provider: 'opencode',
         model: model || 'default',
         tokensUsed,
@@ -915,13 +915,26 @@ class LLMProvider extends EventEmitter {
   }
 
   /**
+   * Remove model-internal reasoning while preserving normal markdown/JSON output.
+   */
+  cleanModelText(response) {
+    if (!response) return '';
+
+    return String(response)
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+      .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+      .trim();
+  }
+
+  /**
    * Clean and normalize the LLM response
    */
   cleanResponse(response) {
     if (!response) return '';
 
     // Strip <think>...</think> blocks from reasoning models (qwen3.5, deepseek-r1, etc.)
-    let cleaned = response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    let cleaned = this.cleanModelText(response);
 
     // Strip any other XML-like tags models might emit
     cleaned = cleaned.replace(/<\/?[a-z][a-z0-9_-]*>/gi, '').trim();

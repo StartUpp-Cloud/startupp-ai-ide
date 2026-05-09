@@ -95,9 +95,14 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   }, [containerName, gitPathQuery]);
 
   useEffect(() => {
-    fetchStatus();
+    // Git status is side data; defer it so opening a chat session is not competing
+    // with Docker/git polling during the first paint.
+    const initialTimer = setTimeout(fetchStatus, 300);
     const interval = setInterval(fetchStatus, 10000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
   }, [fetchStatus]);
 
   // Fetch enriched branches when switcher opens

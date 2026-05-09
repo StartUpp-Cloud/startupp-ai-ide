@@ -18,6 +18,7 @@ import { chatStore } from './chatStore.js';
 import { agentShellPool } from './agentShellPool.js';
 import { jobManager } from './jobManager.js';
 import { skillManager } from './skillManager.js';
+import { memoryStore } from './memoryStore.js';
 import { ollamaWorkspaceOrchestrator } from './ollamaWorkspaceOrchestrator.js';
 import { getDB } from './db.js';
 import { supportsSessionEffortSelection, supportsSessionModelSelection } from './sessionSettings.js';
@@ -35,7 +36,50 @@ class AgentGateway extends EventEmitter {
 
   resetSession(sessionId) {
     if (!sessionId) return;
-    this._cliSessions.delete(sessionId);
+    for (const key of this._cliSessions.keys()) {
+      if (key === sessionId || key.startsWith(`${sessionId}:`)) this._cliSessions.delete(key);
+    }
+  }
+
+  _cliSessionKey(sessionId, tool) {
+    return `${sessionId || 'default'}:${tool || 'default'}`;
+  }
+
+  _getCliState(sessionId, tool) {
+    return this._cliSessions.get(this._cliSessionKey(sessionId, tool));
+  }
+
+  _setCliState(sessionId, tool, state) {
+    this._cliSessions.set(this._cliSessionKey(sessionId, tool), state);
+  }
+
+  _clearCliState(sessionId, tool = null) {
+    if (tool) {
+      this._cliSessions.delete(this._cliSessionKey(sessionId, tool));
+      return;
+    }
+    this.resetSession(sessionId);
+  }
+
+  _storeToolSession(projectId, chatSessionId, tool, cliSessionId) {
+    if (!projectId || !chatSessionId || !tool || !cliSessionId) return;
+    const session = chatStore.getSession(projectId, chatSessionId);
+    const toolSessions = { ...(session?.toolSessions || {}) };
+    toolSessions[tool] = { ...(toolSessions[tool] || {}), cliSessionId, updatedAt: new Date().toISOString() };
+    chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId, cliSessionTool: tool, toolSessions });
+  }
+
+  _clearStoredToolSession(projectId, chatSessionId, tool) {
+    if (!projectId || !chatSessionId) return;
+    const session = chatStore.getSession(projectId, chatSessionId);
+    const toolSessions = { ...(session?.toolSessions || {}) };
+    if (tool) delete toolSessions[tool];
+    const meta = { toolSessions };
+    if (!tool || session?.cliSessionTool === tool) {
+      meta.cliSessionId = null;
+      meta.cliSessionTool = null;
+    }
+    chatStore.updateSessionMeta(projectId, chatSessionId, meta);
   }
 
   // ── Entry point ──
@@ -109,22 +153,23 @@ class AgentGateway extends EventEmitter {
 
       if (mode === 'plan') {
         // Plan mode: multi-loop review (plan → critic → optional 3rd pass)
-        await this._executePlanWithReview(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, skipUnread);
+        return await this._executePlanWithReview(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, skipUnread);
       } else if (isOllamaAssistant) {
         // Ollama assistant always uses the IDE-side orchestrator + local Ollama CLI.
         // Do not smart-route Ollama-selected sessions through cloud/capable providers.
         this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
+        return await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
       } else if (isCapable) {
         // Agent mode + capable LLM: smart routing
-        await this._smartRoute(projectId, sessionId, routedContent, mode, tool, assistantSettings, broadcastFn, ctx, skipUnread);
+        return await this._smartRoute(projectId, sessionId, routedContent, mode, tool, assistantSettings, broadcastFn, ctx, skipUnread);
       } else {
         // Agent mode + Ollama: everything goes to the CLI tool
         this._addProgressMessage(projectId, sessionId, `Sending to ${tool}...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
+        return await this._sendToCliTool(projectId, sessionId, routedContent, tool, assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
       }
     } catch (error) {
       this._addErrorMessage(projectId, sessionId, `Error: ${error.message}`, broadcastFn);
+      return { success: false, error: error.message };
     } finally {
       this._activeShellSessions.delete(sessionId);
       this._running.delete(sessionId);
@@ -298,16 +343,21 @@ RULES:
       );
 
       const response = result.response.trim();
-      const firstLine = response.split('\n')[0].trim().toUpperCase();
-      const body = response.slice(response.indexOf('\n') + 1).trim();
+      const routeMatch = response.match(/^\s*(ANSWER|COMMAND|DELEGATE)\s*:?\s*/i);
+      const firstLine = (routeMatch?.[1] || response.split('\n')[0]).trim().toUpperCase();
+      const body = routeMatch
+        ? response.slice(routeMatch[0].length).trim()
+        : response.slice(response.indexOf('\n') + 1).trim();
 
       if (firstLine.startsWith('ANSWER')) {
         if (this._canAnswerDirectly(content)) {
           this._addProgressMessage(projectId, sessionId, `Analyzing your question — I can answer this directly.`, broadcastFn, null, { transient: true });
-          this._addAgentMessage(projectId, sessionId, body || response, broadcastFn, { tool: 'local' }, skipUnread);
+          const content = this._cleanDirectAnswer(body || response);
+          this._addAgentMessage(projectId, sessionId, content, broadcastFn, { tool: 'local' }, skipUnread);
+          return { success: true, content, tool: 'local' };
         } else {
           this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn, null, { transient: true });
-          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
+          return await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
         }
 
       } else if (firstLine.startsWith('COMMAND')) {
@@ -315,28 +365,29 @@ RULES:
         const looksValid = cmd && !cmd.includes('[') && !cmd.includes('NEEDS') && cmd.length < 200;
         if (looksValid) {
           this._addProgressMessage(projectId, sessionId, `Running shell command: \`${cmd}\``, broadcastFn, null, { transient: true });
-          await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx, skipUnread);
+          return await this._runShellCommand(projectId, sessionId, cmd, content, broadcastFn, ctx, skipUnread);
         } else {
           this._addProgressMessage(projectId, sessionId, `This needs ${tool} — delegating your request...`, broadcastFn, null, { transient: true });
-          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
+          return await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
         }
 
       } else if (firstLine.startsWith('DELEGATE')) {
         this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s codebase access — delegating...`, broadcastFn, null, { transient: true });
-        await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
+        return await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
 
       } else {
         const isGarbage = response.includes('NEEDS_USER') || response.includes('[') || response.length < 10;
         if (!isGarbage && this._canAnswerDirectly(content) && response.length < 500 && !response.includes('```')) {
           this._addAgentMessage(projectId, sessionId, response, broadcastFn, { tool: 'local' }, skipUnread);
+          return { success: true, content: response, tool: 'local' };
         } else {
           this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
-          await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
+          return await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
         }
       }
     } catch (err) {
       this._addProgressMessage(projectId, sessionId, `Routing to ${tool}...`, broadcastFn, null, { transient: true });
-      await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
+      return await this._sendToCliTool(projectId, sessionId, content, tool, assistantSettings, broadcastFn, ctx, mode, skipUnread);
     }
   }
 
@@ -363,6 +414,15 @@ RULES:
     return generalKnowledge.some(pattern => pattern.test(text));
   }
 
+  _cleanDirectAnswer(answer) {
+    return String(answer || '')
+      .replace(/^\s*ANSWER\s*:?\s*/i, '')
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+      .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+      .trim();
+  }
+
   // ── Context builder for smart routing ──
 
   _buildContext(projectId, sessionId, userMessage) {
@@ -385,7 +445,7 @@ RULES:
     parts.push(`ENVIRONMENT:
 - Running inside a Docker container with a full development environment
 - CLI tools available: claude (Claude Code), copilot (GitHub Copilot), aider, git, npm, node
-- Claude Code is used via: claude -p 'prompt' --output-format json --dangerously-skip-permissions --resume <session_id>
+- Claude Code is used with all options before the prompt, then --, then the prompt text
 - The user interacts through a chat UI that can show markdown, code blocks, and bullet lists`);
 
     // Recent conversation
@@ -422,7 +482,7 @@ RULES:
       if (sess.isNew) await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
       this._addErrorMessage(projectId, sessionId, `Failed to start shell: ${err.message}`, broadcastFn);
-      return;
+      return { success: false, error: err.message, type: 'shell-start' };
     }
 
     agentShellPool.write(shellSessionId, cmd + '\n');
@@ -452,8 +512,11 @@ RULES:
         { maxTokens: 500, temperature: 0.1 }
       );
       this._addAgentMessage(projectId, sessionId, result.response, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) }, skipUnread);
+      return { success: true, content: result.response, tool: 'shell', rawOutput: cleanOutput.slice(-8000) };
     } catch {
-      this._addAgentMessage(projectId, sessionId, `\`\`\`\n${display}\n\`\`\``, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) }, skipUnread);
+      const content = `\`\`\`\n${display}\n\`\`\``;
+      this._addAgentMessage(projectId, sessionId, content, broadcastFn, { tool: 'shell', rawOutput: cleanOutput.slice(-8000) }, skipUnread);
+      return { success: true, content, tool: 'shell', rawOutput: cleanOutput.slice(-8000) };
     }
   }
 
@@ -524,7 +587,7 @@ RULES:
     // Computed once before the attempt loop so retries reuse the same brief.
     let distilledContext = null;
     try {
-      distilledContext = await this._distillContext(projectId, chatSessionId, message);
+      distilledContext = await this._distillContext(projectId, chatSessionId, message, tool);
       if (distilledContext) {
         console.log(`[agentGateway] Context distilled for session ${chatSessionId} (${distilledContext.length} chars)`);
       }
@@ -619,7 +682,10 @@ RULES:
           }
 
           this._persistContext(projectId, chatSessionId, message, finalContent);
-          return;
+          this._learnDurableMemory(projectId, message, finalContent, { tool, mode }).catch(err => {
+            console.warn('[agentGateway] Memory learning skipped:', err.message);
+          });
+          return { success: true, content: finalContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, rawOutput: rawForDisplay.slice(-8000) };
         }
 
         if (result.retry && attempt < MAX_ATTEMPTS) {
@@ -632,7 +698,8 @@ RULES:
           this._addProgressMessage(projectId, chatSessionId, retryLabel, broadcastFn);
 
           if (result.retryType === 'context-lost') {
-            this._cliSessions.delete(chatSessionId);
+            this._clearCliState(chatSessionId, tool);
+            this._clearStoredToolSession(projectId, chatSessionId, tool);
             const contextSummary = await this._getContextSummary(projectId, chatSessionId);
             message = `Context from our conversation:\n${contextSummary}\n\nUser's request: ${message}`;
           }
@@ -642,7 +709,8 @@ RULES:
             // The AI hit its context limit mid-implementation. We synthesize a
             // developer handoff note from the raw tool output + git diff, then
             // start a fresh session with a continuation prompt.
-            this._cliSessions.delete(chatSessionId);
+            this._clearCliState(chatSessionId, tool);
+            this._clearStoredToolSession(projectId, chatSessionId, tool);
             this._addProgressMessage(projectId, chatSessionId,
               '🔄 Context limit reached — synthesizing continuation context...', broadcastFn);
 
@@ -659,7 +727,7 @@ RULES:
             : result.retryType === 'context-limit' ? 1000
             : 2000;
           const shouldContinue = await this._waitForRetryBackoff(ctx, backoffMs);
-          if (!shouldContinue) return;
+          if (!shouldContinue) return { success: false, error: 'Aborted', tool, jobId: job.id, messageId: streamingMsg.id, aborted: true };
           continue;
         }
 
@@ -707,7 +775,7 @@ RULES:
             });
           }
         }
-        return;
+        return { success: false, error: failureContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, retryType: result.retryType || 'failed' };
       }
     } finally {
       // Clean up event handler
@@ -750,7 +818,7 @@ RULES:
       jobManager.startJob(job.id, shellSessionId);
     }
 
-    const cliState = this._cliSessions.get(chatSessionId);
+    const cliState = this._getCliState(chatSessionId, tool);
     const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode, assistantSettings, distilledContext);
     const isFollowUp = !!(cliState?.cliSessionId);
 
@@ -967,12 +1035,12 @@ RULES:
     if (tool === 'claude' || tool === 'copilot') {
       const parsed = this._parseJsonToolOutput(cleanOutput, cmd);
       displayOutput = parsed.text;
-      if (parsed.sessionId) {
+      if (parsed.sessionId && !parsed.isError) {
         // Preserve lastSkillHash so skill-change detection works across messages
-        const prevState = this._cliSessions.get(chatSessionId);
+        const prevState = this._getCliState(chatSessionId, tool);
         const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
-        this._cliSessions.set(chatSessionId, newState);
-        chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
+        this._setCliState(chatSessionId, tool, newState);
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId);
       }
       // Check for error in the result
       if (parsed.isError) {
@@ -983,6 +1051,12 @@ RULES:
         // Don't retry on rate limits - just show the message
         if (parsed.errorType === 'rate_limit') {
           return { success: false, retry: false, displayOutput, error: displayOutput };
+        }
+        if (parsed.errorType === 'usage') {
+          return { success: false, retry: false, displayOutput, error: displayOutput };
+        }
+        if (/No conversation found with session ID/i.test(displayOutput)) {
+          return { success: false, retry: true, retryReason: `${tool} session not found`, retryType: 'context-lost', displayOutput };
         }
         // Retry on context overflow with LLM-synthesized continuation
         const isOverflow = /context.*overflow|token.*limit|too many tokens/i.test(displayOutput);
@@ -997,10 +1071,10 @@ RULES:
       displayOutput = parsed.text;
       if (parsed.sessionId) {
         // Preserve lastSkillHash so skill-change detection works across messages
-        const prevState = this._cliSessions.get(chatSessionId);
+        const prevState = this._getCliState(chatSessionId, tool);
         const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
-        this._cliSessions.set(chatSessionId, newState);
-        chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
+        this._setCliState(chatSessionId, tool, newState);
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId);
       }
       // Context limit: retryable with continuation context
       if (parsed.finishReason === 'length' || parsed.finishReason === 'max_tokens') {
@@ -1017,10 +1091,10 @@ RULES:
       const parsed = this._parseCodexJsonOutput(cleanOutput, cmd);
       displayOutput = parsed.text;
       if (parsed.sessionId) {
-        const prevState = this._cliSessions.get(chatSessionId);
+        const prevState = this._getCliState(chatSessionId, tool);
         const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
-        this._cliSessions.set(chatSessionId, newState);
-        chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId: parsed.sessionId });
+        this._setCliState(chatSessionId, tool, newState);
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId);
       }
       if (parsed.isError) {
         // Codex auth/rate-limit errors are often transient (retry usually works),
@@ -1079,6 +1153,9 @@ RULES:
     }
     // HTML safety net
     return content
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+      .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
       .replace(/<b>([\s\S]*?)<\/b>/gi, '**$1**')
       .replace(/<strong>([\s\S]*?)<\/strong>/gi, '**$1**')
       .replace(/<i>([\s\S]*?)<\/i>/gi, '*$1*')
@@ -1288,6 +1365,64 @@ RULES:
     } catch {}
   }
 
+  async _learnDurableMemory(projectId, userMessage, agentResponse, { tool = 'unknown', mode = 'agent' } = {}) {
+    if (!projectId || !agentResponse || agentResponse.length < 80) return;
+    const settings = llmProvider.getSettings();
+    if (!settings.enabled || !llmProvider.available) return;
+
+    const prompt = `Extract durable project memory from this coding-agent exchange.
+
+Store only facts that will help future prompts across any tool (Claude, OpenCode, Copilot, Aider): user preferences, coding style, architecture decisions, recurring failures and fixes, commands that worked, domain/schema facts, migration decisions, and constraints.
+
+Do NOT store transient progress, obvious facts, secrets, tokens, raw logs, or private credentials.
+
+Return JSON only: an array of 0-5 objects with this shape:
+[{"type":"preference|pattern|failure|success|convention|dependency","category":"build|test|git|style|architecture","content":"one concise durable memory","tags":["short-tag"],"relatedFiles":["optional/path"]}]
+
+Tool: ${tool}
+Mode: ${mode}
+User request:
+${String(userMessage || '').slice(0, 2000)}
+
+Agent response:
+${String(agentResponse || '').slice(0, 6000)}`;
+
+    const result = await llmProvider.generateResponse(prompt, { maxTokens: 900, temperature: 0.1 });
+    const raw = result.response || '';
+    const match = raw.match(/\[[\s\S]*\]/);
+    if (!match) return;
+
+    let items;
+    try { items = JSON.parse(match[0]); } catch { return; }
+    if (!Array.isArray(items)) return;
+
+    const validTypes = new Set(['preference', 'pattern', 'failure', 'success', 'convention', 'dependency']);
+    const validCategories = new Set(['build', 'test', 'git', 'style', 'architecture']);
+
+    for (const item of items.slice(0, 5)) {
+      const content = this._sanitizeMemoryContent(item?.content);
+      if (!content || content.length < 20) continue;
+      await memoryStore.learn(projectId, {
+        type: validTypes.has(item.type) ? item.type : 'pattern',
+        category: validCategories.has(item.category) ? item.category : 'architecture',
+        content,
+        source: 'auto-detected',
+        tags: Array.isArray(item.tags) ? item.tags.slice(0, 8).map(t => String(t).slice(0, 40)) : [],
+        relatedFiles: Array.isArray(item.relatedFiles) ? item.relatedFiles.slice(0, 8).map(f => String(f).slice(0, 160)) : [],
+      });
+    }
+  }
+
+  _sanitizeMemoryContent(content) {
+    return String(content || '')
+      .replace(/(?:sk-|pk-|api[_-]?key|token|secret|password|bearer)\s*[:=]\s*['"]?[A-Za-z0-9_\-/.]{12,}['"]?/gi, '[REDACTED_SECRET]')
+      .replace(/ghp_[A-Za-z0-9]{20,}/g, '[REDACTED_GITHUB_TOKEN]')
+      .replace(/xox[bpsar]-[A-Za-z0-9\-]{10,}/g, '[REDACTED_SLACK_TOKEN]')
+      .replace(/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC )?PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]')
+      .trim()
+      .slice(0, 700);
+  }
+
   /**
    * Distill context from chat history using the local LLM.
    * Produces a concise brief of key decisions, files, errors, and constraints
@@ -1296,7 +1431,7 @@ RULES:
    * Returns null if distillation is unnecessary (first message, too few messages,
    * weak LLM, or fresh session).
    */
-  async _distillContext(projectId, chatSessionId, userMessage) {
+  async _distillContext(projectId, chatSessionId, userMessage, tool = null) {
     const provider = llmProvider.getSettings().provider;
     if (provider === 'ollama') return null; // Skip for weak models
 
@@ -1312,7 +1447,7 @@ RULES:
 
     // Skip distillation if the last agent response was very recent (< 2 min)
     // and the CLI session is still alive — the tool likely has full context
-    const cliState = this._cliSessions.get(chatSessionId);
+    const cliState = tool ? this._getCliState(chatSessionId, tool) : null;
     if (cliState?.cliSessionId) {
       const lastAgent = messages.find(m => m.role === 'agent');
       if (lastAgent?.timestamp) {
@@ -1548,6 +1683,19 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     } catch { return ''; }
   }
 
+  _buildProjectMemoryContext(projectId, userMessage = '') {
+    if (!projectId) return '';
+    try {
+      return memoryStore.buildContextForLLM(projectId, {
+        query: userMessage,
+        maxTokens: 1600,
+      });
+    } catch (err) {
+      console.warn('[agentGateway] Failed to build project memory context:', err.message);
+      return '';
+    }
+  }
+
   /**
    * Build the first-message preamble that includes:
    * - CLAUDE.md instruction
@@ -1636,13 +1784,15 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
   }
 
   _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}, distilledContext = null) {
-    let cliState = this._cliSessions.get(chatSessionId);
+    let cliState = this._getCliState(chatSessionId, tool);
     if (!cliState?.cliSessionId && chatSessionId && projectId) {
       const stored = chatStore.getSession(projectId, chatSessionId);
-      if (stored?.cliSessionId) {
-        cliState = { cliSessionId: stored.cliSessionId, messageCount: stored.messageCount || 1 };
-        this._cliSessions.set(chatSessionId, cliState);
-        console.log(`[agentGateway] Restored CLI session from disk: ${stored.cliSessionId}`);
+      const storedToolSessionId = stored?.toolSessions?.[tool]?.cliSessionId
+        || (stored?.cliSessionTool === tool ? stored.cliSessionId : null);
+      if (storedToolSessionId) {
+        cliState = { cliSessionId: storedToolSessionId, messageCount: stored.messageCount || 1 };
+        this._setCliState(chatSessionId, tool, cliState);
+        console.log(`[agentGateway] Restored ${tool} CLI session from disk: ${storedToolSessionId}`);
       }
     }
 
@@ -1685,11 +1835,11 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings, sessionBranch);
       fullMessage = preamble + '\n\n---\n\n' + message;
       // Record the skill hash so we can detect changes on future messages
-      this._cliSessions.set(chatSessionId, { ...(cliState || {}), lastSkillHash: skillHash });
+      this._setCliState(chatSessionId, tool, { ...(cliState || {}), lastSkillHash: skillHash });
     } else if (skillContext && cliState?.lastSkillHash !== skillHash) {
       // Skills changed since the session started — re-inject them before the user's message
       fullMessage = `[Note: Your active skills have been updated. Apply the following going forward:]\n${skillContext}\n\n---\n\n${message}`;
-      this._cliSessions.set(chatSessionId, { ...cliState, lastSkillHash: skillHash });
+      this._setCliState(chatSessionId, tool, { ...cliState, lastSkillHash: skillHash });
     } else {
       fullMessage = message;
     }
@@ -1703,14 +1853,20 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       if (distilledContext) contextParts.push(distilledContext);
       fullMessage = `[Session Context — do not repeat this back, use it to inform your response]\n${contextParts.join('\n')}\n\n[User Request]\n${fullMessage}`;
     }
+
+    const memoryContext = this._buildProjectMemoryContext(projectId, message);
+    if (memoryContext) {
+      fullMessage = `[Project Memory — apply these durable project facts, preferences, decisions, and prior outcomes. Do not repeat this block back.]\n${memoryContext}\n\n---\n\n${fullMessage}`;
+    }
     const encoded = Buffer.from(fullMessage, 'utf8').toString('base64');
     const promptArg = `\"$(printf %s '${encoded}' | base64 -d)\"`;
 
     switch (tool) {
       case 'claude': {
-        let cmd = `claude -p ${promptArg} --output-format stream-json --verbose --dangerously-skip-permissions`;
+        let cmd = `claude -p --output-format stream-json --verbose --dangerously-skip-permissions`;
         cmd += this._buildToolOptionArgs(tool, assistantSettings);
         if (cliState?.cliSessionId) cmd += ` --resume '${cliState.cliSessionId}'`;
+        cmd += ` -- ${promptArg}`;
         return cmd;
       }
       case 'copilot': {
@@ -1763,9 +1919,8 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
   async _autoNameSession(projectId, chatSessionId, userMessage) {
     if (!chatSessionId) return;
-    const cliState = this._cliSessions.get(chatSessionId);
-    if (cliState?.messageCount > 0) return;
     const sessionMeta = chatStore.getSession(projectId, chatSessionId);
+    if ((sessionMeta?.messageCount || 0) > 1) return;
     if (sessionMeta?.manualName) return;
     try {
       const result = await llmProvider.generateResponse(
@@ -1807,7 +1962,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
           try { agentShellPool.killSession(shellId); } catch {}
         }
         this._activeShellSessions.delete(sessionId);
-        this._cliSessions.delete(sessionId);
+        this._clearCliState(sessionId, tool);
       }
       // For pinned (real) sessions, leave _cliSessions intact so Agent mode can --resume
     }
@@ -1883,9 +2038,6 @@ Reply with exactly one word: YES or NO.`,
       finalText = planText;
       loopsCompleted = 1;
 
-      // Show the plan to the user immediately after loop 1
-      this._addProgressMessage(projectId, sessionId, planText, broadcastFn, null, { transient: true });
-
       // ── Loop 2: Independent critic ──
       this._addProgressMessage(projectId, sessionId,
         `Reviewing the plan for gaps, edge cases, and improvements...`,
@@ -1906,8 +2058,6 @@ Reply with exactly one word: YES or NO.`,
       if (critiqueText) {
         finalText = critiqueText;
         loopsCompleted = 2;
-        // Show the reviewed plan immediately after loop 2
-        this._addProgressMessage(projectId, sessionId, critiqueText, broadcastFn, null, { transient: true });
       }
 
       // ── Gate: should we run a third pass? ──
@@ -1970,7 +2120,6 @@ Reply with exactly one word: YES or NO.`,
         if (synthesisText && !ctx.aborted) {
           finalText = synthesisText;
           loopsCompleted += 1; // count synthesis as an extra pass
-          this._addProgressMessage(projectId, sessionId, synthesisText, broadcastFn, null, { transient: true });
         }
       }
 
@@ -2018,6 +2167,10 @@ Reply with exactly one word: YES or NO.`,
       }
 
       this._persistContext(projectId, sessionId, userMessage, finalText);
+      this._learnDurableMemory(projectId, userMessage, finalText, { tool, mode: 'plan' }).catch(err => {
+        console.warn('[agentGateway] Plan memory learning skipped:', err.message);
+      });
+      return { success: true, content: finalText, tool, messageId: streamingMsg.id, planLoops: loopsCompleted };
 
     } catch (err) {
       if (err.message !== 'Aborted') {
@@ -2045,6 +2198,7 @@ Reply with exactly one word: YES or NO.`,
           metadata: { tool, planLoops: loopsCompleted },
         },
       });
+      return { success: !!finalText, content: errorContent, error: finalText ? null : err.message, tool, messageId: streamingMsg.id, planLoops: loopsCompleted };
     }
   }
 
@@ -2350,12 +2504,16 @@ NEEDS_USER`,
   _parseJsonToolOutput(cleanOutput, cmd) {
     let text = '';
     let sessionId = null;
+    let jsonErrorText = '';
+    let hasJsonError = false;
+    let hasResultText = false;
 
     // Strategy 1a: Claude format — {"type":"result", "session_id":"...", "result":"..."}
     const jsonMatch = cleanOutput.match(/\{"type"\s*:\s*"result"[^]*?"session_id"\s*:\s*"([^"]+)"[^]*?"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
     if (jsonMatch) {
       sessionId = jsonMatch[1];
       text = jsonMatch[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      hasResultText = true;
     }
 
     // Strategy 1b: Copilot format — {"type":"result", "sessionId":"...", "exitCode":0}
@@ -2377,8 +2535,21 @@ NEEDS_USER`,
             const json = JSON.parse(line.slice(idx));
             // Claude format: session_id / result fields at top level
             if (json.session_id) sessionId = json.session_id;
-            if (json.result) text = json.result;
-            if (json.type === 'result' && json.result) text = json.result;
+            if (json.result) {
+              text = json.result;
+              hasResultText = true;
+            }
+            if (json.type === 'result' && json.result) {
+              text = json.result;
+              hasResultText = true;
+            }
+            if (Array.isArray(json.errors) && json.errors.length > 0) {
+              hasJsonError = true;
+              jsonErrorText = json.errors
+                .map(err => typeof err === 'string' ? err : err?.message || String(err))
+                .filter(Boolean)
+                .join('\n');
+            }
             // Copilot format: sessionId (camelCase) in result events
             if (json.type === 'result' && json.sessionId) sessionId = json.sessionId;
             // Copilot format: response text in assistant.message events (data.content)
@@ -2392,6 +2563,9 @@ NEEDS_USER`,
       // Use assistant.message content if no result text was found (Copilot format)
       if (!text && lastAssistantMessage) {
         text = lastAssistantMessage;
+      }
+      if (!text && jsonErrorText) {
+        text = jsonErrorText;
       }
     }
     if (!text) {
@@ -2430,8 +2604,22 @@ NEEDS_USER`,
     // IMPORTANT: If we successfully extracted a result from JSON (sessionId means valid response),
     // only check the result text itself for errors, not the entire output.
     // This prevents post-response errors (rate limits after completion) from overwriting success.
-    const hasValidJsonResult = !!sessionId && text && text.length > 20 && !text.startsWith('⚠️');
+    const hasValidJsonResult = !!sessionId && hasResultText && text && text.length > 20 && !text.startsWith('⚠️');
     const textToCheckForErrors = hasValidJsonResult ? text : cleanOutput;
+
+    if (!hasValidJsonResult) {
+      const usageError = textToCheckForErrors.match(/(?:^|\n)\s*(?:error:\s*)?(?:unknown|invalid|unrecognized|unexpected) (?:option|argument)\b[^\n]*/i)
+        || textToCheckForErrors.match(/(?:^|\n)\s*(?:error:\s*)?(?:option|argument) requires (?:an )?argument\b[^\n]*/i)
+        || textToCheckForErrors.match(/(?:^|\n)\s*(?:error:\s*)?missing required (?:option|argument)\b[^\n]*/i);
+      if (usageError) {
+        isError = true;
+        errorType = 'usage';
+        text = usageError[0].trim().replace(/^error:\s*/i, 'Error: ');
+      } else if (hasJsonError) {
+        isError = true;
+        errorType = 'error';
+      }
+    }
 
     // Check for authentication errors
     if (/authentication_error|401.*Invalid authentication|Invalid authentication credentials/i.test(textToCheckForErrors)) {
@@ -2808,12 +2996,12 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
         role: 'progress',
         content,
         createdAt: new Date().toISOString(),
-        metadata: { tasks, live: true },
+        metadata: { tasks, live: true, transient: true },
       };
       broadcastFn({ type: 'chat-progress', projectId, message: msg });
       return;
     }
-    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks, live: true } });
+    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks, live: true, transient: false } });
     broadcastFn({ type: 'chat-progress', projectId, message: msg });
   }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
-import ChatInput from './ChatInput';
+import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from './ChatInput';
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch } from 'lucide-react';
@@ -170,6 +170,41 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function OrchestratorRunIndicator({ run }) {
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!run || !['running', 'planning', 'executing'].includes(run.status)) return undefined;
+    const interval = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [run?.id, run?.status]);
+
+  if (!run) return null;
+
+  const started = new Date(run.startedAt || Date.now()).getTime();
+  const elapsed = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const activeTasks = (run.tasks || []).filter(t => t.status === 'running' || t.status === 'retrying');
+  const done = (run.tasks || []).filter(t => t.status === 'completed').length;
+  const total = (run.tasks || []).length;
+
+  return (
+    <div className="mx-3 mb-2 rounded-lg border border-primary-500/25 bg-primary-500/10 px-3 py-2 text-xs text-primary-100">
+      <div className="flex items-center gap-2">
+        <Bot size={13} className="text-primary-300" />
+        <span className="font-medium">AI orchestrator</span>
+        <span className="text-primary-300">{run.phase || run.status}</span>
+        <span className="ml-auto tabular-nums text-primary-200">{mins}m {String(secs).padStart(2, '0')}s</span>
+      </div>
+      <div className="mt-1 text-[11px] text-primary-200/80">
+        {total > 0 ? `${done}/${total} tasks complete` : 'Planning tasks'}
+        {activeTasks.length > 0 ? ` · ${activeTasks.map(t => t.title).join(', ')}` : ''}
       </div>
     </div>
   );
@@ -385,7 +420,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
 
 /**
  * Individual session content - manages its own state independently.
- * Stays mounted when hidden to preserve scroll position and continue receiving updates.
+ * Hidden tabs stay mounted, but expensive side work waits until the tab is visible.
  */
 function ChatSessionContent({
   projectId,
@@ -408,6 +443,7 @@ function ChatSessionContent({
   const [queuedShellCommand, setQueuedShellCommand] = useState(null);
   const [searchResults, setSearchResults] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
+  const [orchestratorRun, setOrchestratorRun] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
 
   const messagesEndRef = useRef(null);
@@ -418,6 +454,7 @@ function ChatSessionContent({
   const streamingChunksRef = useRef('');
   const prevMessageCountRef = useRef(0);
   const isInitialLoadRef = useRef(true);
+  const messagesLoadedRef = useRef(false);
 
   // Scroll position tracking for jump buttons
   const [showJumpBottom, setShowJumpBottom] = useState(false);
@@ -468,27 +505,37 @@ function ChatSessionContent({
     onUnreadChange?.(projectId, sessionId, false);
   }, [projectId, sessionId, onSessionUpdate, onUnreadChange]);
 
-  // Load messages on mount
+  // Load messages only when visible. Hidden pinned tabs should not block the
+  // active session by reading chat files or recovering stale streams.
   useEffect(() => {
-    if (!projectId || !sessionId) return;
+    if (!projectId || !sessionId || !isVisible || messagesLoadedRef.current) return;
 
     // Reset scroll state for fresh load
     isInitialLoadRef.current = true;
     prevMessageCountRef.current = 0;
 
+    const controller = new AbortController();
+    let cancelled = false;
     setLoading(true);
-    fetch(`/api/projects/${projectId}/chat?limit=100&sessionId=${sessionId}`)
+    fetch(`/api/projects/${projectId}/chat?limit=100&sessionId=${sessionId}`, { signal: controller.signal })
       .then(r => r.json())
       .then(data => {
+        if (cancelled) return;
         const msgs = (data.messages || []).reverse();
         knownIdsRef.current = new Set(msgs.map(m => m.id));
         setMessages(msgs);
+        messagesLoadedRef.current = true;
         // Mark as read
         markCurrentSessionRead();
       })
-      .catch(() => setMessages([]))
-      .finally(() => setLoading(false));
-  }, [projectId, sessionId, markCurrentSessionRead]);
+      .catch(() => { if (!cancelled) setMessages([]); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [projectId, sessionId, isVisible, markCurrentSessionRead]);
 
   useEffect(() => {
     if (isVisible) markCurrentSessionRead();
@@ -496,7 +543,7 @@ function ChatSessionContent({
 
   // Attach to chat session for WebSocket events
   useEffect(() => {
-    if (!projectId || !sessionId || !wsRef?.current) return;
+    if (!projectId || !sessionId || !isVisible || !wsRef?.current) return;
 
     let cancelled = false;
     let retryCount = 0;
@@ -533,11 +580,11 @@ function ChatSessionContent({
       cancelled = true;
       wsRef?.current?.removeEventListener('open', handleOpen);
     };
-  }, [projectId, sessionId, wsRef]);
+  }, [projectId, sessionId, isVisible, wsRef]);
 
   // Handle WebSocket messages for THIS session
   useEffect(() => {
-    if (!wsRef?.current || !sessionId) return;
+    if (!wsRef?.current || !sessionId || !isVisible) return;
 
     const handleMessage = (event) => {
       let msg;
@@ -645,17 +692,34 @@ function ChatSessionContent({
         case 'chat-progress':
           // Progress messages during agent work - check sessionId inside message
           if (msg.message?.sessionId === sessionId && msg.message?.content) {
-            setStreamingMessage(prev => prev ? {
-              ...prev,
-              content: msg.message.content,
-              progressTimestamp: Date.now(),
-            } : {
-              id: 'progress-' + Date.now(),
-              role: 'progress',
-              content: msg.message.content,
-              createdAt: new Date().toISOString(),
-              streaming: true,
-            });
+            const isTransient = msg.message.metadata?.transient !== false;
+            if (isTransient) {
+              setStreamingMessage(prev => prev ? {
+                ...prev,
+                content: msg.message.content,
+                progressTimestamp: Date.now(),
+              } : {
+                id: 'progress-' + Date.now(),
+                role: 'progress',
+                content: msg.message.content,
+                createdAt: new Date().toISOString(),
+                streaming: true,
+              });
+            } else if (msg.message.id && !knownIdsRef.current.has(msg.message.id)) {
+              knownIdsRef.current.add(msg.message.id);
+              setMessages(prev => [...prev, msg.message]);
+              setStreamingMessage(null);
+            }
+          }
+          break;
+
+        case 'orchestrator-run':
+          if (msg.projectId === projectId && msg.sessionId === sessionId && msg.run) {
+            if (['completed', 'failed', 'blocked', 'cancelled'].includes(msg.run.status)) {
+              setOrchestratorRun(null);
+            } else {
+              setOrchestratorRun(msg.run);
+            }
           }
           break;
 
@@ -697,7 +761,7 @@ function ChatSessionContent({
 
     wsRef.current.addEventListener('message', handleMessage);
     return () => wsRef.current?.removeEventListener('message', handleMessage);
-  }, [wsRef, sessionId, projectId, isVisible, onSessionUpdate, onUnreadChange]);
+  }, [wsRef, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange]);
 
   // Detect stalled recovery after 30 seconds
   useEffect(() => {
@@ -840,6 +904,14 @@ function ChatSessionContent({
   const effectiveTool = session?.tool || tool || 'claude';
   const sessionModel = session?.model || '';
   const sessionEffort = session?.effort || '';
+  const selectedRolePromptIds = useMemo(
+    () => normalizeRolePromptIds(session?.activeRolePromptIds),
+    [session?.activeRolePromptIds],
+  );
+  const rolePromptInstructions = useMemo(
+    () => buildRolePromptInstructions(selectedRolePromptIds),
+    [selectedRolePromptIds],
+  );
   const settingsDisabled = agentBusy || Boolean(streamingMessage) || recoveryStatus.active;
 
   // Send message handler
@@ -908,6 +980,8 @@ function ChatSessionContent({
           sessionId,
           filePath: filePath || undefined,
           instruction,
+          activeRolePromptIds: selectedRolePromptIds,
+          rolePromptInstructions,
         }));
       }
       return;
@@ -925,7 +999,7 @@ function ChatSessionContent({
       sessionId,
       role: 'user',
       content: displayContent,
-      metadata: { mode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null },
+      metadata: { mode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null, activeRolePromptIds: selectedRolePromptIds },
       createdAt: new Date().toISOString(),
     };
     setMessages(prev => [...prev, optimistic]);
@@ -949,6 +1023,8 @@ function ChatSessionContent({
         tool: effectiveTool,
         model: sessionModel || null,
         effort: sessionEffort || null,
+        activeRolePromptIds: selectedRolePromptIds,
+        rolePromptInstructions,
       }));
     } else {
       setAgentBusy(false);
@@ -960,7 +1036,7 @@ function ChatSessionContent({
         createdAt: new Date().toISOString(),
       }]);
     }
-  }, [projectId, sessionId, mode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel]);
+  }, [projectId, sessionId, mode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -1019,13 +1095,15 @@ function ChatSessionContent({
         tool: effectiveTool,
         model: sessionModel || null,
         effort: sessionEffort || null,
+        activeRolePromptIds: selectedRolePromptIds,
+        rolePromptInstructions,
         targetMessageId: targetMessage.id,
         review: targetMessage?.metadata?.review || null,
         executeReviewedPlan: !!options.executeReviewedPlan,
       }));
       setAgentBusy(true);
     }
-  }, [messages, projectId, sessionId, wsRef, mode, effectiveTool, sessionModel, sessionEffort]);
+  }, [messages, projectId, sessionId, wsRef, mode, effectiveTool, sessionModel, sessionEffort, selectedRolePromptIds, rolePromptInstructions]);
 
   // Prepare display messages
   const sortedMessages = useMemo(() =>
@@ -1107,6 +1185,8 @@ function ChatSessionContent({
         />
       ) : (
         <>
+      <OrchestratorRunIndicator run={orchestratorRun} />
+
       {/* Messages */}
       <div ref={scrollContainerRef} onScroll={handleScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }} className="px-1 py-4">
         {loading ? (
@@ -1190,7 +1270,7 @@ function ChatSessionContent({
         )}
       </div>
 
-      {containerName && (
+      {isVisible && containerName && (
         <BranchBar
           containerName={containerName}
           session={session}
@@ -1208,6 +1288,8 @@ function ChatSessionContent({
         onSearch={handleSearch}
         busy={agentBusy}
         isVisible={isVisible}
+        selectedRolePromptIds={selectedRolePromptIds}
+        onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
       />
         </>
       )}
@@ -1374,7 +1456,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
 
         // Merge server data into local state.
         // Server is authoritative for metadata (messageCount, hasUnread, name),
-        // but we preserve local tool/model/effort to avoid clobbering optimistic
+        // but we preserve local composer settings to avoid clobbering optimistic
         // updates that are still in-flight (PATCH sent but response not yet back).
         setSessions(prev => {
           const localMap = new Map(prev.map(s => [s.id, s]));
@@ -1392,6 +1474,9 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               tool: local.tool,
               model: local.model,
               effort: local.effort,
+              activeRolePromptIds: Object.prototype.hasOwnProperty.call(local, 'activeRolePromptIds')
+                ? local.activeRolePromptIds
+                : serverSession.activeRolePromptIds,
             };
           });
           return [...preservedLocal, ...mergedLatest];

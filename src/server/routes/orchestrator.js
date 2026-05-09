@@ -5,6 +5,7 @@
 
 import express from 'express';
 import { orchestrator } from '../orchestrator.js';
+import { agentOrchestrator } from '../agentOrchestrator.js';
 import { ollamaWorkspaceOrchestrator } from '../ollamaWorkspaceOrchestrator.js';
 import { ptyManager } from '../ptyManager.js';
 import { activityFeed } from '../activityFeed.js';
@@ -12,6 +13,36 @@ import { gitManager } from '../gitManager.js';
 import Project from '../models/Project.js';
 
 const router = express.Router();
+
+router.get('/runs/:projectId/:sessionId', (req, res) => {
+  try {
+    const { projectId, sessionId } = req.params;
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 20, 100));
+    res.json({ runs: agentOrchestrator.getRunsForSession(projectId, sessionId, limit) });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get orchestrator runs', message: error.message });
+  }
+});
+
+router.get('/runs/:runId', (req, res) => {
+  try {
+    const run = agentOrchestrator.getRun(req.params.runId);
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    res.json({ run, tasks: agentOrchestrator.getTasks(run.id), events: agentOrchestrator.getEvents(run.id) });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get orchestrator run', message: error.message });
+  }
+});
+
+router.post('/runs/:runId/abort', (req, res) => {
+  try {
+    const aborted = agentOrchestrator.abortRun(req.params.runId);
+    if (!aborted) return res.status(404).json({ error: 'Active run not found' });
+    res.json({ aborted: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to abort orchestrator run', message: error.message });
+  }
+});
 
 /**
  * POST /api/orchestrator/start - Start autonomous execution of a plan

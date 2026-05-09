@@ -6,7 +6,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import { getDB } from './db.js';
+import { sqliteStore } from './sqliteStore.js';
 
 /** @typedef {'pattern' | 'preference' | 'failure' | 'success' | 'convention' | 'dependency'} MemoryType */
 /** @typedef {'build' | 'test' | 'git' | 'style' | 'architecture'} MemoryCategory */
@@ -44,16 +44,11 @@ class MemoryStore {
    * @returns {Promise<Memory|null>} The created memory or null if duplicate
    */
   async learn(projectId, memory) {
-    const db = getDB();
-
-    if (!db.data.memories) {
-      db.data.memories = [];
-    }
-
     // Check for duplicates among existing project memories
-    const projectMemories = db.data.memories.filter(
-      (m) => m.projectId === projectId
-    );
+    const projectMemories = sqliteStore.db
+      .prepare('SELECT * FROM memories WHERE project_id = ?')
+      .all(projectId)
+      .map(sqliteStore.rowToMemory);
 
     for (const existing of projectMemories) {
       if (this._isSimilar(memory.content, existing.content)) {
@@ -82,10 +77,7 @@ class MemoryStore {
       relatedFiles: memory.relatedFiles || [],
     };
 
-    db.data.memories.push(entry);
-    await db.write();
-
-    return entry;
+    return sqliteStore.saveMemory(entry);
   }
 
   /**
@@ -100,42 +92,55 @@ class MemoryStore {
    * @returns {Memory[]} Matching memories sorted by confidence desc, then recency
    */
   recall(projectId, options = {}) {
-    const db = getDB();
     const {
       categories = null,
       types = null,
       limit = 20,
       minConfidence = 0.3,
+      query = null,
     } = options;
 
-    if (!db.data.memories) {
-      return [];
+    const safeLimit = Math.max(1, Math.min(parseInt(limit, 10) || 20, 100));
+    const params = [projectId, minConfidence];
+    const where = ['m.project_id = ?', 'm.confidence >= ?'];
+
+    if (categories?.length) {
+      where.push(`m.category IN (${categories.map(() => '?').join(',')})`);
+      params.push(...categories);
+    }
+    if (types?.length) {
+      where.push(`m.type IN (${types.map(() => '?').join(',')})`);
+      params.push(...types);
     }
 
-    let results = db.data.memories.filter((m) => {
-      if (m.projectId !== projectId) return false;
-      if (m.confidence < minConfidence) return false;
-      if (categories && !categories.includes(m.category)) return false;
-      if (types && !types.includes(m.type)) return false;
-      return true;
-    });
+    const ftsQuery = sqliteStore.ftsQueryFromText(query);
+    let rows;
+    if (ftsQuery) {
+      rows = sqliteStore.db.prepare(`
+        SELECT m.*
+        FROM memories_fts f
+        JOIN memories m ON m.id = f.memory_id
+        WHERE memories_fts MATCH ? AND ${where.join(' AND ')}
+        ORDER BY bm25(memories_fts), m.confidence DESC, m.updated_at DESC
+        LIMIT ?
+      `).all(ftsQuery, ...params, safeLimit);
+    } else {
+      rows = sqliteStore.db.prepare(`
+        SELECT m.* FROM memories m
+        WHERE ${where.join(' AND ')}
+        ORDER BY m.confidence DESC, m.updated_at DESC
+        LIMIT ?
+      `).all(...params, safeLimit);
+    }
 
-    // Sort by confidence descending, then by recency (updatedAt descending)
-    results.sort((a, b) => {
-      if (b.confidence !== a.confidence) {
-        return b.confidence - a.confidence;
-      }
-      return new Date(b.updatedAt) - new Date(a.updatedAt);
-    });
-
-    // Apply limit
-    results = results.slice(0, limit);
+    const results = rows.map(sqliteStore.rowToMemory);
 
     // Update usage stats for returned entries (fire-and-forget)
     const now = new Date().toISOString();
     for (const memory of results) {
       memory.usageCount += 1;
       memory.lastUsedAt = now;
+      sqliteStore.db.prepare('UPDATE memories SET usage_count = usage_count + 1, last_used_at = ? WHERE id = ?').run(now, memory.id);
     }
 
     return results;
@@ -227,8 +232,8 @@ class MemoryStore {
    * @param {string[]|null} [options.categories] - Filter by categories
    * @returns {string} Formatted context string, or empty string if no memories
    */
-  buildContextForLLM(projectId, { maxTokens = 2000, categories = null } = {}) {
-    const memories = this.recall(projectId, { categories });
+  buildContextForLLM(projectId, { maxTokens = 2000, categories = null, query = null } = {}) {
+    const memories = this.recall(projectId, { categories, query, limit: 30 });
 
     if (memories.length === 0) {
       return '';
@@ -260,22 +265,12 @@ class MemoryStore {
    * @returns {Promise<Memory|null>} The updated memory, or null if not found
    */
   async reinforce(memoryId) {
-    const db = getDB();
-
-    if (!db.data.memories) {
-      return null;
-    }
-
-    const memory = db.data.memories.find((m) => m.id === memoryId);
-    if (!memory) {
-      return null;
-    }
-
+    const row = sqliteStore.db.prepare('SELECT * FROM memories WHERE id = ?').get(memoryId);
+    if (!row) return null;
+    const memory = sqliteStore.rowToMemory(row);
     memory.confidence = Math.min(1.0, memory.confidence + 0.1);
     memory.updatedAt = new Date().toISOString();
-
-    await db.write();
-
+    sqliteStore.saveMemory(memory);
     return memory;
   }
 
@@ -285,15 +280,9 @@ class MemoryStore {
    * @returns {Memory[]} All memories for the project, sorted by creation date descending
    */
   getAll(projectId) {
-    const db = getDB();
-
-    if (!db.data.memories) {
-      return [];
-    }
-
-    return db.data.memories
-      .filter((m) => m.projectId === projectId)
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    return sqliteStore.db.prepare('SELECT * FROM memories WHERE project_id = ? ORDER BY created_at DESC')
+      .all(projectId)
+      .map(sqliteStore.rowToMemory);
   }
 
   /**
@@ -302,20 +291,10 @@ class MemoryStore {
    * @returns {Promise<boolean>} True if deleted, false if not found
    */
   async remove(memoryId) {
-    const db = getDB();
-
-    if (!db.data.memories) {
-      return false;
-    }
-
-    const index = db.data.memories.findIndex((m) => m.id === memoryId);
-    if (index === -1) {
-      return false;
-    }
-
-    db.data.memories.splice(index, 1);
-    await db.write();
-
+    const existing = sqliteStore.db.prepare('SELECT id FROM memories WHERE id = ?').get(memoryId);
+    if (!existing) return false;
+    sqliteStore.db.prepare('DELETE FROM memories WHERE id = ?').run(memoryId);
+    sqliteStore.db.prepare('DELETE FROM memories_fts WHERE memory_id = ?').run(memoryId);
     return true;
   }
 
@@ -329,33 +308,13 @@ class MemoryStore {
    * @returns {Promise<number>} Number of memories pruned
    */
   async prune(projectId, { maxAgeDays = 90, minConfidence = 0.2 } = {}) {
-    const db = getDB();
-
-    if (!db.data.memories) {
-      return 0;
-    }
-
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - maxAgeDays);
-
-    const before = db.data.memories.length;
-
-    db.data.memories = db.data.memories.filter((m) => {
-      if (m.projectId !== projectId) return true; // Keep other projects' memories
-      const createdAt = new Date(m.createdAt);
-      const isOld = createdAt < cutoffDate;
-      const isLowConfidence = m.confidence < minConfidence;
-      // Remove only if both old AND low-confidence
-      return !(isOld && isLowConfidence);
-    });
-
-    const pruned = before - db.data.memories.length;
-
-    if (pruned > 0) {
-      await db.write();
-    }
-
-    return pruned;
+    const rows = sqliteStore.db.prepare(
+      'SELECT id FROM memories WHERE project_id = ? AND created_at < ? AND confidence < ?'
+    ).all(projectId, cutoffDate.toISOString(), minConfidence);
+    for (const row of rows) await this.remove(row.id);
+    return rows.length;
   }
 
   /**
