@@ -520,6 +520,102 @@ RULES:
     }
   }
 
+  async _createChangedFileTracker(projectId, chatSessionId) {
+    let target = null;
+
+    try {
+      const { default: Project } = await import('./models/Project.js');
+      const project = Project.findById(projectId);
+      if (!project) return null;
+
+      const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
+      const sessionBranch = sessionMeta?.branch || null;
+
+      if (project.containerName) {
+        const { containerManager } = await import('./containerManager.js');
+        const safeBranch = sessionBranch?.replace(/[^a-zA-Z0-9._-]/g, '-');
+        target = {
+          type: 'container',
+          containerName: project.containerName,
+          workDir: safeBranch ? `/workspace/.worktrees/${safeBranch}` : (containerManager.getWorkDir(project.containerName) || '/workspace'),
+          containerManager,
+        };
+      } else if (project.folderPath) {
+        target = { type: 'local', workDir: project.folderPath };
+      }
+    } catch (err) {
+      console.warn('[agentGateway] Changed-file tracker disabled:', err.message);
+      return null;
+    }
+
+    if (!target) return null;
+    const baseline = this._readChangedFileSnapshot(target);
+    if (!baseline) return null;
+
+    const baselineByPath = new Map(baseline.map(file => [file.path, file.status]));
+    let lastSignature = '';
+    let lastFiles = [];
+
+    return {
+      poll: () => {
+        const current = this._readChangedFileSnapshot(target) || [];
+        const files = current.filter(file => baselineByPath.get(file.path) !== file.status);
+        const signature = files.map(file => `${file.status}:${file.path}`).join('|');
+        const changed = signature !== lastSignature;
+        lastSignature = signature;
+        lastFiles = files;
+        return { files, changed };
+      },
+      current: () => lastFiles,
+    };
+  }
+
+  _readChangedFileSnapshot(target) {
+    const command = `git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git status --porcelain=v1 --untracked-files=all 2>/dev/null`;
+    let output = null;
+
+    try {
+      if (target.type === 'container') {
+        output = target.containerManager.execInContainer(
+          target.containerName,
+          `cd ${this._quoteCliArg(target.workDir)} && ${command}`,
+          { timeout: 5000 },
+        );
+      } else if (target.type === 'local') {
+        output = execSync(`cd ${this._quoteCliArg(target.workDir)} && ${command}`, {
+          encoding: 'utf8',
+          stdio: 'pipe',
+          timeout: 5000,
+        }).trim();
+      }
+    } catch {
+      return null;
+    }
+
+    if (!output) return [];
+    return output.split('\n')
+      .map(line => this._parseGitStatusLine(line))
+      .filter(Boolean)
+      .slice(0, 200);
+  }
+
+  _parseGitStatusLine(line) {
+    if (!line || line.length < 4) return null;
+    const rawStatus = line.slice(0, 2);
+    const rawPath = line.slice(3).trim();
+    if (!rawPath) return null;
+    const displayPath = rawPath.includes(' -> ') ? rawPath.split(' -> ').pop().trim() : rawPath;
+
+    let status = rawStatus.trim() || 'M';
+    if (rawStatus === '??') status = 'A';
+    else if (rawStatus.includes('D')) status = 'D';
+    else if (rawStatus.includes('R')) status = 'R';
+    else if (rawStatus.includes('A')) status = 'A';
+    else if (rawStatus.includes('M')) status = 'M';
+
+    return { path: displayPath, status };
+  }
+
   // ── Send to CLI tool (Claude/Copilot/Aider) ──
 
   /**
@@ -553,6 +649,10 @@ RULES:
       tool,
       prompt: message,
     });
+
+    const fileTracker = mode === 'agent'
+      ? await this._createChangedFileTracker(projectId, chatSessionId)
+      : null;
 
     // Set up job event handlers for this operation
     const jobProgressHandler = ({ job: j, progress }) => {
@@ -600,6 +700,7 @@ RULES:
         const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode, {
           job, // Pass job for output recording
           distilledContext, // Pre-computed context brief for follow-up enrichment
+          fileTracker,
           // Callback to persist chunks as they arrive (for recovery)
           // NOTE: Raw chunks are saved to disk but NOT broadcast to client
           // Client only sees progress messages and the final cleaned response
@@ -627,6 +728,7 @@ RULES:
           });
           const logContext = this._detectLogRequest(finalContent);
           const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
+          const changedFiles = fileTracker?.poll().files || [];
 
           // Complete the job
           jobManager.completeJob(job.id, finalContent);
@@ -642,6 +744,7 @@ RULES:
               jobId: job.id,
               rawOutput: rawForDisplay.slice(-8000),
               attempts: attempt,
+              ...(changedFiles.length > 0 ? { changedFiles } : {}),
               ...(reviewMeta ? { review: reviewMeta } : {}),
               ...(logContext ? { logContext } : {}),
             },
@@ -662,6 +765,7 @@ RULES:
                 jobId: job.id,
                 rawOutput: rawForDisplay.slice(-8000),
                 attempts: attempt,
+                ...(changedFiles.length > 0 ? { changedFiles } : {}),
                 ...(reviewMeta ? { review: reviewMeta } : {}),
                 ...(logContext ? { logContext } : {}),
               },
@@ -685,7 +789,7 @@ RULES:
           this._learnDurableMemory(projectId, message, finalContent, { tool, mode }).catch(err => {
             console.warn('[agentGateway] Memory learning skipped:', err.message);
           });
-          return { success: true, content: finalContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, rawOutput: rawForDisplay.slice(-8000) };
+          return { success: true, content: finalContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, rawOutput: rawForDisplay.slice(-8000), changedFiles };
         }
 
         if (result.retry && attempt < MAX_ATTEMPTS) {
@@ -738,6 +842,7 @@ RULES:
               ? result.error
               : `Error: ${result.error}`)
           : result.displayOutput || `No response from ${tool}. Check Internal Console.`;
+        const changedFiles = fileTracker?.poll().files || [];
 
         // Fail the job
         jobManager.failJob(job.id, failureContent);
@@ -747,7 +852,7 @@ RULES:
           sessionId: chatSessionId,
           messageId: streamingMsg.id,
           finalContent: failureContent,
-          metadata: { tool, jobId: job.id, error: true, attempts: attempt },
+          metadata: { tool, jobId: job.id, error: true, attempts: attempt, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
         });
 
         broadcastFn({
@@ -759,7 +864,7 @@ RULES:
           message: {
             ...streamingMsg,
             content: failureContent,
-            metadata: { tool, jobId: job.id, error: true },
+            metadata: { tool, jobId: job.id, error: true, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
           },
         });
 
@@ -775,7 +880,7 @@ RULES:
             });
           }
         }
-        return { success: false, error: failureContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, retryType: result.retryType || 'failed' };
+        return { success: false, error: failureContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, retryType: result.retryType || 'failed', changedFiles };
       }
     } finally {
       // Clean up event handler
@@ -791,7 +896,7 @@ RULES:
    * @param {Function} streamOpts.onChunk - Callback for each output chunk (for persistence)
    */
   async _attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
-    const { job, onChunk, distilledContext } = streamOpts;
+    const { job, onChunk, distilledContext, fileTracker } = streamOpts;
 
     // Look up session branch for worktree CWD override
     const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
@@ -835,7 +940,24 @@ RULES:
     let idleRounds = 0;
     let lastOutputTime = Date.now();
     let lastProgressTime = 0;
+    let lastFilePollTime = 0;
     let resultEventSeen = false;
+
+    const maybeBroadcastFileChanges = (force = false) => {
+      if (!fileTracker || !broadcastFn) return;
+      const now = Date.now();
+      if (!force && now - lastFilePollTime < 5000) return;
+      lastFilePollTime = now;
+      const snapshot = fileTracker.poll();
+      if (!snapshot.changed || snapshot.files.length === 0) return;
+      broadcastFn({
+        type: 'session-file-changes',
+        projectId,
+        sessionId: chatSessionId,
+        jobId: job?.id || null,
+        files: snapshot.files,
+      });
+    };
 
     // ── Background task tracking ──
     // When Claude launches agents with run_in_background:true, it may return
@@ -859,6 +981,7 @@ RULES:
       if (chunk.length === 0) {
         idleRounds++;
         const silenceMs = now - lastOutputTime;
+        maybeBroadcastFileChanges();
 
         // Show periodic progress for long-running operations
         if (silenceMs > PROGRESS_INTERVAL_MS && totalOutput.length > 0 && now - lastProgressTime > PROGRESS_INTERVAL_MS) {
@@ -900,6 +1023,7 @@ RULES:
       idleRounds = 0;
       lastOutputTime = now;
       totalOutput += chunk;
+      maybeBroadcastFileChanges();
 
       // Persist chunk if callback provided (streaming persistence + job tracking)
       if (onChunk) {
@@ -1023,6 +1147,8 @@ RULES:
         }
       }
     }
+
+    maybeBroadcastFileChanges(true);
 
     // ── Process output ──
     const cleanOutput = this._stripAnsi(totalOutput).trim();

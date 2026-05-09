@@ -1,5 +1,5 @@
 import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText } from 'lucide-react';
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 
 const ROLE_STYLES = {
   user: { align: 'justify-end', bubble: 'bg-blue-600/15 border-blue-500/20', icon: User, label: 'You' },
@@ -197,8 +197,33 @@ function renderMarkdown(text) {
   return elements;
 }
 
-export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry }) {
+function useTypedContent(content, enabled) {
+  const fullText = String(content || '');
+  const [typedText, setTypedText] = useState(enabled ? '' : fullText);
+
+  useEffect(() => {
+    if (!enabled) {
+      setTypedText(fullText);
+      return undefined;
+    }
+
+    let index = 0;
+    setTypedText('');
+    const timer = setInterval(() => {
+      index = Math.min(fullText.length, index + 8);
+      setTypedText(fullText.slice(0, index));
+      if (index >= fullText.length) clearInterval(timer);
+    }, 8);
+
+    return () => clearInterval(timer);
+  }, [enabled, fullText]);
+
+  return typedText;
+}
+
+export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry, animateContent = false }) {
   const [showRaw, setShowRaw] = useState(false);
+  const [showChangedFiles, setShowChangedFiles] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
   const [showLogInput, setShowLogInput] = useState(false);
   const shellPrompt = message.metadata?.shell?.prompt;
@@ -212,6 +237,9 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const tasks = message.metadata?.tasks;
   const tool = message.metadata?.tool;
   const rawOutput = message.metadata?.rawOutput;
+  const changedFiles = Array.isArray(message.metadata?.changedFiles)
+    ? message.metadata.changedFiles.filter(file => file?.path)
+    : [];
   const plan = message.metadata?.plan;
   const suggestions = message.metadata?.suggestions;
   const review = message.metadata?.review;
@@ -234,8 +262,11 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
     );
   }
 
+  const typedContent = useTypedContent(message.content, animateContent && (message.role === 'agent' || message.role === 'error'));
+  const isTyping = animateContent && typedContent.length < String(message.content || '').length;
+
   // Memoize markdown rendering
-  const renderedContent = useMemo(() => renderMarkdown(message.content), [message.content]);
+  const renderedContent = useMemo(() => renderMarkdown(typedContent), [typedContent]);
 
   const handleApprovePlan = () => {
     if (wsRef?.current?.readyState === WebSocket.OPEN) {
@@ -283,6 +314,7 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
         {/* Content — rendered as markdown */}
         <div className="text-sm leading-relaxed break-words">
           {renderedContent}
+          {isTyping && <span className="ml-0.5 inline-block h-4 w-1 translate-y-0.5 animate-pulse bg-surface-300" />}
         </div>
 
         {shellPrompt?.responses?.length > 0 && (
@@ -327,17 +359,38 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
           </div>
         )}
 
-        {/* Raw output toggle */}
-        {rawOutput && (
-          <button onClick={() => setShowRaw(!showRaw)} className="flex items-center gap-1 mt-2 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
-            {showRaw ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-            Raw output
-          </button>
+        {(rawOutput || changedFiles.length > 0) && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {rawOutput && (
+              <button onClick={() => setShowRaw(!showRaw)} className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
+                {showRaw ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                Raw output
+              </button>
+            )}
+            {changedFiles.length > 0 && (
+              <button onClick={() => setShowChangedFiles(!showChangedFiles)} className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
+                {showChangedFiles ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                Files edited in this session ({changedFiles.length})
+              </button>
+            )}
+          </div>
         )}
         {showRaw && rawOutput && (
           <pre className="mt-1 p-2 bg-surface-950/80 rounded border border-surface-700/20 text-[11px] font-mono text-surface-400 overflow-x-auto max-h-48 overflow-y-auto">
             {rawOutput}
           </pre>
+        )}
+        {showChangedFiles && changedFiles.length > 0 && (
+          <div className="mt-1 rounded border border-surface-700/20 bg-surface-950/50 p-2">
+            <div className="grid gap-1 sm:grid-cols-2">
+              {changedFiles.map(file => (
+                <div key={`${file.status}:${file.path}`} className="flex min-w-0 items-center gap-2 font-mono text-[11px] text-surface-300">
+                  <span className="w-5 flex-shrink-0 rounded bg-primary-500/10 px-1 text-center text-[10px] text-primary-300">{file.status || 'M'}</span>
+                  <span className="truncate" title={file.path}>{file.path}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
         {review?.type === 'prd-review' && (

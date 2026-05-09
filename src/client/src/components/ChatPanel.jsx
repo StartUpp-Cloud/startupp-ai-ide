@@ -49,6 +49,111 @@ function formatJobProgress(progress) {
   return text;
 }
 
+function formatProgressLineTime(value) {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function mergeChangedFiles(current = [], incoming = []) {
+  const byPath = new Map();
+  for (const file of current) {
+    if (file?.path) byPath.set(file.path, { path: file.path, status: file.status || 'M' });
+  }
+  for (const file of incoming) {
+    if (file?.path) byPath.set(file.path, { path: file.path, status: file.status || 'M' });
+  }
+  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path)).slice(0, 80);
+}
+
+function useTypedLine(text, enabled) {
+  const fullText = String(text || '');
+  const [typedText, setTypedText] = useState(enabled ? '' : fullText);
+
+  useEffect(() => {
+    if (!enabled) {
+      setTypedText(fullText);
+      return undefined;
+    }
+
+    let index = 0;
+    setTypedText('');
+    const timer = setInterval(() => {
+      index = Math.min(fullText.length, index + 6);
+      setTypedText(fullText.slice(0, index));
+      if (index >= fullText.length) clearInterval(timer);
+    }, 12);
+
+    return () => clearInterval(timer);
+  }, [enabled, fullText]);
+
+  return typedText;
+}
+
+function ProgressTranscriptLine({ entry, latest }) {
+  const text = useTypedLine(entry.content, latest);
+  const isTyping = latest && text.length < String(entry.content || '').length;
+
+  return (
+    <div className="flex gap-2 border-t border-surface-700/30 py-1.5 first:border-t-0 first:pt-0 last:pb-0">
+      <span className="w-[70px] flex-shrink-0 font-mono text-[10px] tabular-nums text-surface-500">
+        {formatProgressLineTime(entry.createdAt)}
+      </span>
+      <span className="min-w-0 flex-1 text-surface-300">
+        {text}
+        {isTyping && <span className="ml-0.5 inline-block h-3 w-1 translate-y-0.5 animate-pulse bg-primary-300" />}
+      </span>
+    </div>
+  );
+}
+
+function ProgressTranscriptBubble({ entries, changedFiles = [], wsRef, projectId, sessionId }) {
+  if (!entries.length) return null;
+
+  const handleStop = () => {
+    if (wsRef?.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'chat-stop', projectId, sessionId }));
+    }
+  };
+
+  return (
+    <div className="flex justify-start mb-3 px-3">
+      <div className="w-full max-w-[85%] rounded-lg border border-surface-700/35 bg-surface-900/45 px-3 py-2">
+        <div className="mb-2 flex items-center gap-2 text-[11px] text-surface-500">
+          <Loader size={12} className="animate-spin text-primary-400" />
+          <span>Live progress</span>
+          <span className="text-surface-600">{entries.length} update{entries.length === 1 ? '' : 's'}</span>
+          <button
+            onClick={handleStop}
+            className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-red-400 transition-colors hover:bg-red-500/10"
+          >
+            <Square size={9} />
+            Stop
+          </button>
+        </div>
+        <div className="font-mono text-[11px] leading-relaxed">
+          {entries.map((entry, index) => (
+            <ProgressTranscriptLine key={entry.id} entry={entry} latest={index === entries.length - 1} />
+          ))}
+        </div>
+        {changedFiles.length > 0 && (
+          <div className="mt-2 border-t border-surface-700/35 pt-2">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">Files edited in this session</div>
+            <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+              {changedFiles.slice(0, 16).map(file => (
+                <span key={`${file.status}:${file.path}`} className="rounded border border-surface-700/60 bg-surface-950/45 px-1.5 py-0.5 font-mono text-[10px] text-surface-300">
+                  <span className="mr-1 text-primary-300">{file.status}</span>{file.path}
+                </span>
+              ))}
+              {changedFiles.length > 16 && <span className="px-1.5 py-0.5 text-[10px] text-surface-500">+{changedFiles.length - 16} more</span>}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function mergeSessionLists(current, incoming) {
   const byId = new Map(current.map(session => [session.id, session]));
   const currentIds = new Set(current.map(session => session.id));
@@ -443,6 +548,9 @@ function ChatSessionContent({
   const [queuedShellCommand, setQueuedShellCommand] = useState(null);
   const [searchResults, setSearchResults] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
+  const [liveProgressEntries, setLiveProgressEntries] = useState([]);
+  const [liveChangedFiles, setLiveChangedFiles] = useState([]);
+  const [typingMessageIds, setTypingMessageIds] = useState(() => new Set());
   const [orchestratorRun, setOrchestratorRun] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
 
@@ -459,6 +567,32 @@ function ChatSessionContent({
   // Scroll position tracking for jump buttons
   const [showJumpBottom, setShowJumpBottom] = useState(false);
   const [showJumpTop, setShowJumpTop] = useState(false);
+
+  const appendLiveProgressEntry = useCallback((message) => {
+    const content = String(message?.content || '').trim();
+    if (!content) return;
+
+    const id = message?.id || `live-progress-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const createdAt = message?.createdAt || new Date().toISOString();
+
+    setLiveProgressEntries(prev => {
+      if (prev.some(entry => entry.id === id)) return prev;
+      const last = prev[prev.length - 1];
+      if (last?.content === content && Math.abs(new Date(createdAt).getTime() - new Date(last.createdAt).getTime()) < 3000) {
+        return prev;
+      }
+      return [...prev, { id, content, createdAt }].slice(-80);
+    });
+  }, []);
+
+  const markMessageForTyping = useCallback((message) => {
+    if (!message?.id || (message.role !== 'agent' && message.role !== 'error')) return;
+    setTypingMessageIds(prev => {
+      const next = new Set(prev);
+      next.add(message.id);
+      return next;
+    });
+  }, []);
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -599,9 +733,15 @@ function ChatSessionContent({
             knownIdsRef.current.add(msg.message.id);
             if (msg.message.role === 'agent' || msg.message.role === 'error') {
               setStreamingMessage(null);
+              setLiveProgressEntries([]);
+              setLiveChangedFiles([]);
+              markMessageForTyping(msg.message);
               streamingChunksRef.current = '';
               setAgentBusy(false);
               setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
+            } else if (msg.message.role === 'user') {
+              setLiveProgressEntries([]);
+              setLiveChangedFiles([]);
             }
             setMessages(prev => {
               const filtered = prev.filter(m => {
@@ -649,6 +789,11 @@ function ChatSessionContent({
           streamingChunksRef.current = '';
           if (msg.message) {
             knownIdsRef.current.add(msg.message.id);
+            if (msg.message.role === 'agent' || msg.message.role === 'error') {
+              setLiveProgressEntries([]);
+              setLiveChangedFiles([]);
+              markMessageForTyping(msg.message);
+            }
             setMessages(prev => [
               ...prev.filter(m => m.id !== msg.messageId && m.id !== msg.message.id),
               msg.message,
@@ -694,21 +839,10 @@ function ChatSessionContent({
           if (msg.message?.sessionId === sessionId && msg.message?.content) {
             const isTransient = msg.message.metadata?.transient !== false;
             if (isTransient) {
-              setStreamingMessage(prev => prev ? {
-                ...prev,
-                content: msg.message.content,
-                progressTimestamp: Date.now(),
-              } : {
-                id: 'progress-' + Date.now(),
-                role: 'progress',
-                content: msg.message.content,
-                createdAt: new Date().toISOString(),
-                streaming: true,
-              });
+              appendLiveProgressEntry(msg.message);
             } else if (msg.message.id && !knownIdsRef.current.has(msg.message.id)) {
               knownIdsRef.current.add(msg.message.id);
               setMessages(prev => [...prev, msg.message]);
-              setStreamingMessage(null);
             }
           }
           break;
@@ -725,11 +859,20 @@ function ChatSessionContent({
 
         case 'job-progress':
           if (msg.progress) {
-            setStreamingMessage(prev => prev ? {
-              ...prev,
+            if (Array.isArray(msg.progress.changedFiles)) {
+              setLiveChangedFiles(prev => mergeChangedFiles(prev, msg.progress.changedFiles));
+            }
+            appendLiveProgressEntry({
+              id: `job-${msg.progress.jobId || msg.progress.id || ''}-${msg.progress.status || ''}-${msg.progress.updatedAt || Date.now()}`,
               content: formatJobProgress(msg.progress),
-              progress: msg.progress,
-            } : null);
+              createdAt: msg.progress.updatedAt || msg.progress.timestamp || new Date().toISOString(),
+            });
+          }
+          break;
+
+        case 'session-file-changes':
+          if (msg.projectId === projectId && (!msg.sessionId || msg.sessionId === sessionId) && Array.isArray(msg.files)) {
+            setLiveChangedFiles(prev => mergeChangedFiles(prev, msg.files));
           }
           break;
 
@@ -761,7 +904,7 @@ function ChatSessionContent({
 
     wsRef.current.addEventListener('message', handleMessage);
     return () => wsRef.current?.removeEventListener('message', handleMessage);
-  }, [wsRef, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange]);
+  }, [wsRef, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange, appendLiveProgressEntry, markMessageForTyping]);
 
   // Detect stalled recovery after 30 seconds
   useEffect(() => {
@@ -869,18 +1012,14 @@ function ChatSessionContent({
 
             const hasNewFinalAfterUser = newFinal.some(m => m.createdAt > lastUserTime);
 
-            if (newProgress.length > 0) {
-              result = result.filter((m, i) => !(m.role === 'progress' && i > lastUserIdx));
-              result.push(newProgress[newProgress.length - 1]);
-            }
-
             if (hasNewFinalAfterUser) {
               result = result.filter(m => m.role !== 'progress' || result.indexOf(m) <= lastUserIdx);
               busyClearRef.current = true;
               finalClearRef.current = true;
+              for (const finalMessage of newFinal) markMessageForTyping(finalMessage);
             }
 
-            result.push(...newFinal, ...newOther);
+            result.push(...newProgress, ...newFinal, ...newOther);
             return result;
           });
 
@@ -891,6 +1030,8 @@ function ChatSessionContent({
           if (finalClearRef.current) {
             finalClearRef.current = false;
             setStreamingMessage(null);
+            setLiveProgressEntries([]);
+            setLiveChangedFiles([]);
             streamingChunksRef.current = '';
             setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
           }
@@ -899,7 +1040,7 @@ function ChatSessionContent({
     }, 2000);
 
     return () => clearInterval(poll);
-  }, [projectId, sessionId, isVisible]);
+  }, [projectId, sessionId, isVisible, markMessageForTyping]);
 
   const effectiveTool = session?.tool || tool || 'claude';
   const sessionModel = session?.model || '';
@@ -952,6 +1093,9 @@ function ChatSessionContent({
       }
       return;
     }
+
+    setLiveProgressEntries([]);
+    setLiveChangedFiles([]);
 
     // ── /logs command: capture logs from container and share with agent ──
     const logsMatch = content.match(/^\/logs\s*(.*)?$/i);
@@ -1081,6 +1225,9 @@ function ChatSessionContent({
     let retryContent = (priorUser?.content || targetMessage.content || '').trim();
     if (!retryContent) return;
 
+    setLiveProgressEntries([]);
+    setLiveChangedFiles([]);
+
     if (options.executeReviewedPlan && targetMessage?.metadata?.review?.docPath) {
       retryContent += `\n\nApproved. Execute the plan from ${targetMessage.metadata.review.docPath}. Start implementation now.`;
     }
@@ -1111,36 +1258,48 @@ function ChatSessionContent({
     [messages]
   );
 
-  const filteredMessages = useMemo(() => {
-    const lastUserMsg = [...sortedMessages].reverse().find(m => m.role === 'user');
-    const lastUserTime = lastUserMsg ? new Date(lastUserMsg.createdAt).getTime() : 0;
-    const recent = sortedMessages.filter(m =>
-      m.role !== 'progress' || new Date(m.createdAt).getTime() > lastUserTime
-    );
+  const progressTranscriptEntries = useMemo(() => {
+    if (searchResults) return [];
 
-    // De-duplicate noisy repeated progress updates while keeping final outputs/messages.
-    const seenProgressAt = new Map();
-    const deduped = [];
-    for (const m of recent) {
-      if (m.role !== 'progress') {
-        deduped.push(m);
-        continue;
-      }
+    const lastUserIndex = [...sortedMessages].map(m => m.role).lastIndexOf('user');
+    if (lastUserIndex < 0) return [];
 
-      const key = (m.content || '').trim();
-      if (!key) continue;
+    const lastUser = sortedMessages[lastUserIndex];
+    const lastUserTime = new Date(lastUser.createdAt).getTime() || 0;
+    const afterLastUser = sortedMessages.slice(lastUserIndex + 1);
+    const hasFinalResponse = afterLastUser.some(m => m.role === 'agent' || m.role === 'error');
+    if (hasFinalResponse) return [];
 
-      const ts = new Date(m.createdAt).getTime() || 0;
-      const prevTs = seenProgressAt.get(key);
-      // Hide repeated identical progress text within 2 minutes
-      if (prevTs && Math.abs(ts - prevTs) < 120000) continue;
+    const entries = [
+      ...afterLastUser.filter(m => m.role === 'progress'),
+      ...liveProgressEntries.filter(entry => (new Date(entry.createdAt).getTime() || Date.now()) >= lastUserTime),
+    ];
 
-      seenProgressAt.set(key, ts);
-      deduped.push(m);
+    const byKey = new Map();
+    for (const entry of entries) {
+      const content = String(entry.content || '').trim();
+      if (!content) continue;
+      const key = entry.id || `${entry.createdAt}-${content}`;
+      byKey.set(key, {
+        id: key,
+        content,
+        createdAt: entry.createdAt || new Date().toISOString(),
+      });
     }
 
-    return deduped;
+    return [...byKey.values()]
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+      .slice(-80);
+  }, [sortedMessages, liveProgressEntries, searchResults]);
+
+  const filteredMessages = useMemo(() => {
+    return sortedMessages.filter(m => m.role !== 'progress');
   }, [sortedMessages]);
+
+  useEffect(() => {
+    if (!isVisible || progressTranscriptEntries.length === 0) return undefined;
+    return scheduleScrollToBottom();
+  }, [isVisible, progressTranscriptEntries.length, scheduleScrollToBottom]);
 
   const displayMessages = searchResults || filteredMessages;
 
@@ -1199,8 +1358,26 @@ function ChatSessionContent({
           </div>
         ) : (
           displayMessages.map(msg => (
-            <ChatMessage key={msg.id} message={msg} wsRef={wsRef} projectId={projectId} onSend={handleSend} onRetry={handleRetryMessage} />
+            <ChatMessage
+              key={msg.id}
+              message={msg}
+              wsRef={wsRef}
+              projectId={projectId}
+              onSend={handleSend}
+              onRetry={handleRetryMessage}
+              animateContent={typingMessageIds.has(msg.id)}
+            />
           ))
+        )}
+
+        {progressTranscriptEntries.length > 0 && (
+          <ProgressTranscriptBubble
+            entries={progressTranscriptEntries}
+            changedFiles={liveChangedFiles}
+            wsRef={wsRef}
+            projectId={projectId}
+            sessionId={sessionId}
+          />
         )}
 
         {recoveryStatus.active && (
@@ -1242,7 +1419,7 @@ function ChatSessionContent({
         )}
 
         {(agentBusy || recoveryStatus.active || (streamingMessage && !streamingMessage.shell)) && (
-          <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
+          progressTranscriptEntries.length === 0 && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
         )}
 
         <div ref={messagesEndRef} />

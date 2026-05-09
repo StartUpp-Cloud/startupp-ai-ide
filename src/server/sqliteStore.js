@@ -105,12 +105,13 @@ function withTransaction(fn) {
 function ftsQueryFromText(text) {
   const words = String(text || '')
     .toLowerCase()
-    .match(/[a-z0-9_/-]{3,}/g);
+    .match(/[a-z0-9_]{3,}/g);
   if (!words?.length) return '';
   return [...new Set(words)]
     .slice(0, 12)
-    .map(word => `${word.replace(/[^a-z0-9_/-]/g, '')}*`)
+    .map(word => word.replace(/[^a-z0-9_]/g, ''))
     .filter(Boolean)
+    .map(word => `"${word.replace(/"/g, '""')}"*`)
     .join(' OR ');
 }
 

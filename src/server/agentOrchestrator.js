@@ -256,7 +256,11 @@ class AgentOrchestrator extends EventEmitter {
         sessionId: run.sessionId,
         role: 'error',
         content: `${run.status === 'blocked' ? 'Autonomous run blocked' : 'Autonomous run failed'}: ${run.error}`,
-        metadata: { orchestratorRunId: run.id, orchestratorTaskId: failed.task.id },
+        metadata: {
+          orchestratorRunId: run.id,
+          orchestratorTaskId: failed.task.id,
+          ...(failed.result.changedFiles?.length > 0 ? { changedFiles: failed.result.changedFiles } : {}),
+        },
       });
       broadcastFn({ type: 'chat-message', message: msg });
       this._emitRun(run, broadcastFn);
@@ -271,12 +275,18 @@ class AgentOrchestrator extends EventEmitter {
     await this._event(run, null, 'synthesizing', 'Synthesizing final response from agent task results.', null, broadcastFn);
 
     const finalResponse = await this._synthesizeFinal(run, completed);
+    const changedFiles = this._mergeChangedFiles(completed.flatMap(({ result }) => result.changedFiles || []));
     const msg = chatStore.addMessage({
       projectId: run.projectId,
       sessionId: run.sessionId,
       role: 'agent',
       content: finalResponse,
-      metadata: { orchestratorRunId: run.id, tool, tasks: completed.map(({ task }) => ({ id: task.id, title: task.title, status: task.status })) },
+      metadata: {
+        orchestratorRunId: run.id,
+        tool,
+        tasks: completed.map(({ task }) => ({ id: task.id, title: task.title, status: task.status })),
+        ...(changedFiles.length > 0 ? { changedFiles } : {}),
+      },
     });
     broadcastFn({ type: 'chat-message', message: msg });
     if (!skipUnread) {
@@ -500,6 +510,25 @@ Report clearly what you did, files changed, commands run, verification results, 
     if (data?.type === 'agent-status') {
       broadcastFn({ type: 'orchestrator-task-status', projectId: run.projectId, sessionId: run.sessionId, runId: run.id, taskId: task.id, busy: data.busy });
     }
+    if (data?.type === 'session-file-changes' && Array.isArray(data.files)) {
+      broadcastFn({
+        type: 'session-file-changes',
+        projectId: run.projectId,
+        sessionId: run.sessionId,
+        runId: run.id,
+        taskId: task.id,
+        files: data.files,
+      });
+    }
+  }
+
+  _mergeChangedFiles(files = []) {
+    const byPath = new Map();
+    for (const file of files) {
+      if (!file?.path) continue;
+      byPath.set(file.path, { path: file.path, status: file.status || 'M' });
+    }
+    return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path)).slice(0, 200);
   }
 
   _classifyResult(result) {
