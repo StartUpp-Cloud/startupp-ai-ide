@@ -12,6 +12,82 @@ const router = Router();
 // Multer for temporary upload to host before docker cp
 const tmpUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 50 * 1024 * 1024 } });
 
+const CACHE_TTLS = {
+  gitRoot: 30_000,
+  repos: 30_000,
+  branches: 15_000,
+  branchesWithPrs: 45_000,
+  statusPr: 60_000,
+};
+
+const routeCache = new Map();
+const inFlightCache = new Map();
+
+function containerCachePrefix(name) {
+  return `container:${name}:`;
+}
+
+function containerCacheKey(name, scope, ...parts) {
+  return `${containerCachePrefix(name)}${scope}:${JSON.stringify(parts)}`;
+}
+
+function getCache(key) {
+  const entry = routeCache.get(key);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= Date.now()) {
+    routeCache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function setCache(key, value, ttlMs) {
+  routeCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+  return value;
+}
+
+async function getCached(key, ttlMs, loader, { force = false } = {}) {
+  if (!force) {
+    const cached = getCache(key);
+    if (cached !== undefined) return cached;
+    const inFlight = inFlightCache.get(key);
+    if (inFlight) return inFlight;
+  }
+
+  const promise = loader()
+    .then(value => setCache(key, value, ttlMs))
+    .finally(() => inFlightCache.delete(key));
+  inFlightCache.set(key, promise);
+  return promise;
+}
+
+function invalidateContainerCache(name) {
+  const prefix = containerCachePrefix(name);
+  for (const key of routeCache.keys()) {
+    if (key.startsWith(prefix)) routeCache.delete(key);
+  }
+  for (const key of inFlightCache.keys()) {
+    if (key.startsWith(prefix)) inFlightCache.delete(key);
+  }
+}
+
+async function mapLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let index = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const current = index++;
+      results[current] = await worker(items[current], current);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function isRefreshRequest(req) {
+  return req.query.refresh === "1" || req.query.refresh === "true";
+}
+
 /**
  * GET /api/containers/status
  * Check Docker availability and dev image status
@@ -276,42 +352,56 @@ router.get("/:name/repos", async (req, res) => {
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(400).json({ error: "Container is not running" });
 
-    // List directories in /workspace
-    const dirsOutput = await containerManager.execInContainerAsync(name, "ls -d /workspace/*/ 2>/dev/null");
-    if (!dirsOutput) return res.json({ repos: [] });
+    const repos = await getCached(
+      containerCacheKey(name, "repos"),
+      CACHE_TTLS.repos,
+      async () => {
+        // List directories in /workspace
+        const dirsOutput = await containerManager.execInContainerAsync(name, "ls -d /workspace/*/ 2>/dev/null");
+        if (!dirsOutput) return [];
 
-    const dirs = dirsOutput.split("\n").filter(Boolean).map(d => d.replace(/\/$/, ""));
-    const repos = [];
+        const dirs = dirsOutput.split("\n").filter(Boolean).map(d => d.replace(/\/$/, ""));
 
-    for (const dir of dirs) {
-      const folderName = dir.split("/").pop();
+        return mapLimit(dirs, 4, async (dir) => {
+          const folderName = dir.split("/").pop();
 
-      // Check if it's a git repo
-      const isGit = await containerManager.execInContainerAsync(name, `test -e '${dir}/.git' && echo yes`) === "yes";
-      let branch = null;
-      let hasChanges = false;
+          const [isGitRaw, pkgContent, hasPnpmRaw, hasYarnRaw] = await Promise.all([
+            containerManager.execInContainerAsync(name, `test -e '${dir}/.git' && echo yes`),
+            containerManager.execInContainerAsync(name, `cat '${dir}/package.json' 2>/dev/null`),
+            containerManager.execInContainerAsync(name, `test -f '${dir}/pnpm-lock.yaml' && echo yes`),
+            containerManager.execInContainerAsync(name, `test -f '${dir}/yarn.lock' && echo yes`),
+          ]);
 
-      if (isGit) {
-        branch = await containerManager.execInContainerAsync(name, `cd '${dir}' && git branch --show-current 2>/dev/null`) || null;
-        const gitStatus = await containerManager.execInContainerAsync(name, `cd '${dir}' && git status --porcelain 2>/dev/null`);
-        hasChanges = !!(gitStatus && gitStatus.trim());
-      }
+          const isGit = isGitRaw === "yes";
+          let branch = null;
+          let hasChanges = false;
 
-      // Detect scripts from package.json
-      let scripts = {};
-      let packageManager = "npm";
-      try {
-        const pkgContent = await containerManager.execInContainerAsync(name, `cat '${dir}/package.json' 2>/dev/null`);
-        if (pkgContent) {
-          const pkg = JSON.parse(pkgContent);
-          scripts = pkg.scripts || {};
-        }
-        if (await containerManager.execInContainerAsync(name, `test -f '${dir}/pnpm-lock.yaml' && echo yes`) === "yes") packageManager = "pnpm";
-        else if (await containerManager.execInContainerAsync(name, `test -f '${dir}/yarn.lock' && echo yes`) === "yes") packageManager = "yarn";
-      } catch { /* no package.json */ }
+          if (isGit) {
+            const [branchRaw, gitStatus] = await Promise.all([
+              containerManager.execInContainerAsync(name, `cd '${dir}' && git branch --show-current 2>/dev/null`),
+              containerManager.execInContainerAsync(name, `cd '${dir}' && git status --porcelain 2>/dev/null`),
+            ]);
+            branch = branchRaw || null;
+            hasChanges = !!(gitStatus && gitStatus.trim());
+          }
 
-      repos.push({ path: dir, name: folderName, isGitRepo: isGit, branch, hasChanges, scripts, packageManager });
-    }
+          let scripts = {};
+          try {
+            if (pkgContent) {
+              const pkg = JSON.parse(pkgContent);
+              scripts = pkg.scripts || {};
+            }
+          } catch { /* invalid package.json */ }
+
+          let packageManager = "npm";
+          if (hasPnpmRaw === "yes") packageManager = "pnpm";
+          else if (hasYarnRaw === "yes") packageManager = "yarn";
+
+          return { path: dir, name: folderName, isGitRepo: isGit, branch, hasChanges, scripts, packageManager };
+        });
+      },
+      { force: isRefreshRequest(req) },
+    );
 
     res.json({ repos });
   } catch (error) {
@@ -335,73 +425,78 @@ router.get("/:name/branches", async (req, res) => {
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
-    const exec = (cmd, timeout = 10000) => containerManager.execInContainerAsync(name, cmd, { timeout });
+    const includePr = req.query.includePr !== "0" && req.query.includePr !== "false";
+    const requestedRepoPath = req.query.repoPath || "auto";
+    const cacheKey = containerCacheKey(name, "branches", requestedRepoPath, includePr);
+    const data = await getCached(
+      cacheKey,
+      includePr ? CACHE_TTLS.branchesWithPrs : CACHE_TTLS.branches,
+      async () => {
+        const exec = (cmd, timeout = 10000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
-    // Determine repo path — detect actual git root if not specified
-    let repoPath = req.query.repoPath;
-    if (!repoPath) {
-      repoPath = await findGitRootAsync(name);
-    }
+        // Determine repo path — detect actual git root if not specified
+        const repoPath = req.query.repoPath || await findGitRootAsync(name);
 
-    // Get current branch
-    const current = (await exec(`cd '${repoPath}' && git branch --show-current 2>/dev/null`))?.trim() || null;
+        const [currentRaw, gitUserRaw, gitEmailRaw, rawBranches, rawRemote] = await Promise.all([
+          exec(`cd '${repoPath}' && git branch --show-current 2>/dev/null`),
+          exec(`cd '${repoPath}' && git config user.name 2>/dev/null`),
+          exec(`cd '${repoPath}' && git config user.email 2>/dev/null`),
+          exec(`cd '${repoPath}' && git branch --list --format='%(refname:short)|%(authorname)|%(authoremail)|%(creatordate:iso8601)' 2>/dev/null`),
+          exec(`cd '${repoPath}' && git branch -r --format='%(refname:short)' 2>/dev/null`),
+        ]);
 
-    // Get current git user for "mine vs others" categorization
-    const gitUser = (await exec(`cd '${repoPath}' && git config user.name 2>/dev/null`))?.trim() || null;
-    const gitEmail = (await exec(`cd '${repoPath}' && git config user.email 2>/dev/null`))?.trim() || null;
+        const current = currentRaw?.trim() || null;
+        const gitUser = gitUserRaw?.trim() || null;
+        const gitEmail = gitEmailRaw?.trim() || null;
+        const localBranches = rawBranches
+          ? rawBranches.split("\n").filter(Boolean).map(line => {
+            const [branchName, author, email, date] = line.split("|").map(s => s?.trim());
+            return { name: branchName, author: author || null, email: email || null, date: date || null };
+          })
+          : [];
 
-    // Get all local branches with last commit author
-    const rawBranches = await exec(
-      `cd '${repoPath}' && git branch --list --format='%(refname:short)|%(authorname)|%(authoremail)|%(creatordate:iso8601)' 2>/dev/null`,
-    );
+        const localSet = new Set(localBranches.map(b => b.name));
+        const remoteBranches = rawRemote
+          ? rawRemote.split("\n").filter(Boolean).map(b => b.trim())
+              .filter(b => !b.includes("HEAD"))
+              .map(b => b.replace(/^origin\//, ""))
+              .filter(b => !localSet.has(b))
+          : [];
 
-    const localBranches = rawBranches
-      ? rawBranches.split("\n").filter(Boolean).map(line => {
-        const [branchName, author, email, date] = line.split("|").map(s => s?.trim());
-        return { name: branchName, author: author || null, email: email || null, date: date || null };
-      })
-      : [];
-
-    // Get remote branches not already local
-    const localSet = new Set(localBranches.map(b => b.name));
-    const rawRemote = await exec(
-      `cd '${repoPath}' && git branch -r --format='%(refname:short)' 2>/dev/null`,
-    );
-    const remoteBranches = rawRemote
-      ? rawRemote.split("\n").filter(Boolean).map(b => b.trim())
-          .filter(b => !b.includes("HEAD"))
-          .map(b => b.replace(/^origin\//, ""))
-          .filter(b => !localSet.has(b))
-      : [];
-
-    // Fetch PR status for branches via gh CLI (batch query)
-    let prMap = {};
-    try {
-      const prJson = await exec(
-        `cd '${repoPath}' && gh pr list --state all --limit 100 --json headRefName,number,state,author,title 2>/dev/null`,
-      );
-      if (prJson) {
-        const prs = JSON.parse(prJson.trim());
-        for (const pr of prs) {
-          prMap[pr.headRefName] = {
-            number: pr.number,
-            state: pr.state, // OPEN, CLOSED, MERGED
-            title: pr.title,
-            author: pr.author?.login || null,
-          };
+        // Fetch PR status only for the enriched request; the UI opens with a fast branch-only response.
+        let prMap = {};
+        if (includePr) {
+          try {
+            const prJson = await exec(
+              `cd '${repoPath}' && gh pr list --state all --limit 100 --json headRefName,number,state,author,title 2>/dev/null`,
+            );
+            if (prJson) {
+              const prs = JSON.parse(prJson.trim());
+              for (const pr of prs) {
+                prMap[pr.headRefName] = {
+                  number: pr.number,
+                  state: pr.state, // OPEN, CLOSED, MERGED
+                  title: pr.title,
+                  author: pr.author?.login || null,
+                };
+              }
+            }
+          } catch { /* gh not installed or not authenticated */ }
         }
-      }
-    } catch { /* gh not installed or not authenticated */ }
 
-    // Enrich branches with PR info and ownership
-    const enriched = localBranches.map(b => ({
-      ...b,
-      pr: prMap[b.name] || null,
-      isMine: !!(gitUser && b.author && b.author === gitUser) ||
-              !!(gitEmail && b.email && b.email.includes(gitEmail)),
-    }));
+        const enriched = localBranches.map(b => ({
+          ...b,
+          pr: prMap[b.name] || null,
+          isMine: !!(gitUser && b.author && b.author === gitUser) ||
+                  !!(gitEmail && b.email && b.email.includes(gitEmail)),
+        }));
 
-    res.json({ repoPath, current, branches: enriched, remoteBranches, gitUser });
+        return { repoPath, current, branches: enriched, remoteBranches, gitUser, prEnriched: includePr };
+      },
+      { force: isRefreshRequest(req) },
+    );
+
+    res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -448,7 +543,7 @@ router.post("/:name/worktree", (req, res) => {
       for (const wtPath of wtPaths) {
         const actualBranch = exec(`cd '${wtPath}' && git branch --show-current 2>/dev/null`)?.trim();
         if (actualBranch === branch) {
-          return res.json({ worktreePath: wtPath, created: false, branch, reused: true });
+          return res.json({ worktreePath: wtPath, created: false, branch, reused: true, repoPath: effectiveRepoPath });
         }
       }
     }
@@ -458,7 +553,7 @@ router.post("/:name/worktree", (req, res) => {
     if (exists) {
       const wtBranch = exec(`cd '${worktreePath}' && git branch --show-current 2>/dev/null`)?.trim();
       if (wtBranch === branch) {
-        return res.json({ worktreePath, created: false, branch: wtBranch });
+        return res.json({ worktreePath, created: false, branch: wtBranch, repoPath: effectiveRepoPath });
       }
       // Exists but wrong branch — remove and recreate
       exec(`cd '${effectiveRepoPath}' && git worktree remove '${worktreePath}' --force 2>/dev/null`);
@@ -510,7 +605,8 @@ router.post("/:name/worktree", (req, res) => {
       { timeout: 10000 },
     );
 
-    res.json({ worktreePath, created: true, branch, output });
+    invalidateContainerCache(name);
+    res.json({ worktreePath, created: true, branch, output, repoPath: effectiveRepoPath });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -525,13 +621,17 @@ router.post("/:name/worktree", (req, res) => {
  * Handles the common case where the repo is in a subdirectory of /workspace.
  */
 function findGitRoot(name) {
+  const cacheKey = containerCacheKey(name, "git-root");
+  const cached = getCache(cacheKey);
+  if (cached !== undefined) return cached;
+
   const workDir = containerManager.getWorkDir(name) || "/workspace";
   // Check if workDir itself is a git repo
   const hasGit = containerManager.execInContainer(name,
     `test -e '${workDir}/.git' && echo yes`,
     { timeout: 5000 },
   )?.trim();
-  if (hasGit === "yes") return workDir;
+  if (hasGit === "yes") return setCache(cacheKey, workDir, CACHE_TTLS.gitRoot);
 
   // workDir is /workspace but no .git there — scan subdirectories for a git repo
   const gitDir = containerManager.execInContainer(name,
@@ -540,27 +640,29 @@ function findGitRoot(name) {
   )?.trim();
   if (gitDir) {
     // Return the parent of .git (the repo root)
-    return gitDir.replace(/\/\.git$/, "");
+    return setCache(cacheKey, gitDir.replace(/\/\.git$/, ""), CACHE_TTLS.gitRoot);
   }
 
-  return workDir;
+  return setCache(cacheKey, workDir, CACHE_TTLS.gitRoot);
 }
 
 async function findGitRootAsync(name) {
-  const workDir = containerManager.getWorkDir(name) || "/workspace";
-  const hasGit = (await containerManager.execInContainerAsync(name,
-    `test -e '${workDir}/.git' && echo yes`,
-    { timeout: 5000 },
-  ))?.trim();
-  if (hasGit === "yes") return workDir;
+  return getCached(containerCacheKey(name, "git-root"), CACHE_TTLS.gitRoot, async () => {
+    const workDir = containerManager.getWorkDir(name) || "/workspace";
+    const hasGit = (await containerManager.execInContainerAsync(name,
+      `test -e '${workDir}/.git' && echo yes`,
+      { timeout: 5000 },
+    ))?.trim();
+    if (hasGit === "yes") return workDir;
 
-  const gitDir = (await containerManager.execInContainerAsync(name,
-    `find /workspace -maxdepth 2 -name .git -print -quit 2>/dev/null`,
-    { timeout: 5000 },
-  ))?.trim();
-  if (gitDir) return gitDir.replace(/\/\.git$/, "");
+    const gitDir = (await containerManager.execInContainerAsync(name,
+      `find /workspace -maxdepth 2 -name .git -print -quit 2>/dev/null`,
+      { timeout: 5000 },
+    ))?.trim();
+    if (gitDir) return gitDir.replace(/\/\.git$/, "");
 
-  return workDir;
+    return workDir;
+  });
 }
 
 /** Helper: resolve effective repo path for git actions (worktree-aware) */
@@ -605,15 +707,21 @@ router.get("/:name/git-status", async (req, res) => {
     const gitPath = await resolveGitPathAsync(name, req.query);
     const exec = (cmd, timeout = 10000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
-    const branch = (await exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`))?.trim() || null;
-    const statusRaw = await exec(`cd '${gitPath}' && git status --porcelain 2>/dev/null`) || "";
+    const [branchRaw, statusRawResult, trackingRaw] = await Promise.all([
+      exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`),
+      exec(`cd '${gitPath}' && git status --porcelain 2>/dev/null`),
+      exec(`cd '${gitPath}' && git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null`),
+    ]);
+
+    const branch = branchRaw?.trim() || null;
+    const statusRaw = statusRawResult || "";
     const dirty = statusRaw.trim().split("\n").filter(Boolean);
     const staged = dirty.filter(l => /^[MADRC]/.test(l)).length;
     const unstaged = dirty.filter(l => /^.[MDRC?]/.test(l) || /^\?\?/.test(l)).length;
 
     // Ahead/behind remote
     let ahead = 0, behind = 0;
-    const tracking = (await exec(`cd '${gitPath}' && git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null`))?.trim();
+    const tracking = trackingRaw?.trim();
     if (tracking) {
       const ab = (await exec(`cd '${gitPath}' && git rev-list --left-right --count '${tracking}...HEAD' 2>/dev/null`))?.trim();
       if (ab) {
@@ -625,12 +733,24 @@ router.get("/:name/git-status", async (req, res) => {
 
     // Check for GitHub PR via gh CLI (if installed)
     let pr = null;
-    try {
-      const prJson = await exec(`cd '${gitPath}' && gh pr view --json number,title,state,url 2>/dev/null`, 5000);
-      if (prJson) pr = JSON.parse(prJson.trim());
-    } catch { /* gh not installed or no PR */ }
+    const includePr = req.query.includePr !== "0" && req.query.includePr !== "false";
+    if (includePr && branch) {
+      pr = await getCached(
+        containerCacheKey(name, "status-pr", gitPath, branch),
+        CACHE_TTLS.statusPr,
+        async () => {
+          try {
+            const prJson = await exec(`cd '${gitPath}' && gh pr view --json number,title,state,url 2>/dev/null`, 5000);
+            return prJson ? JSON.parse(prJson.trim()) : null;
+          } catch {
+            return null;
+          }
+        },
+        { force: isRefreshRequest(req) },
+      );
+    }
 
-    res.json({ branch, dirty: dirty.length, staged, unstaged, ahead, behind, tracking: tracking || null, pr, repoPath: gitPath });
+    res.json({ branch, dirty: dirty.length, staged, unstaged, ahead, behind, tracking: tracking || null, pr, prEnriched: includePr, repoPath: gitPath });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -652,6 +772,7 @@ router.post("/:name/git-pull", (req, res) => {
       `cd '${gitPath}' && git pull --ff-only 2>&1`,
       { timeout: 30000 },
     );
+    invalidateContainerCache(name);
     res.json({ output: output || "Already up to date." });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -710,6 +831,7 @@ router.post("/:name/git-commit-push", async (req, res) => {
     const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim();
     const pushOutput = exec(`cd '${gitPath}' && git push -u origin '${branch}' 2>&1`, 30000) || "";
 
+    invalidateContainerCache(name);
     res.json({ message, branch, pushOutput, staged });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -770,6 +892,7 @@ router.post("/:name/git-create-pr", async (req, res) => {
     // Try to parse the PR URL from output
     const urlMatch = prOutput?.match(/https:\/\/github\.com\/[^\s]+/);
 
+    invalidateContainerCache(name);
     res.json({ title, body, output: prOutput, url: urlMatch?.[0] || null, branch });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -796,6 +919,7 @@ router.post("/:name/git-merge-pr", (req, res) => {
       30000,
     );
 
+    invalidateContainerCache(name);
     res.json({ output, method });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -830,6 +954,7 @@ router.post("/:name/worktree-cleanup", (req, res) => {
     // Prune worktree metadata
     exec(`cd '${repoPath}' && git worktree prune 2>/dev/null`);
 
+    invalidateContainerCache(name);
     res.json({ cleaned: true, branch, worktreePath: wtPath });
   } catch (error) {
     res.status(500).json({ error: error.message });

@@ -12,6 +12,20 @@ const PR_BADGE = {
   MERGED: { color: 'text-purple-400 bg-purple-500/10', icon: GitMerge, label: 'merged' },
 };
 
+function buildQuery(params) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== '') query.set(key, value);
+  });
+  return query.toString();
+}
+
+function appendQuery(queryString, key, value) {
+  const query = new URLSearchParams(queryString);
+  query.set(key, value);
+  return query.toString();
+}
+
 function BranchItem({ branch, isActive, onSelect }) {
   const pr = branch.pr;
   const badge = pr ? PR_BADGE[pr.state] : null;
@@ -68,30 +82,43 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const searchRef = useRef(null);
   const sshInputRef = useRef(null);
   const resultTimer = useRef(null);
+  const statusAbortRef = useRef(null);
+  const branchAbortRef = useRef(null);
 
   const worktreePath = sessionBranch
     ? `/workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
     : null;
-  // Priority: worktree > explicit user selection > auto-detected > fallback
-  // sessionRepoPath === '/workspace' means user explicitly chose root (not null/auto-detect)
+  // Priority: worktree > explicit user selection > auto-detected > fallback.
+  // /workspace is displayed as the root choice but git endpoints still auto-detect the repo.
   const hasExplicitPath = sessionRepoPath !== null && sessionRepoPath !== undefined;
   const effectivePath = worktreePath || (hasExplicitPath ? sessionRepoPath : null) || gitStatus?.repoPath || '/workspace';
   const displayPath = effectivePath;
+  const hasExplicitRepoPath = hasExplicitPath && sessionRepoPath !== '/workspace';
+  const sourceRepoPath = hasExplicitRepoPath
+    ? sessionRepoPath
+    : (gitStatus?.repoPath && gitStatus.repoPath !== '/workspace' ? gitStatus.repoPath : null);
 
-  // Build query params for git endpoints — explicit path always sent
-  const gitPathQuery = (() => {
-    if (worktreePath) return `worktreePath=${encodeURIComponent(worktreePath)}`;
-    if (hasExplicitPath) return `repoPath=${encodeURIComponent(sessionRepoPath)}`;
-    return '';
-  })();
+  // Build query params for git endpoints; /workspace stays auto-detected server-side.
+  const gitPathQuery = buildQuery({
+    worktreePath,
+    repoPath: !worktreePath && hasExplicitRepoPath ? sessionRepoPath : null,
+  });
 
   // Fetch git status
-  const fetchStatus = useCallback(() => {
+  const fetchStatus = useCallback((options = {}) => {
     if (!containerName) return;
-    fetch(`/api/containers/${containerName}/git-status?${gitPathQuery}`)
+    if (!options.force && typeof document !== 'undefined' && document.hidden) return;
+
+    statusAbortRef.current?.abort();
+    const controller = new AbortController();
+    statusAbortRef.current = controller;
+    const query = options.force ? appendQuery(gitPathQuery, 'refresh', '1') : gitPathQuery;
+    const suffix = query ? `?${query}` : '';
+
+    fetch(`/api/containers/${containerName}/git-status${suffix}`, { signal: controller.signal })
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data) setGitStatus(data); })
-      .catch(() => {});
+      .catch(err => { if (err.name !== 'AbortError') {} });
   }, [containerName, gitPathQuery]);
 
   useEffect(() => {
@@ -99,21 +126,43 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     // with Docker/git polling during the first paint.
     const initialTimer = setTimeout(fetchStatus, 300);
     const interval = setInterval(fetchStatus, 10000);
+    const handleVisibility = () => {
+      if (!document.hidden) fetchStatus({ force: true });
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
     return () => {
       clearTimeout(initialTimer);
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      statusAbortRef.current?.abort();
     };
   }, [fetchStatus]);
 
-  // Fetch enriched branches when switcher opens
+  // Fetch branches quickly first, then enrich with PR metadata in the background.
   useEffect(() => {
     if (!containerName || !showSwitcher) return;
-    const repoParam = sessionRepoPath ? `?repoPath=${encodeURIComponent(sessionRepoPath)}` : '';
-    fetch(`/api/containers/${containerName}/branches${repoParam}`)
-      .then(r => r.ok ? r.json() : null)
+
+    branchAbortRef.current?.abort();
+    const controller = new AbortController();
+    branchAbortRef.current = controller;
+
+    setBranchData(prev => (prev?.repoPath && prev.repoPath === sourceRepoPath ? prev : null));
+
+    const fetchBranches = async (includePr) => {
+      const query = buildQuery({ repoPath: sourceRepoPath, includePr: includePr ? '1' : '0' });
+      const suffix = query ? `?${query}` : '';
+      const response = await fetch(`/api/containers/${containerName}/branches${suffix}`, { signal: controller.signal });
+      return response.ok ? response.json() : null;
+    };
+
+    fetchBranches(false)
       .then(data => { if (data) setBranchData(data); })
-      .catch(() => {});
-  }, [containerName, showSwitcher, sessionRepoPath]);
+      .then(() => fetchBranches(true))
+      .then(data => { if (data) setBranchData(data); })
+      .catch(err => { if (err.name !== 'AbortError') {} });
+
+    return () => controller.abort();
+  }, [containerName, showSwitcher, sourceRepoPath]);
 
   // Fetch workspace folders when folder picker opens
   useEffect(() => {
@@ -158,7 +207,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     resultTimer.current = setTimeout(() => setActionResult(null), 4000);
   };
 
-  const bodyBase = worktreePath ? { worktreePath } : {};
+  const bodyBase = worktreePath ? { worktreePath } : sourceRepoPath ? { repoPath: sourceRepoPath } : {};
 
   const cleanupWorktree = async (branchToClean) => {
     if (!branchToClean || !containerName) return;
@@ -277,7 +326,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     try {
       const res = await fetch(`/api/containers/${containerName}/worktree`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ branch: name }),
+        body: JSON.stringify({ branch: name, ...(sourceRepoPath ? { repoPath: sourceRepoPath } : {}) }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -286,8 +335,14 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
       }
       const data = await res.json();
       setGitStatus(null);
+      setBranchData(null);
+      const sessionUpdates = { branch: name };
+      if (data.repoPath && data.repoPath !== '/workspace') sessionUpdates.repoPath = data.repoPath;
       if (data.worktreePath && !data.worktreePath.includes('.worktrees')) {
-        onSessionUpdate?.({ branch: name, repoPath: data.worktreePath });
+        sessionUpdates.repoPath = data.worktreePath;
+      }
+      if (onSessionUpdate) {
+        onSessionUpdate(sessionUpdates);
       } else {
         onBranchChange?.(name);
       }
@@ -305,7 +360,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
       try {
         const res = await fetch(`/api/containers/${containerName}/worktree`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ branch }),
+          body: JSON.stringify({ branch, ...(sourceRepoPath ? { repoPath: sourceRepoPath } : {}) }),
         });
         if (!res.ok) {
           const err = await res.json();
@@ -318,9 +373,14 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
         const data = await res.json();
         // If the branch is checked out at a non-standard location (e.g. main repo),
         // also update the session repoPath so the folder picker reflects it
+        const sessionUpdates = { branch };
+        if (data.repoPath && data.repoPath !== '/workspace') sessionUpdates.repoPath = data.repoPath;
         if (data.reused && data.worktreePath && !data.worktreePath.includes('.worktrees')) {
+          sessionUpdates.repoPath = data.worktreePath;
+        }
+        if (Object.keys(sessionUpdates).length > 1 && onSessionUpdate) {
           setGitStatus(null);
-          onSessionUpdate?.({ branch, repoPath: data.worktreePath });
+          onSessionUpdate(sessionUpdates);
           return;
         }
       } catch (err) {
@@ -330,6 +390,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     }
 
     setGitStatus(null);
+    setBranchData(null);
     onBranchChange?.(branch || null);
   };
 
@@ -625,7 +686,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
       {/* Row 2: Quick actions */}
       <div className="flex items-center gap-0.5 mt-0.5">
         <button
-          onClick={fetchStatus}
+          onClick={() => fetchStatus({ force: true })}
           className="p-1 text-surface-500 hover:text-surface-200 rounded transition-colors"
           title="Refresh status"
         >

@@ -200,6 +200,7 @@ export default function IDE() {
     let cancelled = false;
     const fetchInfo = () => {
       if (cancelled) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
       if (selectedProject.containerName) {
         fetch(`/api/containers/${selectedProject.containerName}/repos`)
           .then(r => r.ok ? r.json() : { repos: [] })
@@ -229,10 +230,15 @@ export default function IDE() {
     // Repo/script detection is side data. Delay it so project/session UI paints first.
     const initialTimer = setTimeout(fetchInfo, 500);
     const interval = setInterval(fetchInfo, 15000);
+    const handleVisibility = () => {
+      if (!document.hidden) fetchInfo();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
     return () => {
       cancelled = true;
       clearTimeout(initialTimer);
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [selectedProject?.containerName, selectedProject?.folderPath]);
 
