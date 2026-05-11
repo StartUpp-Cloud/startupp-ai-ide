@@ -5,6 +5,7 @@ import { chatStore } from './chatStore.js';
 import { agentGateway } from './agentGateway.js';
 import { llmProvider } from './llmProvider.js';
 import { memoryStore } from './memoryStore.js';
+import { shouldOrchestrateRequest } from './orchestratorRouting.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_TASKS = 6;
@@ -108,11 +109,7 @@ class AgentOrchestrator extends EventEmitter {
   }
 
   shouldOrchestrate({ mode, content, executeReviewedPlan = false }) {
-    if (executeReviewedPlan) return true;
-    if (mode === 'plan') return false;
-    const text = String(content || '').trim();
-    if (text.length > 180) return true;
-    return /\b(implement|fix|debug|build|refactor|migrate|deploy|test|review|investigate|add|update|optimi[sz]e|integrate|rewrite|plan approved|execute the plan)\b/i.test(text);
+    return shouldOrchestrateRequest({ mode, content, executeReviewedPlan });
   }
 
   async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, broadcastFn, skipUnread = false, executeReviewedPlan = false }) {

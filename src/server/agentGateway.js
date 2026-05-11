@@ -131,6 +131,11 @@ class AgentGateway extends EventEmitter {
       const assistantSettings = { model, effort };
       const isOllamaAssistant = ollamaWorkspaceOrchestrator.isOllamaAssistant(tool);
 
+      if (mode !== 'plan' && this._requiresRepoInspection(fullContent)) {
+        this._addProgressMessage(projectId, sessionId, `This needs opencode's repository access — delegating...`, broadcastFn, null, { transient: true });
+        return await this._sendToCliTool(projectId, sessionId, fullContent, 'opencode', assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
+      }
+
       let routedContent = fullContent;
       if (isOllamaAssistant) {
         this._addProgressMessage(projectId, sessionId, 'Ollama orchestrator: scanning workspace, building stack context, and planning...', broadcastFn, null, { transient: true });
@@ -412,6 +417,26 @@ RULES:
     ];
 
     return generalKnowledge.some(pattern => pattern.test(text));
+  }
+
+  _requiresRepoInspection(content) {
+    const text = String(content || '').toLowerCase();
+    if (!text.trim()) return false;
+
+    const repoStateTerms = [
+      /\bgit\s+(status|log|diff|branch|show|rev-parse|remote|fetch|pull|push)\b/,
+      /\b(status|state)\s+of\s+(this|the|our|my)\s+(repo|repository|project|codebase|working tree|workspace)\b/,
+      /\b(local|uncommitted|unstaged|staged|untracked|modified|dirty|pending)\s+(changes?|files?|commits?)\b/,
+      /\bchanges?\s+(pending|left|ready|waiting)\s+(to\s+)?(push|deploy|commit|merge)\b/,
+      /\b(commits?|branch|head)\s+(ahead|behind)\s+(of\s+)?(upstream|origin|remote|main|master)\b/,
+      /\b(ahead|behind)\s+(of\s+)?(upstream|origin|remote|main|master)\b/,
+      /\b(pending|ready)\s+(to\s+)?(push|deploy)\b/,
+      /\b(deploy(?:ment)?|release)\s+(ready|readiness|pending|status)\b/,
+      /\b(push|deploy)\s+(and\s+)?(deploy|release|ship)\b/,
+      /\b(repo|repository|workspace|working tree)\s+(command|output|state|status)\b/,
+    ];
+
+    return repoStateTerms.some(pattern => pattern.test(text));
   }
 
   _cleanDirectAnswer(answer) {
