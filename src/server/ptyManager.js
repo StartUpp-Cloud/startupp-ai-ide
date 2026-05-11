@@ -11,6 +11,7 @@ import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { sessionHistory } from './sessionHistory.js';
+import { dockerEnvFlags, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -216,6 +217,8 @@ class PTYManager extends EventEmitter {
     const sessionId = `session-${Date.now()}-${++this.sessionCounter}`;
 
     let shell, args, spawnCwd;
+    const runtimeTarget = role === 'agent' ? 'agent' : 'pty';
+    const runtimeEnv = projectId ? resolveRuntimeEnvironment({ projectId, target: runtimeTarget }).env : {};
 
     if (containerName) {
       // We spawn /bin/bash and exec into docker from there, because node-pty's
@@ -258,7 +261,7 @@ class PTYManager extends EventEmitter {
         shell = '/bin/bash';
         args = [
           '-c',
-          `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false -w '${workDir}' '${containerName}' bash -l`,
+          `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false ${dockerEnvFlags(runtimeEnv)} -w '${workDir}' '${containerName}' bash -l`,
         ];
         console.log(`[ptyManager] spawning ${role} session — cmd: ${args[1]}`);
         spawnCwd = undefined;
@@ -274,7 +277,7 @@ class PTYManager extends EventEmitter {
         shell = '/bin/bash';
         args = [
           '-c',
-          `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false -w '${workDir}' '${containerName}' dtach -A '${socketPath}' -Ez bash -l`,
+          `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false ${dockerEnvFlags(runtimeEnv)} -w '${workDir}' '${containerName}' dtach -A '${socketPath}' -Ez bash -l`,
         ];
         console.log(`[ptyManager] spawning ${role} session — cmd: ${args[1]}`);
         spawnCwd = undefined;
@@ -295,6 +298,7 @@ class PTYManager extends EventEmitter {
         cwd: spawnCwd,
         env: {
           ...process.env,
+          ...runtimeEnv,
           // Ensure Docker is in PATH on macOS (Docker Desktop, Homebrew)
           PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin`,
           TERM: 'xterm-256color',
@@ -405,6 +409,7 @@ class PTYManager extends EventEmitter {
             cwd: spawnCwd,
             env: {
               ...process.env,
+              ...runtimeEnv,
               PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin`,
               TERM: 'xterm-256color',
               COLORTERM: 'truecolor',

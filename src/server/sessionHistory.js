@@ -9,6 +9,7 @@ import { getDB } from './db.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { redactSecrets } from './connections/redaction.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,7 +41,7 @@ class SessionHistory {
     this._liveTimers.set(sessionId, setTimeout(() => {
       this._liveTimers.delete(sessionId);
       try {
-        const cleanText = (scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+        const cleanText = redactSecrets((scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''));
         const header = `Session: ${sessionId}\nProject: ${meta.projectId || 'unknown'}\nRole: ${meta.role || 'main'}\nSaved: ${new Date().toISOString()}\n${'─'.repeat(60)}\n`;
         fs.writeFileSync(path.join(LIVE_DIR, `${sessionId}.txt`), header + cleanText, 'utf-8');
       } catch { /* non-critical */ }
@@ -59,7 +60,7 @@ class SessionHistory {
     if (sessions) {
       for (const s of sessions) {
         try {
-          const cleanText = (s.scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+          const cleanText = redactSecrets((s.scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''));
           const header = `Session: ${s.id}\nProject: ${s.projectId || 'unknown'}\nRole: ${s.role || 'main'}\nSaved: ${new Date().toISOString()}\n${'─'.repeat(60)}\n`;
           fs.writeFileSync(path.join(LIVE_DIR, `${s.id}.txt`), header + cleanText, 'utf-8');
         } catch { /* non-critical */ }
@@ -89,7 +90,7 @@ class SessionHistory {
     const filePath = path.join(HISTORY_DIR, fileName);
 
     // Strip ANSI codes for readable text
-    const cleanScrollback = (scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    const cleanScrollback = redactSecrets((scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''));
 
     // Save scrollback to file
     fs.writeFileSync(filePath, cleanScrollback, 'utf-8');

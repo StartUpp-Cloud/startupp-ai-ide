@@ -5,6 +5,7 @@ import * as pty from 'node-pty';
 import Project from './models/Project.js';
 import { containerManager } from './containerManager.js';
 import { stripAnsi } from './conversationParser.js';
+import { dockerEnvFlags, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
 
 const SHELL_PROMPT = '__STARTUPP_SHELL_PROMPT__';
 
@@ -110,6 +111,7 @@ class ShellProxy extends EventEmitter {
     let shell = '/bin/bash';
     let args = ['--noprofile', '--norc', '-i'];
     let cwd = project.folderPath || process.env.HOME || os.homedir();
+    const runtimeEnv = resolveRuntimeEnvironment({ projectId, target: 'shell-proxy' }).env;
 
     if (project.containerName) {
       const status = containerManager.getContainerStatus(project.containerName);
@@ -123,7 +125,7 @@ class ShellProxy extends EventEmitter {
       shell = '/bin/bash';
       args = [
         '-lc',
-        `exec ${shellQuote(docker)} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e NO_COLOR=1 -e BROWSER=false -e PS1=${shellQuote(`${SHELL_PROMPT} `)} -w ${shellQuote(workDir)} ${shellQuote(project.containerName)} bash --noprofile --norc -i`,
+        `exec ${shellQuote(docker)} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e NO_COLOR=1 -e BROWSER=false -e PS1=${shellQuote(`${SHELL_PROMPT} `)} ${dockerEnvFlags(runtimeEnv, shellQuote)} -w ${shellQuote(workDir)} ${shellQuote(project.containerName)} bash --noprofile --norc -i`,
       ];
       cwd = undefined;
     }
@@ -135,6 +137,7 @@ class ShellProxy extends EventEmitter {
       cwd,
       env: {
         ...process.env,
+        ...runtimeEnv,
         PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin:${os.homedir()}/.docker/bin:${os.homedir()}/.local/bin`,
         TERM: 'xterm-256color',
         COLORTERM: 'truecolor',

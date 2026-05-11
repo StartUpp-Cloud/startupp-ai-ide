@@ -6,6 +6,7 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
+import { resolveRuntimeEnvironment } from "./connections/runtimeEnvResolver.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -163,8 +164,11 @@ class ContainerManager extends EventEmitter {
       // Container doesn't exist, create it
     }
 
+    const runtimeEnv = projectId ? resolveRuntimeEnvironment({ projectId, target: 'container-create' }).env : {};
+    const combinedEnv = { ...runtimeEnv, ...env };
+
     // Build env flags
-    const envFlags = Object.entries(env)
+    const envFlags = Object.entries(combinedEnv)
       .filter(([, v]) => v)
       .map(([k, v]) => `-e "${k}=${v}"`)
       .join(" ");

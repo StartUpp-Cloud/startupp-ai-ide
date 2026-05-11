@@ -18,7 +18,9 @@ router.get('/runs/:projectId/:sessionId', (req, res) => {
   try {
     const { projectId, sessionId } = req.params;
     const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 20, 100));
-    res.json({ runs: agentOrchestrator.getRunsForSession(projectId, sessionId, limit) });
+    const runs = agentOrchestrator.getRunsForSession(projectId, sessionId, limit)
+      .map(run => ({ ...run, tasks: agentOrchestrator.getTasks(run.id) }));
+    res.json({ runs });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get orchestrator runs', message: error.message });
   }

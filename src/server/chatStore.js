@@ -409,7 +409,7 @@ class ChatStore {
 
   _cleanProgressMessages(messages) {
     let cleaned = messages;
-    while (cleaned.length > 0 && cleaned[cleaned.length - 1].role === 'progress') {
+    while (cleaned.length > 0 && cleaned[cleaned.length - 1].role === 'progress' && cleaned[cleaned.length - 1].metadata?.transient === true) {
       cleaned = cleaned.slice(0, -1);
     }
     const lastUserIdx = cleaned.findLastIndex(m => m.role === 'user');
@@ -418,7 +418,7 @@ class ChatStore {
       if (!hasResponseAfterUser) {
         cleaned = [
           ...cleaned.slice(0, lastUserIdx + 1),
-          ...cleaned.slice(lastUserIdx + 1).filter(m => m.role !== 'progress'),
+          ...cleaned.slice(lastUserIdx + 1).filter(m => m.role !== 'progress' || m.metadata?.transient !== true),
         ];
       }
     }

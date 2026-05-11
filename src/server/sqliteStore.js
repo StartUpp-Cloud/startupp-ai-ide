@@ -324,6 +324,30 @@ function createSchema() {
       FOREIGN KEY(run_id) REFERENCES orchestrator_runs(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_orchestrator_events_run ON orchestrator_events(run_id, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS connections (
+      id TEXT PRIMARY KEY,
+      provider_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('workspace', 'project')),
+      project_id TEXT,
+      kind TEXT NOT NULL CHECK(kind IN ('application', 'project-runtime', 'cli-managed', 'local')),
+      status TEXT NOT NULL,
+      encrypted_fields TEXT NOT NULL DEFAULT '{}',
+      non_secret_config TEXT NOT NULL DEFAULT '{}',
+      environment TEXT NOT NULL DEFAULT '{}',
+      validation TEXT NOT NULL DEFAULT '{}',
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      created_by TEXT,
+      updated_by TEXT,
+      user_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_connections_provider ON connections(provider_id);
+    CREATE INDEX IF NOT EXISTS idx_connections_scope_project ON connections(scope, project_id);
+    CREATE INDEX IF NOT EXISTS idx_connections_kind ON connections(kind);
+    CREATE INDEX IF NOT EXISTS idx_connections_status ON connections(status);
   `);
 }
 
@@ -663,6 +687,125 @@ export function rowToJob(row) {
   };
 }
 
+function normalizeConnection(connection) {
+  const now = nowIso();
+  const createdAt = connection.createdAt || connection.created_at || connection.metadata?.createdAt || now;
+  const updatedAt = connection.updatedAt || connection.updated_at || connection.metadata?.updatedAt || createdAt;
+  return {
+    id: connection.id || uuidv4(),
+    providerId: connection.providerId || connection.provider_id,
+    displayName: connection.displayName || connection.display_name || connection.providerId || connection.provider_id,
+    scope: connection.scope === 'project' ? 'project' : 'workspace',
+    projectId: connection.projectId || connection.project_id || null,
+    kind: connection.kind || 'project-runtime',
+    status: connection.status || 'unknown',
+    encryptedFields: connection.encryptedFields || connection.encrypted_fields || {},
+    nonSecretConfig: connection.nonSecretConfig || connection.non_secret_config || {},
+    environment: connection.environment || {},
+    validation: connection.validation || {},
+    metadata: {
+      ...(connection.metadata || {}),
+      createdAt,
+      updatedAt,
+    },
+    createdBy: connection.createdBy || connection.created_by || null,
+    updatedBy: connection.updatedBy || connection.updated_by || null,
+    userId: connection.userId || connection.user_id || null,
+    createdAt,
+    updatedAt,
+  };
+}
+
+export function rowToConnection(row) {
+  if (!row) return null;
+  const metadata = jsonParse(row.metadata, {});
+  return {
+    id: row.id,
+    providerId: row.provider_id,
+    displayName: row.display_name,
+    scope: row.scope,
+    projectId: row.project_id,
+    kind: row.kind,
+    status: row.status,
+    encryptedFields: jsonParse(row.encrypted_fields, {}),
+    nonSecretConfig: jsonParse(row.non_secret_config, {}),
+    environment: jsonParse(row.environment, {}),
+    validation: jsonParse(row.validation, {}),
+    metadata,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    userId: row.user_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function saveConnection(connection) {
+  getSqliteStore();
+  const c = normalizeConnection(connection);
+  db.prepare(`INSERT INTO connections (
+    id, provider_id, display_name, scope, project_id, kind, status,
+    encrypted_fields, non_secret_config, environment, validation, metadata,
+    created_at, updated_at, created_by, updated_by, user_id
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    provider_id = excluded.provider_id,
+    display_name = excluded.display_name,
+    scope = excluded.scope,
+    project_id = excluded.project_id,
+    kind = excluded.kind,
+    status = excluded.status,
+    encrypted_fields = excluded.encrypted_fields,
+    non_secret_config = excluded.non_secret_config,
+    environment = excluded.environment,
+    validation = excluded.validation,
+    metadata = excluded.metadata,
+    updated_at = excluded.updated_at,
+    updated_by = excluded.updated_by,
+    user_id = excluded.user_id`).run(
+    c.id,
+    c.providerId,
+    c.displayName,
+    c.scope,
+    c.projectId,
+    c.kind,
+    c.status,
+    jsonStringify(c.encryptedFields),
+    jsonStringify(c.nonSecretConfig),
+    jsonStringify(c.environment),
+    jsonStringify(c.validation),
+    jsonStringify(c.metadata),
+    c.createdAt,
+    c.updatedAt,
+    c.createdBy,
+    c.updatedBy,
+    c.userId,
+  );
+  return c;
+}
+
+export function getConnection(id) {
+  getSqliteStore();
+  return rowToConnection(db.prepare('SELECT * FROM connections WHERE id = ?').get(id));
+}
+
+export function listConnections({ projectId = null, includeDisconnected = true } = {}) {
+  getSqliteStore();
+  const rows = projectId
+    ? db.prepare('SELECT * FROM connections WHERE scope = ? OR project_id = ? ORDER BY updated_at DESC').all('workspace', projectId)
+    : db.prepare('SELECT * FROM connections ORDER BY updated_at DESC').all();
+  return rows
+    .map(rowToConnection)
+    .filter(Boolean)
+    .filter(connection => includeDisconnected || connection.status !== 'disconnected');
+}
+
+export function deleteConnection(id) {
+  getSqliteStore();
+  const result = db.prepare('DELETE FROM connections WHERE id = ?').run(id);
+  return result.changes > 0;
+}
+
 function readJsonFile(filePath, fallback) {
   if (!fs.existsSync(filePath)) return fallback;
   try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch { return fallback; }
@@ -842,6 +985,11 @@ export const sqliteStore = {
   rowToMessage,
   saveJob,
   rowToJob,
+  saveConnection,
+  rowToConnection,
+  getConnection,
+  listConnections,
+  deleteConnection,
   ftsQueryFromText,
   withTransaction,
   getKv: getKvValue,

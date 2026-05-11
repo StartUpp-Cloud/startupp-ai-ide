@@ -17,6 +17,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SALT_PATH = path.join(__dirname, '../../data/.encryption-salt');
 const ALGO = 'aes-256-gcm';
 const PREFIX = 'enc:';
+const VERSIONED_PREFIX = 'enc:v1:';
 
 let _key = null;
 
@@ -57,19 +58,31 @@ export function encrypt(plaintext) {
 
   // Pack: iv + tag + ciphertext, all base64
   const packed = Buffer.concat([iv, tag, Buffer.from(encrypted, 'base64')]).toString('base64');
-  return PREFIX + packed;
+  return VERSIONED_PREFIX + packed;
 }
 
 /**
  * Decrypt an "enc:<base64>" string. Returns plaintext or the original if not encrypted.
  */
 export function decrypt(value) {
-  if (!value || typeof value !== 'string') return value;
-  if (!value.startsWith(PREFIX)) return value; // Not encrypted
+  const result = decryptWithResult(value);
+  return result.ok ? result.value : '';
+}
+
+/**
+ * Decrypt an encrypted value and preserve failure information for callers that
+ * must fail closed instead of treating decrypt failures as empty credentials.
+ */
+export function decryptWithResult(value) {
+  if (!value || typeof value !== 'string') return { ok: true, value, encrypted: false };
+  if (!value.startsWith(PREFIX)) return { ok: true, value, encrypted: false };
 
   try {
     const key = getKey();
-    const packed = Buffer.from(value.slice(PREFIX.length), 'base64');
+    const raw = value.startsWith(VERSIONED_PREFIX)
+      ? value.slice(VERSIONED_PREFIX.length)
+      : value.slice(PREFIX.length);
+    const packed = Buffer.from(raw, 'base64');
     const iv = packed.subarray(0, 12);
     const tag = packed.subarray(12, 28);
     const ciphertext = packed.subarray(28);
@@ -78,10 +91,9 @@ export function decrypt(value) {
     decipher.setAuthTag(tag);
     let decrypted = decipher.update(ciphertext, undefined, 'utf8');
     decrypted += decipher.final('utf8');
-    return decrypted;
-  } catch {
-    // Decryption failed (wrong machine, corrupted data) — return empty
-    return '';
+    return { ok: true, value: decrypted, encrypted: true };
+  } catch (error) {
+    return { ok: false, value: '', encrypted: true, errorCode: 'decrypt_failed', error };
   }
 }
 

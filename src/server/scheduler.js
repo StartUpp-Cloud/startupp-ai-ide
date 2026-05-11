@@ -13,6 +13,8 @@ import { getDB } from './db.js';
 import { exec, execSync } from 'child_process';
 import { activityFeed } from './activityFeed.js';
 import { testGate } from './testGate.js';
+import { redactSecrets } from './connections/redaction.js';
+import { dockerEnvFlags, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
 
 /** Minimum allowed interval to prevent abuse (1 minute) */
 const MIN_INTERVAL_MS = 60_000;
@@ -470,13 +472,14 @@ class Scheduler extends EventEmitter {
       // Determine if this runs inside a container or on the host
       const useContainer = schedule.runTarget !== 'host';
       const containerName = useContainer ? this._getContainerName(schedule.projectId) : null;
+      const runtimeEnv = resolveRuntimeEnvironment({ projectId: schedule.projectId, target: 'scheduler' }).env;
       let command = schedule.command;
 
       if (containerName) {
         // Wrap command to run inside the container
         const workDir = schedule.projectPath || '/workspace';
         const escaped = command.replace(/"/g, '\\"');
-        command = `docker exec -w "${workDir}" ${containerName} bash -c "${escaped}"`;
+        command = `docker exec ${dockerEnvFlags(runtimeEnv)} -w "${workDir}" ${containerName} bash -c "${escaped}"`;
       }
 
       const execOptions = {
@@ -484,12 +487,12 @@ class Scheduler extends EventEmitter {
         timeout: DEFAULT_EXEC_TIMEOUT_MS,
         encoding: 'utf-8',
         maxBuffer: 5 * 1024 * 1024,
-        env: { ...process.env },
+        env: { ...process.env, ...runtimeEnv },
       };
 
       exec(command, execOptions, (error, stdout, stderr) => {
         const duration = Date.now() - startTime;
-        const output = this._combineOutput(stdout, stderr);
+        const output = redactSecrets(this._combineOutput(stdout, stderr));
         const truncated = output.length > MAX_OUTPUT_LENGTH
           ? output.slice(0, MAX_OUTPUT_LENGTH) + '\n... (output truncated)'
           : output;
@@ -525,6 +528,7 @@ class Scheduler extends EventEmitter {
     const useContainer = schedule.runTarget !== 'host';
     const containerName = useContainer ? this._getContainerName(schedule.projectId) : null;
     const workDir = schedule.projectPath || '/workspace';
+    const runtimeEnv = resolveRuntimeEnvironment({ projectId: schedule.projectId, target: 'scheduler' }).env;
 
     // Build the CLI command
     const escaped = schedule.command.replace(/"/g, '\\"');
@@ -546,7 +550,7 @@ class Scheduler extends EventEmitter {
 
     // Wrap in docker exec if container-based
     if (containerName) {
-      command = `docker exec -w "${workDir}" ${containerName} bash -c '${command.replace(/'/g, "'\\''")}'`;
+      command = `docker exec ${dockerEnvFlags(runtimeEnv)} -w "${workDir}" ${containerName} bash -c '${command.replace(/'/g, "'\\''")}'`;
     }
 
     return new Promise((resolve) => {
@@ -555,10 +559,10 @@ class Scheduler extends EventEmitter {
         timeout: 120000, // 2 min timeout for AI tools
         encoding: 'utf-8',
         maxBuffer: 5 * 1024 * 1024,
-        env: { ...process.env },
+        env: { ...process.env, ...runtimeEnv },
       }, (error, stdout, stderr) => {
         const duration = Date.now() - startTime;
-        const output = (stdout || '') + (stderr || '');
+        const output = redactSecrets((stdout || '') + (stderr || ''));
         const truncated = output.length > 10000 ? output.slice(0, 10000) + '\n...(truncated)' : output;
 
         resolve({
@@ -603,6 +607,7 @@ class Scheduler extends EventEmitter {
     const startTime = Date.now();
     const useContainer = schedule.runTarget !== 'host';
     const containerName = useContainer ? this._getContainerName(schedule.projectId) : null;
+    const runtimeEnv = resolveRuntimeEnvironment({ projectId: schedule.projectId, target: 'scheduler' }).env;
 
     try {
       if (containerName) {
@@ -612,10 +617,10 @@ class Scheduler extends EventEmitter {
         const escaped = testCmd.replace(/"/g, '\\"');
         const result = await new Promise((resolve) => {
           exec(
-            `docker exec -w "${workDir}" ${containerName} bash -c "${escaped}"`,
-            { encoding: 'utf-8', timeout: 120000, maxBuffer: 5 * 1024 * 1024 },
+            `docker exec ${dockerEnvFlags(runtimeEnv)} -w "${workDir}" ${containerName} bash -c "${escaped}"`,
+            { encoding: 'utf-8', timeout: 120000, maxBuffer: 5 * 1024 * 1024, env: { ...process.env, ...runtimeEnv } },
             (error, stdout, stderr) => {
-              const output = this._combineOutput(stdout, stderr);
+              const output = redactSecrets(this._combineOutput(stdout, stderr));
               resolve({
                 success: !error,
                 output: output.slice(0, MAX_OUTPUT_LENGTH),

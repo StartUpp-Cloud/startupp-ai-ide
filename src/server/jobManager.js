@@ -18,6 +18,7 @@ import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
 import { sqliteStore } from './sqliteStore.js';
+import { redactSecrets } from './connections/redaction.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const JOBS_DIR = path.join(__dirname, '../../data/jobs');
@@ -190,6 +191,7 @@ class JobManager extends EventEmitter {
   async recordOutput(jobId, data) {
     const active = this.activeJobs.get(jobId);
     if (!active) return;
+    data = redactSecrets(data);
 
     const { job, outputStream, timeoutTimer } = active;
 

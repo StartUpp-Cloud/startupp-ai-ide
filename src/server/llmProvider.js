@@ -11,6 +11,9 @@ import { promisify } from 'util';
 import * as pty from 'node-pty';
 import { sessionContext, RISK_LEVELS } from './sessionContext.js';
 import { encrypt, decrypt } from './fieldEncryption.js';
+import { decryptWithResult } from './fieldEncryption.js';
+import { redactObject, redactSecrets } from './connections/redaction.js';
+import { listConnections } from './sqliteStore.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -426,6 +429,9 @@ class LLMProvider extends EventEmitter {
       throw new Error('LLM is not enabled');
     }
 
+    prompt = redactSecrets(prompt);
+    context = redactObject(context || {});
+
     if (!this.available) {
       throw new Error('LLM is not available');
     }
@@ -552,7 +558,11 @@ class LLMProvider extends EventEmitter {
    * Generate response using OpenAI-compatible API
    */
   async generateOpenAIResponse(prompt, context) {
-    const { endpoint, model, apiKey, timeout } = this.settings.openai;
+    const appConnection = this.getApplicationConnection('openai', 'apiKey');
+    const { timeout } = this.settings.openai;
+    const endpoint = appConnection?.config.endpoint || this.settings.openai.endpoint;
+    const model = appConnection?.config.model || this.settings.openai.model;
+    const apiKey = appConnection?.secret || this.settings.openai.apiKey;
 
     if (!apiKey) {
       throw new Error('OpenAI API key not configured');
@@ -615,7 +625,11 @@ class LLMProvider extends EventEmitter {
    * Generate response using DeepSeek API (OpenAI-compatible)
    */
   async generateDeepSeekResponse(prompt, context) {
-    const { endpoint, model, apiKey, timeout } = this.settings.deepseek;
+    const appConnection = this.getApplicationConnection('deepseek', 'apiKey');
+    const { timeout } = this.settings.deepseek;
+    const endpoint = appConnection?.config.endpoint || this.settings.deepseek.endpoint;
+    const model = appConnection?.config.model || this.settings.deepseek.model;
+    const apiKey = appConnection?.secret || this.settings.deepseek.apiKey;
 
     if (!apiKey) {
       throw new Error('DeepSeek API key not configured');
@@ -679,7 +693,9 @@ class LLMProvider extends EventEmitter {
    * Uses the OpenAI-compatible chat completions endpoint.
    */
   async generateGitHubResponse(prompt, context) {
-    const { endpoint, model, apiKey, timeout } = this.settings.github;
+    const appConnection = this.getApplicationConnection('github', 'token');
+    const { endpoint, model, timeout } = this.settings.github;
+    const apiKey = appConnection?.secret || this.settings.github.apiKey;
 
     if (!apiKey) {
       throw new Error('GitHub token not configured. Go to LLM Settings and add a GitHub PAT with "copilot" scope.');
@@ -778,6 +794,23 @@ class LLMProvider extends EventEmitter {
    */
   buildSystemPrompt(context) {
     return buildFullSystemPrompt(context);
+  }
+
+  getApplicationConnection(providerId, fieldName = 'apiKey') {
+    try {
+      const connection = listConnections({ includeDisconnected: false })
+        .find((item) => item.providerId === providerId && item.kind === 'application' && ['connected', 'unknown'].includes(item.status));
+      if (!connection) return null;
+      const encrypted = connection.encryptedFields?.[fieldName];
+      const result = decryptWithResult(encrypted);
+      if (!result.ok || !result.value) return null;
+      return {
+        secret: result.value,
+        config: connection.nonSecretConfig || {},
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**

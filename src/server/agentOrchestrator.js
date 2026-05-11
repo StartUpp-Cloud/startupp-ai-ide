@@ -8,6 +8,8 @@ import { memoryStore } from './memoryStore.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_TASKS = 6;
+const ACTIVE_RUN_STATUSES = ['running'];
+const ACTIVE_RUN_STATUS_SQL = ACTIVE_RUN_STATUSES.map(() => '?').join(', ');
 
 const NON_RETRYABLE_PATTERNS = [
   /not configured|missing configuration|configuration required/i,
@@ -45,8 +47,10 @@ function parseJson(value, fallback = null) {
 
 function rowToRun(row) {
   if (!row) return null;
+  const data = parseJson(row.data, {});
   return {
-    ...parseJson(row.data, {}),
+    ...data,
+    data,
     id: row.id,
     projectId: row.project_id,
     sessionId: row.session_id,
@@ -94,6 +98,13 @@ class AgentOrchestrator extends EventEmitter {
   constructor() {
     super();
     this.activeRuns = new Map();
+  }
+
+  async init() {
+    const reconciled = this.reconcileInterruptedRuns();
+    if (reconciled.length > 0) {
+      console.log(`[agentOrchestrator] Reconciled ${reconciled.length} interrupted run(s) from persisted state`);
+    }
   }
 
   shouldOrchestrate({ mode, content, executeReviewedPlan = false }) {
@@ -192,6 +203,47 @@ class AgentOrchestrator extends EventEmitter {
   }
 
   getRunsForSession(projectId, sessionId, limit = 20) {
+    this.reconcileSessionRuns(projectId, sessionId);
+    return sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs WHERE project_id = ? AND session_id = ? ORDER BY started_at DESC LIMIT ?`)
+      .all(projectId, sessionId, limit)
+      .map(rowToRun);
+  }
+
+  reconcileInterruptedRuns(broadcastFn = null) {
+    const rows = sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs
+      WHERE status IN (${ACTIVE_RUN_STATUS_SQL})
+      ORDER BY updated_at DESC`).all(...ACTIVE_RUN_STATUSES);
+
+    const reconciled = [];
+    for (const row of rows) {
+      const run = rowToRun(row);
+      if (!run || this.activeRuns.has(run.id)) continue;
+      reconciled.push(this._markRunInterrupted(run, broadcastFn));
+    }
+    return reconciled.filter(Boolean);
+  }
+
+  reconcileSessionRuns(projectId, sessionId, broadcastFn = null) {
+    const rows = sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs
+      WHERE project_id = ? AND session_id = ? AND status IN (${ACTIVE_RUN_STATUS_SQL})
+      ORDER BY updated_at DESC`).all(projectId, sessionId, ...ACTIVE_RUN_STATUSES);
+
+    const reconciled = [];
+    for (const row of rows) {
+      const run = rowToRun(row);
+      if (!run || this.activeRuns.has(run.id)) {
+        if (run) this._emitRun(run, broadcastFn);
+        continue;
+      }
+
+      const interrupted = this._markRunInterrupted(run, broadcastFn);
+      if (interrupted) reconciled.push(interrupted);
+    }
+    return reconciled;
+  }
+
+  getRecentSessionRuns(projectId, sessionId, limit = 5) {
+    this.reconcileSessionRuns(projectId, sessionId);
     return sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs WHERE project_id = ? AND session_id = ? ORDER BY started_at DESC LIMIT ?`)
       .all(projectId, sessionId, limit)
       .map(rowToRun);
@@ -690,6 +742,35 @@ Instructions:
     const payload = { ...run, tasks: this.getTasks(run.id) };
     broadcastFn?.({ type: 'orchestrator-run', projectId: run.projectId, sessionId: run.sessionId, run: payload });
     this.emit('run', payload);
+  }
+
+  _markRunInterrupted(run, broadcastFn = null) {
+    const data = { ...(run.data || {}) };
+    const error = 'Autonomous run was interrupted before it could send a final response. Review the persisted events or retry the request.';
+    run.status = 'failed';
+    run.phase = 'failed';
+    run.error = error;
+    run.completedAt = nowIso();
+    run.updatedAt = run.completedAt;
+    run.data = { ...data, interrupted: true };
+    this._saveRun(run);
+
+    if (!data.reliabilityNoticeCreated) {
+      const msg = chatStore.addMessage({
+        projectId: run.projectId,
+        sessionId: run.sessionId,
+        role: 'error',
+        content: error,
+        metadata: { orchestratorRunId: run.id, interrupted: true },
+      });
+      broadcastFn?.({ type: 'chat-message', message: msg });
+      run.data = { ...run.data, reliabilityNoticeCreated: true };
+      this._saveRun(run);
+      this._event(run, null, 'run-interrupted', error, { interrupted: true }, broadcastFn, 'error').catch(() => {});
+    }
+
+    this._emitRun(run, broadcastFn);
+    return run;
   }
 }
 

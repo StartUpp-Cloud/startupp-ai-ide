@@ -15,6 +15,7 @@ import { initDB } from "./db.js";
 // Import terminal server
 import { terminalServer } from "./terminalServer.js";
 import { ptyManager } from "./ptyManager.js";
+import { agentOrchestrator } from "./agentOrchestrator.js";
 // Initialize agent shell pool (attaches ptyManager data listener in constructor)
 import "./agentShellPool.js";
 
@@ -45,6 +46,7 @@ import sessionHistoryRoutes from "./routes/sessionHistory.js";
 import chatRoutes from "./routes/chat.js";
 import profileRoutes from "./routes/profile.js";
 import slackRoutes from "./routes/slack.js";
+import connectionRoutes from "./routes/connections.js";
 import { authMiddleware, getToken } from "./authToken.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
@@ -122,6 +124,9 @@ async function startServer() {
     await jobManager.init();
     console.log("Job manager ready");
 
+    await agentOrchestrator.init();
+    console.log("Agent orchestrator ready");
+
     // API routes
     app.use("/api/projects", projectRoutes);
     app.use("/api/projects", promptRoutes); // This will handle /api/projects/:id/prompts
@@ -150,6 +155,7 @@ async function startServer() {
     app.use("/api/projects", chatRoutes);
     app.use("/api/profile", profileRoutes);
     app.use("/api/slack", slackRoutes);
+    app.use("/api/connections", connectionRoutes);
     app.use("/api/jobs", (await import("./routes/jobs.js")).default);
 
     // Health check endpoint

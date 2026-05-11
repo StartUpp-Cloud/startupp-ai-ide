@@ -594,6 +594,29 @@ function ChatSessionContent({
     });
   }, []);
 
+  const applyPersistedOrchestratorRuns = useCallback((runs = []) => {
+    const activeRun = runs.find(run => run && !['completed', 'failed', 'blocked', 'cancelled'].includes(run.status));
+    if (activeRun) {
+      setOrchestratorRun(activeRun);
+      setAgentBusy(true);
+      setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
+      return;
+    }
+
+    setOrchestratorRun(null);
+    setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
+  }, []);
+
+  const rehydrateOrchestratorRuns = useCallback((signal) => {
+    if (!projectId || !sessionId) return Promise.resolve();
+    return fetch(`/api/orchestrator/runs/${projectId}/${sessionId}?limit=5`, { signal })
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => applyPersistedOrchestratorRuns(data?.runs || []))
+      .catch(err => {
+        if (err?.name !== 'AbortError') console.warn('[chat] Failed to rehydrate orchestrator runs:', err.message);
+      });
+  }, [projectId, sessionId, applyPersistedOrchestratorRuns]);
+
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -661,6 +684,7 @@ function ChatSessionContent({
         messagesLoadedRef.current = true;
         // Mark as read
         markCurrentSessionRead();
+        rehydrateOrchestratorRuns(controller.signal);
       })
       .catch(() => { if (!cancelled) setMessages([]); })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -669,7 +693,7 @@ function ChatSessionContent({
       cancelled = true;
       controller.abort();
     };
-  }, [projectId, sessionId, isVisible, markCurrentSessionRead]);
+  }, [projectId, sessionId, isVisible, markCurrentSessionRead, rehydrateOrchestratorRuns]);
 
   useEffect(() => {
     if (isVisible) markCurrentSessionRead();
@@ -691,6 +715,7 @@ function ChatSessionContent({
           chatSessionId: sessionId,
           projectId,
         }));
+        rehydrateOrchestratorRuns();
         return true;
       }
       return false;
@@ -714,7 +739,7 @@ function ChatSessionContent({
       cancelled = true;
       wsRef?.current?.removeEventListener('open', handleOpen);
     };
-  }, [projectId, sessionId, isVisible, wsRef]);
+  }, [projectId, sessionId, isVisible, wsRef, rehydrateOrchestratorRuns]);
 
   // Handle WebSocket messages for THIS session
   useEffect(() => {
@@ -851,8 +876,11 @@ function ChatSessionContent({
           if (msg.projectId === projectId && msg.sessionId === sessionId && msg.run) {
             if (['completed', 'failed', 'blocked', 'cancelled'].includes(msg.run.status)) {
               setOrchestratorRun(null);
+              setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
+              setAgentBusy(false);
             } else {
               setOrchestratorRun(msg.run);
+              setAgentBusy(true);
             }
           }
           break;

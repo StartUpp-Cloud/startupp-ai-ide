@@ -4,6 +4,7 @@ import {
   Globe,
   Zap,
   Terminal,
+  PlugZap,
 } from "lucide-react";
 
 const Layout = ({ children }) => {
@@ -78,6 +79,18 @@ const Layout = ({ children }) => {
               >
                 <Zap className="w-3.5 h-3.5" />
                 <span>Quick Build</span>
+              </Link>
+
+              <Link
+                to="/connections"
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-200 ${
+                  isActive("/connections")
+                    ? "text-primary-400 bg-primary-500/10"
+                    : "text-surface-400 hover:text-surface-100 hover:bg-surface-750"
+                }`}
+              >
+                <PlugZap className="w-3.5 h-3.5" />
+                <span>Connections</span>
               </Link>
             </nav>
           </div>

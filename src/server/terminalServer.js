@@ -540,9 +540,23 @@ class TerminalServer {
           // Check for incomplete streaming messages and send recovery info
           const { chatStore } = await import('./chatStore.js');
           const { jobManager } = await import('./jobManager.js');
+          const { agentOrchestrator } = await import('./agentOrchestrator.js');
 
           const incomplete = chatStore.getIncompleteStreamingMessages(projectId, chatSessionId);
           const resumableJobs = jobManager.getResumableJobs(projectId, chatSessionId, 60);
+          agentOrchestrator.reconcileSessionRuns(projectId, chatSessionId, (data) => this.send(ws, data));
+          const recentRuns = agentOrchestrator.getRecentSessionRuns(projectId, chatSessionId, 5);
+
+          if (recentRuns.length > 0) {
+            for (const run of recentRuns) {
+              this.send(ws, {
+                type: 'orchestrator-run',
+                projectId,
+                sessionId: chatSessionId,
+                run: { ...run, tasks: agentOrchestrator.getTasks(run.id) },
+              });
+            }
+          }
 
           // Handle incomplete streaming messages (connection dropped mid-stream)
           if (incomplete.length > 0) {

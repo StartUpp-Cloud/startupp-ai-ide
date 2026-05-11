@@ -13,6 +13,7 @@ import BranchReview from "./pages/BranchReview";
 import DebugElement from "./pages/DebugElement";
 import Onboarding from "./pages/Onboarding";
 import Skills from "./pages/Skills";
+import Connections from "./pages/Connections";
 import { ProjectProvider } from "./contexts/ProjectContext";
 import NotificationToast from "./components/NotificationToast";
 
@@ -90,6 +91,7 @@ function App() {
           <Route path="/debug" element={<DebugElement />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/skills" element={<Skills />} />
+          <Route path="/connections" element={<Layout><Connections /></Layout>} />
         </Routes>
       </SetupGate>
       <NotificationToast />
