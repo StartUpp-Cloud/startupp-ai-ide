@@ -12,6 +12,9 @@ const PR_BADGE = {
   MERGED: { color: 'text-purple-400 bg-purple-500/10', icon: GitMerge, label: 'merged' },
 };
 
+const BRANCH_FAST_TIMEOUT_MS = 6000;
+const BRANCH_ENRICH_TIMEOUT_MS = 12000;
+
 function buildQuery(params) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
@@ -24,6 +27,22 @@ function appendQuery(queryString, key, value) {
   const query = new URLSearchParams(queryString);
   query.set(key, value);
   return query.toString();
+}
+
+async function fetchJsonWithTimeout(url, { signal, timeoutMs }) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timer = setTimeout(abort, timeoutMs);
+  signal?.addEventListener('abort', abort, { once: true });
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
 }
 
 function BranchItem({ branch, isActive, onSelect }) {
@@ -75,6 +94,8 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const [newBranchName, setNewBranchName] = useState('');
   const [folders, setFolders] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [branchLoadError, setBranchLoadError] = useState(null);
+  const [branchLoadKey, setBranchLoadKey] = useState(0);
   const [actionLoading, setActionLoading] = useState(null);
   const [actionResult, setActionResult] = useState(null);
   const switcherRef = useRef(null);
@@ -84,6 +105,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const resultTimer = useRef(null);
   const statusAbortRef = useRef(null);
   const branchAbortRef = useRef(null);
+  const branchRequestRef = useRef(0);
 
   const worktreePath = sessionBranch
     ? `/workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
@@ -138,31 +160,56 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     };
   }, [fetchStatus]);
 
-  // Fetch branches quickly first, then enrich with PR metadata in the background.
+  // Fetch local branches first, then enrich with remote branches and PR metadata in the background.
   useEffect(() => {
     if (!containerName || !showSwitcher) return;
 
     branchAbortRef.current?.abort();
     const controller = new AbortController();
+    const requestId = branchRequestRef.current + 1;
+    branchRequestRef.current = requestId;
     branchAbortRef.current = controller;
+    let hasFastData = false;
 
+    setBranchLoadError(null);
     setBranchData(prev => (prev?.repoPath && prev.repoPath === sourceRepoPath ? prev : null));
 
-    const fetchBranches = async (includePr) => {
-      const query = buildQuery({ repoPath: sourceRepoPath, includePr: includePr ? '1' : '0' });
+    const fetchBranches = async ({ includePr, includeRemote, timeoutMs }) => {
+      const query = buildQuery({
+        repoPath: sourceRepoPath,
+        includePr: includePr ? '1' : '0',
+        includeRemote: includeRemote ? '1' : '0',
+      });
       const suffix = query ? `?${query}` : '';
-      const response = await fetch(`/api/containers/${containerName}/branches${suffix}`, { signal: controller.signal });
-      return response.ok ? response.json() : null;
+      return fetchJsonWithTimeout(`/api/containers/${containerName}/branches${suffix}`, {
+        signal: controller.signal,
+        timeoutMs,
+      });
     };
 
-    fetchBranches(false)
-      .then(data => { if (data) setBranchData(data); })
-      .then(() => fetchBranches(true))
-      .then(data => { if (data) setBranchData(data); })
-      .catch(err => { if (err.name !== 'AbortError') {} });
+    const applyBranchData = (data) => {
+      if (!data || branchRequestRef.current !== requestId || controller.signal.aborted) return;
+      setBranchData(data);
+    };
+
+    fetchBranches({ includePr: false, includeRemote: false, timeoutMs: BRANCH_FAST_TIMEOUT_MS })
+      .then(data => {
+        hasFastData = true;
+        applyBranchData(data);
+        return fetchBranches({ includePr: true, includeRemote: true, timeoutMs: BRANCH_ENRICH_TIMEOUT_MS }).catch(() => null);
+      })
+      .then(applyBranchData)
+      .catch(err => {
+        if (controller.signal.aborted || branchRequestRef.current !== requestId) return;
+        if (!hasFastData) {
+          setBranchLoadError(err.name === 'AbortError'
+            ? 'Branch loading timed out. Try again.'
+            : 'Could not load branches. Try again.');
+        }
+      });
 
     return () => controller.abort();
-  }, [containerName, showSwitcher, sourceRepoPath]);
+  }, [containerName, showSwitcher, sourceRepoPath, branchLoadKey]);
 
   // Fetch workspace folders when folder picker opens
   useEffect(() => {
@@ -336,6 +383,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
       const data = await res.json();
       setGitStatus(null);
       setBranchData(null);
+      setBranchLoadError(null);
       const sessionUpdates = { branch: name };
       if (data.repoPath && data.repoPath !== '/workspace') sessionUpdates.repoPath = data.repoPath;
       if (data.worktreePath && !data.worktreePath.includes('.worktrees')) {
@@ -380,6 +428,8 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
         }
         if (Object.keys(sessionUpdates).length > 1 && onSessionUpdate) {
           setGitStatus(null);
+          setBranchData(null);
+          setBranchLoadError(null);
           onSessionUpdate(sessionUpdates);
           return;
         }
@@ -391,6 +441,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
 
     setGitStatus(null);
     setBranchData(null);
+    setBranchLoadError(null);
     onBranchChange?.(branch || null);
   };
 
@@ -502,12 +553,35 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
                 )}
 
                 {!groups ? (
-                  <div className="flex items-center justify-center py-6">
-                    <Loader size={14} className="animate-spin text-surface-500" />
-                  </div>
+                  branchLoadError ? (
+                    <div className="px-3 py-4 text-center text-[11px] text-surface-400 space-y-2">
+                      <div className="flex items-center justify-center gap-1.5 text-red-400">
+                        <AlertCircle size={12} />
+                        <span>{branchLoadError}</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setBranchLoadError(null);
+                          setBranchLoadKey(k => k + 1);
+                        }}
+                        className="px-2 py-1 rounded bg-surface-700 hover:bg-surface-600 text-surface-200 transition-colors"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center gap-2 py-6 text-[11px] text-surface-500">
+                      <Loader size={14} className="animate-spin" />
+                      Loading branches...
+                    </div>
+                  )
                 ) : totalResults === 0 && searchQuery ? (
                   <div className="px-3 py-4 text-center text-[11px] text-surface-500">
                     No branches matching "{searchQuery}"
+                  </div>
+                ) : totalResults === 0 ? (
+                  <div className="px-3 py-4 text-center text-[11px] text-surface-500">
+                    No branches found
                   </div>
                 ) : (
                   <>

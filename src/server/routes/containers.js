@@ -426,8 +426,9 @@ router.get("/:name/branches", async (req, res) => {
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
     const includePr = req.query.includePr !== "0" && req.query.includePr !== "false";
+    const includeRemote = req.query.includeRemote !== "0" && req.query.includeRemote !== "false";
     const requestedRepoPath = req.query.repoPath || "auto";
-    const cacheKey = containerCacheKey(name, "branches", requestedRepoPath, includePr);
+    const cacheKey = containerCacheKey(name, "branches", requestedRepoPath, includePr, includeRemote);
     const data = await getCached(
       cacheKey,
       includePr ? CACHE_TTLS.branchesWithPrs : CACHE_TTLS.branches,
@@ -442,7 +443,9 @@ router.get("/:name/branches", async (req, res) => {
           exec(`cd '${repoPath}' && git config user.name 2>/dev/null`),
           exec(`cd '${repoPath}' && git config user.email 2>/dev/null`),
           exec(`cd '${repoPath}' && git branch --list --format='%(refname:short)|%(authorname)|%(authoremail)|%(creatordate:iso8601)' 2>/dev/null`),
-          exec(`cd '${repoPath}' && git branch -r --format='%(refname:short)' 2>/dev/null`),
+          includeRemote
+            ? exec(`cd '${repoPath}' && git branch -r --format='%(refname:short)' 2>/dev/null`)
+            : Promise.resolve(null),
         ]);
 
         const current = currentRaw?.trim() || null;
@@ -491,7 +494,7 @@ router.get("/:name/branches", async (req, res) => {
                   !!(gitEmail && b.email && b.email.includes(gitEmail)),
         }));
 
-        return { repoPath, current, branches: enriched, remoteBranches, gitUser, prEnriched: includePr };
+        return { repoPath, current, branches: enriched, remoteBranches, gitUser, prEnriched: includePr, remoteEnriched: includeRemote };
       },
       { force: isRefreshRequest(req) },
     );
