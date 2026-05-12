@@ -69,6 +69,7 @@ class ChatStore {
       updatedAt: new Date().toISOString(),
       messageCount: 0,
       manualName: false,
+      status: 'open',
       ...resolvedAssistant,
     }, projectId);
   }

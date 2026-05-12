@@ -688,6 +688,10 @@ class TerminalServer {
           this.broadcast(data);
         };
 
+        // Auto-name session on first message (before routing fork so both
+        // gateway and orchestrator paths trigger naming).
+        agentGateway.autoNameSession(payload.projectId, chatSessionId, payload.content);
+
         const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({ mode: payload.mode, content: payload.content });
         const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
 
@@ -852,9 +856,23 @@ class TerminalServer {
       case 'chat-stop': {
         const { agentGateway } = await import('./agentGateway.js');
         const { agentOrchestrator } = await import('./agentOrchestrator.js');
+        const { chatStore: stopChatStore } = await import('./chatStore.js');
+        const stopSessionId = payload.sessionId || payload.projectId;
+        // Check running state before abort (abort flips the flag)
+        const wasRunning = agentGateway.isRunning(stopSessionId);
         // Abort by session ID (supports parallel sessions)
-        agentOrchestrator.abortSession(payload.sessionId || payload.projectId);
-        agentGateway.abort(payload.sessionId || payload.projectId);
+        const orchestratorAborted = agentOrchestrator.abortSession(stopSessionId);
+        agentGateway.abort(stopSessionId);
+        // Persist a visible "Stopped" message so the user sees feedback in chat history
+        if (wasRunning || orchestratorAborted > 0) {
+          const stoppedMsg = stopChatStore.addMessage({
+            projectId: payload.projectId,
+            sessionId: payload.sessionId,
+            role: 'error',
+            content: 'Stopped by user.',
+          });
+          this.broadcastToChatSession(payload.sessionId, { type: 'chat-message', message: stoppedMsg });
+        }
         this.broadcastToChatSession(payload.sessionId, { type: 'agent-status', projectId: payload.projectId, sessionId: payload.sessionId, busy: false });
         this.broadcast({ type: 'agent-status', projectId: payload.projectId, sessionId: payload.sessionId, busy: false });
         break;

@@ -110,20 +110,18 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const worktreePath = sessionBranch
     ? `/workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
     : null;
-  // Priority: worktree > explicit user selection > auto-detected > fallback.
-  // /workspace is displayed as the root choice but git endpoints still auto-detect the repo.
+  // Priority: worktree > explicit user selection > workspace root.
+  // Do not auto-detect a repo for the default state; multi-repo workspaces must
+  // stay at /workspace until the user selects a folder or branch.
   const hasExplicitPath = sessionRepoPath !== null && sessionRepoPath !== undefined;
-  const effectivePath = worktreePath || (hasExplicitPath ? sessionRepoPath : null) || gitStatus?.repoPath || '/workspace';
+  const effectivePath = worktreePath || (hasExplicitPath ? sessionRepoPath : null) || '/workspace';
   const displayPath = effectivePath;
-  const hasExplicitRepoPath = hasExplicitPath && sessionRepoPath !== '/workspace';
-  const sourceRepoPath = hasExplicitRepoPath
-    ? sessionRepoPath
-    : (gitStatus?.repoPath && gitStatus.repoPath !== '/workspace' ? gitStatus.repoPath : null);
+  const sourceRepoPath = worktreePath ? null : (hasExplicitPath ? sessionRepoPath : '/workspace');
 
-  // Build query params for git endpoints; /workspace stays auto-detected server-side.
+  // Build query params for git endpoints; /workspace is passed explicitly.
   const gitPathQuery = buildQuery({
     worktreePath,
-    repoPath: !worktreePath && hasExplicitRepoPath ? sessionRepoPath : null,
+    repoPath: !worktreePath ? sourceRepoPath : null,
   });
 
   // Fetch git status
@@ -404,39 +402,49 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     setShowSwitcher(false);
     if (branch === sessionBranch) return;
 
-    if (branch && branch !== '') {
-      try {
-        const res = await fetch(`/api/containers/${containerName}/worktree`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ branch, ...(sourceRepoPath ? { repoPath: sourceRepoPath } : {}) }),
-        });
-        if (!res.ok) {
-          const err = await res.json();
-          const msg = err.detail
-            ? `${err.error}: ${err.detail}`
-            : err.error || 'Failed to create worktree';
-          showResult('switch', false, msg);
-          return;
-        }
-        const data = await res.json();
-        // If the branch is checked out at a non-standard location (e.g. main repo),
-        // also update the session repoPath so the folder picker reflects it
-        const sessionUpdates = { branch };
-        if (data.repoPath && data.repoPath !== '/workspace') sessionUpdates.repoPath = data.repoPath;
-        if (data.reused && data.worktreePath && !data.worktreePath.includes('.worktrees')) {
-          sessionUpdates.repoPath = data.worktreePath;
-        }
-        if (Object.keys(sessionUpdates).length > 1 && onSessionUpdate) {
-          setGitStatus(null);
-          setBranchData(null);
-          setBranchLoadError(null);
-          onSessionUpdate(sessionUpdates);
-          return;
-        }
-      } catch (err) {
-        showResult('switch', false, err.message);
+    if (!branch) {
+      setGitStatus(null);
+      setBranchData(null);
+      setBranchLoadError(null);
+      if (onSessionUpdate) {
+        onSessionUpdate({ branch: null, repoPath: '/workspace' });
+      } else {
+        onBranchChange?.(null);
+      }
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/containers/${containerName}/worktree`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch, ...(sourceRepoPath ? { repoPath: sourceRepoPath } : {}) }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        const msg = err.detail
+          ? `${err.error}: ${err.detail}`
+          : err.error || 'Failed to create worktree';
+        showResult('switch', false, msg);
         return;
       }
+      const data = await res.json();
+      // If the branch is checked out at a non-standard location (e.g. main repo),
+      // also update the session repoPath so the folder picker reflects it
+      const sessionUpdates = { branch };
+      if (data.repoPath && data.repoPath !== '/workspace') sessionUpdates.repoPath = data.repoPath;
+      if (data.reused && data.worktreePath && !data.worktreePath.includes('.worktrees')) {
+        sessionUpdates.repoPath = data.worktreePath;
+      }
+      if (Object.keys(sessionUpdates).length > 1 && onSessionUpdate) {
+        setGitStatus(null);
+        setBranchData(null);
+        setBranchLoadError(null);
+        onSessionUpdate(sessionUpdates);
+        return;
+      }
+    } catch (err) {
+      showResult('switch', false, err.message);
+      return;
     }
 
     setGitStatus(null);
@@ -448,7 +456,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   if (!containerName) return null;
 
   // Session branch (user's explicit selection) takes priority over polled git status
-  const branch = sessionBranch || gitStatus?.branch || 'main';
+  const branch = sessionBranch || gitStatus?.branch || 'Workspace';
   const isMain = ['main', 'master'].includes(branch);
   const pr = gitStatus?.pr;
   const hasDirty = gitStatus?.dirty > 0;
@@ -691,7 +699,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
               >
                 <Folder size={11} className="flex-shrink-0" />
                 <span className="truncate flex-1">/workspace</span>
-                <span className="text-[9px] text-surface-500">auto-detect</span>
+                <span className="text-[9px] text-surface-500">root</span>
                 {displayPath === '/workspace' && <Check size={10} className="flex-shrink-0 text-primary-400" />}
               </button>
               {!folders ? (

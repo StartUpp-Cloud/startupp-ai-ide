@@ -563,6 +563,7 @@ function ChatSessionContent({
   const prevMessageCountRef = useRef(0);
   const isInitialLoadRef = useRef(true);
   const messagesLoadedRef = useRef(false);
+  const visibleSinceRef = useRef(isVisible ? Date.now() : 0);
 
   // Scroll position tracking for jump buttons
   const [showJumpBottom, setShowJumpBottom] = useState(false);
@@ -577,22 +578,32 @@ function ChatSessionContent({
 
     setLiveProgressEntries(prev => {
       if (prev.some(entry => entry.id === id)) return prev;
-      const last = prev[prev.length - 1];
-      if (last?.content === content && Math.abs(new Date(createdAt).getTime() - new Date(last.createdAt).getTime()) < 3000) {
-        return prev;
-      }
+      // Suppress identical content within 8s window to avoid visual repetition
+      const isDuplicate = prev.some(entry =>
+        entry.content === content && Math.abs(new Date(createdAt).getTime() - new Date(entry.createdAt).getTime()) < 8000
+      );
+      if (isDuplicate) return prev;
       return [...prev, { id, content, createdAt }].slice(-80);
     });
   }, []);
 
+  useEffect(() => {
+    if (isVisible) visibleSinceRef.current = Date.now();
+  }, [isVisible]);
+
   const markMessageForTyping = useCallback((message) => {
     if (!message?.id || (message.role !== 'agent' && message.role !== 'error')) return;
+    if (!isVisible || !visibleSinceRef.current) return;
+
+    const createdAt = new Date(message.createdAt || 0).getTime();
+    if (!Number.isFinite(createdAt) || createdAt < visibleSinceRef.current) return;
+
     setTypingMessageIds(prev => {
       const next = new Set(prev);
       next.add(message.id);
       return next;
     });
-  }, []);
+  }, [isVisible]);
 
   const applyPersistedOrchestratorRuns = useCallback((runs = []) => {
     const activeRun = runs.find(run => run && !['completed', 'failed', 'blocked', 'cancelled'].includes(run.status));
@@ -923,6 +934,8 @@ function ChatSessionContent({
             if (!msg.busy) {
               setStreamingMessage(null);
               streamingChunksRef.current = '';
+              setLiveProgressEntries([]);
+              setLiveChangedFiles([]);
               setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
             }
           }
@@ -1012,7 +1025,7 @@ function ChatSessionContent({
   useEffect(() => {
     if (!projectId || !sessionId || !isVisible) return;
 
-    const poll = setInterval(() => {
+    const syncMessages = () => {
       fetch(`/api/projects/${projectId}/chat?limit=20&sessionId=${sessionId}`)
         .then(r => r.json())
         .then(data => {
@@ -1065,7 +1078,11 @@ function ChatSessionContent({
           }
         })
         .catch(() => {});
-    }, 2000);
+
+    };
+
+    syncMessages();
+    const poll = setInterval(syncMessages, 2000);
 
     return () => clearInterval(poll);
   }, [projectId, sessionId, isVisible, markMessageForTyping]);
@@ -1315,9 +1332,16 @@ function ChatSessionContent({
       });
     }
 
-    return [...byKey.values()]
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-      .slice(-80);
+    // Collapse consecutive entries with identical content (server-side dedup
+    // may miss tight races, so we catch them here before rendering).
+    const sorted = [...byKey.values()]
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const deduped = [];
+    for (const entry of sorted) {
+      if (deduped.length > 0 && deduped[deduped.length - 1].content === entry.content) continue;
+      deduped.push(entry);
+    }
+    return deduped.slice(-80);
   }, [sortedMessages, liveProgressEntries, searchResults]);
 
   const filteredMessages = useMemo(() => {
@@ -1620,12 +1644,12 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
         const list = data.sessions || [];
         setSessions(list);
         if (list.length > 0) {
-          // Auto-open all pinned sessions + the most recent session
-          const pinnedIds = list.filter(s => s.pinned).map(s => s.id);
+          // Restore sessions that were open (or pinned) before refresh
+          const openIds = list.filter(s => s.status === 'open' || s.pinned).map(s => s.id);
           const mostRecentId = list[0].id;
-          const tabsToOpen = pinnedIds.includes(mostRecentId)
-            ? pinnedIds
-            : [mostRecentId, ...pinnedIds];
+          const tabsToOpen = openIds.length > 0
+            ? (openIds.includes(mostRecentId) ? openIds : [mostRecentId, ...openIds])
+            : [mostRecentId];
           setOpenTabs(tabsToOpen);
           setActiveSessionId(mostRecentId);
         } else {
@@ -1659,6 +1683,22 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           setActiveSessionId(newest.id);
         }
 
+        // Reconcile session status: openTabs is the client source-of-truth.
+        // If a status PATCH was lost (network glitch, tab closed mid-flight),
+        // fire a corrective PATCH so the server stays in sync for recovery.
+        const currentOpenTabs = new Set(openTabsRef.current);
+        for (const serverSession of latest) {
+          if (serverSession.pending) continue;
+          const expectedStatus = currentOpenTabs.has(serverSession.id) ? 'open' : 'closed';
+          if (serverSession.status !== expectedStatus) {
+            fetch(`/api/projects/${projectId}/chat/sessions/${serverSession.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status: expectedStatus }),
+            }).catch(() => {});
+          }
+        }
+
         // Merge server data into local state.
         // Server is authoritative for metadata (messageCount, hasUnread, name),
         // but we preserve local composer settings to avoid clobbering optimistic
@@ -1671,7 +1711,8 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
           ));
           const mergedLatest = latest.map(serverSession => {
             const local = localMap.get(serverSession.id);
-            if (!local) return serverSession; // brand-new session from server
+            const expectedStatus = currentOpenTabs.has(serverSession.id) ? 'open' : 'closed';
+            if (!local) return { ...serverSession, status: expectedStatus };
             return {
               ...serverSession,
               // Keep local assistant settings — they're set via PATCH and confirmed
@@ -1679,6 +1720,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
               tool: local.tool,
               model: local.model,
               effort: local.effort,
+              status: expectedStatus,
               activeRolePromptIds: Object.prototype.hasOwnProperty.call(local, 'activeRolePromptIds')
                 ? local.activeRolePromptIds
                 : serverSession.activeRolePromptIds,
@@ -1706,6 +1748,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       createdAt: new Date().toISOString(),
       messageCount: 0,
       manualName: false,
+      status: 'open',
       tool,
       pending: true,
     };
@@ -1795,7 +1838,15 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
     setActiveSessionId(sessionId);
     setShowSessionList(false);
     markSessionRead(sessionId);
-  }, [openTabs, markSessionRead]);
+    // Persist open status for recovery on refresh
+    if (projectId) {
+      fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'open' }),
+      }).catch(() => {});
+    }
+  }, [projectId, openTabs, markSessionRead]);
 
   const openHistorySession = useCallback((session) => {
     if (!session?.id) return;
@@ -1816,7 +1867,15 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
       }
       return filtered;
     });
-  }, [activeSessionId, createNewSession]);
+    // Persist closed status for recovery on refresh
+    if (projectId) {
+      fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'closed' }),
+      }).catch(() => {});
+    }
+  }, [projectId, activeSessionId, createNewSession]);
 
   // Handle session state updates from child components
   const handleSessionUpdate = useCallback((sessionId, updates) => {

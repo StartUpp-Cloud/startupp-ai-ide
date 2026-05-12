@@ -52,8 +52,9 @@ class AgentShellPool extends EventEmitter {
         const started = containerManager.startContainer(containerName);
         if (!started) throw new Error(`Failed to start container ${containerName}`);
       }
-      // Use worktree path override if provided (branch-per-session)
-      workingDir = cwdOverride || containerManager.getWorkDir(containerName) || '/workspace';
+      // Use an explicit session path when provided; otherwise stay at the
+      // workspace root so multi-repo projects do not pick an arbitrary repo.
+      workingDir = cwdOverride || '/workspace';
       // Verify the CWD exists in the container — attempt to re-create worktree if missing
       if (workingDir !== '/workspace') {
         const exists = containerManager.execInContainer(containerName,

@@ -21,6 +21,7 @@ import { skillManager } from './skillManager.js';
 import { memoryStore } from './memoryStore.js';
 import { ollamaWorkspaceOrchestrator } from './ollamaWorkspaceOrchestrator.js';
 import { getDB } from './db.js';
+import Project from './models/Project.js';
 import { supportsSessionEffortSelection, supportsSessionModelSelection } from './sessionSettings.js';
 import fs from 'fs';
 import path from 'path';
@@ -32,6 +33,8 @@ class AgentGateway extends EventEmitter {
     this._running = new Map();
     this._cliSessions = new Map();
     this._activeShellSessions = new Map();
+    // Dedup: track last progress per session to suppress rapid identical messages
+    this._lastProgress = new Map(); // sessionId -> { content, ts }
   }
 
   resetSession(sessionId) {
@@ -82,6 +85,46 @@ class AgentGateway extends EventEmitter {
     chatStore.updateSessionMeta(projectId, chatSessionId, meta);
   }
 
+  _worktreePathForBranch(branch) {
+    if (!branch) return null;
+    const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, '-');
+    return `/workspace/.worktrees/${safeBranch}`;
+  }
+
+  _sessionWorkDir(projectId, sessionMeta) {
+    const explicitWorktreePath = sessionMeta?.worktreePath?.trim();
+    if (explicitWorktreePath) return explicitWorktreePath;
+
+    const branchPath = this._worktreePathForBranch(sessionMeta?.branch || null);
+    if (branchPath) return branchPath;
+
+    const repoPath = sessionMeta?.repoPath?.trim();
+    if (repoPath) return repoPath;
+
+    const project = projectId ? Project.findById(projectId) : null;
+    return project?.containerName ? '/workspace' : null;
+  }
+
+  _sessionWorkContext(projectId, sessionMeta) {
+    const sessionBranch = sessionMeta?.branch || null;
+    const repoPath = sessionMeta?.repoPath?.trim() || null;
+    const workDir = this._sessionWorkDir(projectId, sessionMeta);
+    if (sessionBranch) {
+      const sourceRepo = repoPath ? `\n- Source repository path selected in the IDE: ${repoPath}.` : '';
+      return {
+        workDir,
+        message: `WORKING BRANCH: You are assigned to branch '${sessionBranch}' in a git worktree at ${workDir}.${sourceRepo}\n- ALWAYS work within this directory. All file reads, edits, commands, and tests must target ${workDir}.\n- Do NOT modify files outside this worktree.\n- When committing, you are already on branch '${sessionBranch}' — do not switch branches.\n- Your current working directory has been set to ${workDir}.`,
+        reminder: `[Working on branch '${sessionBranch}' in ${workDir}${repoPath ? `; source repo ${repoPath}` : ''} — stay in this directory]`,
+      };
+    }
+    if (!workDir) return null;
+    return {
+      workDir,
+      message: `WORKING DIRECTORY: Your current working directory has been set to ${workDir}.\n- Use this directory for file reads, edits, commands, and tests unless the user explicitly selects or names another path.\n- Do not infer a repository branch when ${workDir} is not a git repository.`,
+      reminder: `[Working directory: ${workDir}]`,
+    };
+  }
+
   // ── Entry point ──
 
   async handleTask({
@@ -95,33 +138,32 @@ class AgentGateway extends EventEmitter {
     effort = null,
     broadcastFn,
     skipUnread = false,
+    orchestrated = false,
   }) {
     const existing = this._running.get(sessionId);
     if (existing && existing.queue) {
       existing.queue = existing.queue.then(() => {
         if (existing.aborted) return null;
-        return this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn, skipUnread });
+        return this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn, skipUnread, orchestrated });
       });
       return existing.queue;
     }
 
     this._running.set(sessionId, { aborted: false, startedAt: Date.now(), queue: null });
-    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn, skipUnread });
+    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn, skipUnread, orchestrated });
     const entry = this._running.get(sessionId);
     if (entry) entry.queue = promise;
     return promise;
   }
 
-  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, model, effort, broadcastFn, skipUnread = false }) {
+  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, model, effort, broadcastFn, skipUnread = false, orchestrated = false }) {
     const ctx = this._running.get(sessionId) || { aborted: false, queue: null };
+    ctx.orchestrated = orchestrated;
     ctx.startedAt = Date.now();
     this._running.set(sessionId, ctx);
 
     try {
       broadcastFn({ type: 'agent-status', projectId, sessionId, busy: true });
-
-      // Auto-name session on first message (async, don't wait)
-      this._autoNameSession(projectId, sessionId, content);
 
       // Build content with attachments context
       const fullContent = await this._buildContentWithAttachments(content, attachments, projectId);
@@ -178,6 +220,7 @@ class AgentGateway extends EventEmitter {
     } finally {
       this._activeShellSessions.delete(sessionId);
       this._running.delete(sessionId);
+      this._lastProgress.delete(sessionId);
       broadcastFn({ type: 'agent-status', projectId, sessionId, busy: false });
     }
   }
@@ -491,14 +534,8 @@ RULES:
   // ── Run a shell command and format the result ──
 
   async _runShellCommand(projectId, sessionId, cmd, originalQuestion, broadcastFn, ctx, skipUnread = false) {
-    // Resolve worktree CWD override for branch-scoped sessions
     const sessionMeta = sessionId && projectId ? chatStore.getSession(projectId, sessionId) : null;
-    const shellBranch = sessionMeta?.branch || null;
-    let shellCwdOverride = null;
-    if (shellBranch) {
-      const safeBranch = shellBranch.replace(/[^a-zA-Z0-9._-]/g, '-');
-      shellCwdOverride = `/workspace/.worktrees/${safeBranch}`;
-    }
+    const shellCwdOverride = this._sessionWorkDir(projectId, sessionMeta);
 
     let shellSessionId;
     try {
@@ -562,7 +599,7 @@ RULES:
         target = {
           type: 'container',
           containerName: project.containerName,
-          workDir: safeBranch ? `/workspace/.worktrees/${safeBranch}` : (containerManager.getWorkDir(project.containerName) || '/workspace'),
+          workDir: sessionMeta?.worktreePath?.trim() || (safeBranch ? this._worktreePathForBranch(sessionBranch) : (sessionMeta?.repoPath?.trim() || '/workspace')),
           containerManager,
         };
       } else if (project.folderPath) {
@@ -675,7 +712,7 @@ RULES:
       prompt: message,
     });
 
-    const fileTracker = mode === 'agent'
+    const fileTracker = mode !== 'plan' && mode !== 'plan-review'
       ? await this._createChangedFileTracker(projectId, chatSessionId)
       : null;
 
@@ -690,8 +727,10 @@ RULES:
         jobId: job.id,
         progress,
       });
-      // Also send as a progress message for the chat
-      if (progress.summary) {
+      // Also send as a progress message for the chat (non-orchestrated only;
+      // orchestrated runs unify progress through _handleAgentBroadcast)
+      const runCtx = this._running.get(chatSessionId);
+      if (progress.summary && !runCtx?.orchestrated) {
         this._addProgressMessage(projectId, chatSessionId, progress.summary, broadcastFn);
       }
     };
@@ -923,14 +962,8 @@ RULES:
   async _attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
     const { job, onChunk, distilledContext, fileTracker } = streamOpts;
 
-    // Look up session branch for worktree CWD override
     const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
-    const sessionBranch = sessionMeta?.branch || null;
-    let worktreeOverride = null;
-    if (sessionBranch) {
-      const safeBranch = sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-');
-      worktreeOverride = `/workspace/.worktrees/${safeBranch}`;
-    }
+    const worktreeOverride = this._sessionWorkDir(projectId, sessionMeta);
 
     // Get or create shell session
     let shellSessionId;
@@ -1153,9 +1186,9 @@ RULES:
         }
       }
 
-      // ── Auto-approve prompts (Agent mode only) ──
+      // ── Auto-approve prompts (write-capable modes only) ──
       // In Plan mode, Claude should only analyze — no prompts expected
-      if (mode === 'agent') {
+      if (mode !== 'plan' && mode !== 'plan-review') {
         const fastResponse = this._fastPromptDetect(cleanChunk);
         if (fastResponse !== null) {
           agentShellPool.write(shellSessionId, fastResponse + '\n');
@@ -1167,6 +1200,16 @@ RULES:
             if (autoResponse !== null) {
               agentShellPool.write(shellSessionId, autoResponse + '\n');
               this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
+            } else {
+              // Fallback: in orchestrated/autonomous sessions, decline the prompt
+              // to prevent the shell from hanging indefinitely with no user to respond.
+              const runCtx = this._running.get(chatSessionId);
+              if (runCtx?.orchestrated) {
+                agentShellPool.write(shellSessionId, 'n\n');
+                this._addProgressMessage(projectId, chatSessionId,
+                  `⚠ Declined agent prompt requiring user confirmation (orchestrated mode): "${cleanChunk.slice(-200).trim()}"`,
+                  broadcastFn);
+              }
             }
           }
         }
@@ -1622,8 +1665,9 @@ ${String(agentResponse || '').slice(0, 6000)}`;
     // Include branch/worktree context if this session is branch-scoped
     const sessionMeta = chatStore.getSession(projectId, chatSessionId);
     const sessionBranch = sessionMeta?.branch || null;
-    const branchCtx = sessionBranch
-      ? `\nWORKING BRANCH: ${sessionBranch} (worktree at /workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')})\n`
+    const workContext = this._sessionWorkContext(projectId, sessionMeta);
+    const branchCtx = sessionBranch && workContext?.workDir
+      ? `\nWORKING BRANCH: ${sessionBranch} (worktree at ${workContext.workDir})\n`
       : '';
 
     const prompt = `You are a context distiller for an AI coding assistant orchestrator. Analyze the conversation history below and produce a concise context brief that will be injected into the next message to the coding assistant.
@@ -1691,9 +1735,7 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
       if (project?.containerName) {
         const { containerManager } = await import('./containerManager.js');
         const sessionMeta = chatStore.getSession(projectId, chatSessionId);
-        const workDir = sessionMeta?.branch
-          ? `/workspace/.worktrees/${sessionMeta.branch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
-          : containerManager.getWorkDir(project.containerName) || '/workspace';
+        const workDir = this._sessionWorkDir(projectId, sessionMeta) || '/workspace';
         diffStat = containerManager.execInContainer(project.containerName,
           `cd '${workDir}' && git diff --stat HEAD 2>/dev/null | tail -20`,
           { timeout: 5000 },
@@ -1854,7 +1896,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
    * - Project rules
    * - Mode instruction (agent vs plan)
    */
-  _buildFirstMessagePreamble(tool, projectId, mode, assistantSettings = {}, sessionBranch = null) {
+  _buildFirstMessagePreamble(tool, projectId, mode, assistantSettings = {}, sessionMeta = null) {
     const parts = [];
 
     // Skip skills for Ollama models and Aider — Ollama models output raw JSON instead of
@@ -1884,12 +1926,8 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       }
     }
 
-    // Branch-per-session worktree instruction
-    if (sessionBranch) {
-      const safeBranch = sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-');
-      const worktreePath = `/workspace/.worktrees/${safeBranch}`;
-      parts.push(`\nWORKING BRANCH: You are assigned to branch '${sessionBranch}' in a git worktree at ${worktreePath}.\n- ALWAYS work within this directory. All file reads, edits, commands, and tests must target ${worktreePath}.\n- Do NOT modify files outside this worktree.\n- When committing, you are already on branch '${sessionBranch}' — do not switch branches.\n- Your current working directory has been set to ${worktreePath}.`);
-    }
+    const workContext = this._sessionWorkContext(projectId, sessionMeta);
+    if (workContext?.message) parts.push(`\n${workContext.message}`);
 
     // Profile
     const profile = this._getProfileContext();
@@ -1960,15 +1998,10 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
     // Look up session branch for worktree context (used by all tools + follow-ups)
     const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
-    const sessionBranch = sessionMeta?.branch || null;
+    const workContext = this._sessionWorkContext(projectId, sessionMeta);
 
     // Build a short branch context reminder for follow-ups and Aider
-    const branchReminder = (() => {
-      if (!sessionBranch) return '';
-      const safeBranch = sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-');
-      const worktreePath = `/workspace/.worktrees/${safeBranch}`;
-      return `[Working on branch '${sessionBranch}' in ${worktreePath} — stay in this directory]`;
-    })();
+    const branchReminder = workContext?.reminder || '';
 
     let fullMessage;
     if (tool === 'aider') {
@@ -1983,7 +2016,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       const branchCtx = branchReminder ? `<working_branch>\n${branchReminder}\n</working_branch>\n\n` : '';
       fullMessage = `${aiderRulesPreamble}${branchCtx}<task>\nThink carefully and thoroughly. Before making any changes, read all relevant project files to fully understand the existing code, patterns, and context.\n\n${message}\n</task>`;
     } else if (isFirstMessage) {
-      const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings, sessionBranch);
+      const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings, sessionMeta);
       fullMessage = preamble + '\n\n---\n\n' + message;
       // Record the skill hash so we can detect changes on future messages
       this._setCliState(chatSessionId, tool, { ...(cliState || {}), lastSkillHash: skillHash });
@@ -2068,7 +2101,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
   // ── Auto-name session ──
 
-  async _autoNameSession(projectId, chatSessionId, userMessage) {
+  async autoNameSession(projectId, chatSessionId, userMessage) {
     if (!chatSessionId) return;
     const sessionMeta = chatStore.getSession(projectId, chatSessionId);
     if ((sessionMeta?.messageCount || 0) > 1) return;
@@ -2379,15 +2412,22 @@ Reply with exactly one word: YES or NO.`,
       this._addErrorMessage(projectId, sessionId, `Plan failed: ${error.message}`, broadcastFn);
     } finally {
       this._running.delete(sessionId);
+      this._lastProgress.delete(sessionId);
       broadcastFn({ type: 'agent-status', projectId, sessionId, busy: false });
     }
   }
 
   // ── Helpers ──
 
+  isRunning(sessionId) {
+    const entry = this._running.get(sessionId);
+    return !!(entry && !entry.aborted);
+  }
+
   abort(sessionId) {
     const entry = this._running.get(sessionId);
     if (entry) entry.aborted = true;
+    this._lastProgress.delete(sessionId);
 
     const shellSessionId = this._activeShellSessions.get(sessionId);
     if (shellSessionId) {
@@ -2592,7 +2632,7 @@ NEEDS_USER`,
           const toolName = event.tool || event.name || '';
           const input = typeof event.input === 'string' ? event.input : JSON.stringify(event.input || '');
           if (!toolName && (!input || input === '{}')) {
-            return 'Working: coding assistant is using a tool...';
+            return null; // No useful detail — suppress generic filler
           }
           if (toolName.toLowerCase().includes('bash') || toolName.toLowerCase().includes('shell')) {
             return input ? `Running: \`${input.slice(0, 80)}\`` : 'Running shell command...';
@@ -2610,7 +2650,7 @@ NEEDS_USER`,
           }
           if (toolName && input && input !== '{}') return `Using ${toolName}: ${input.slice(0, 60)}`;
           if (toolName) return `Using ${toolName}...`;
-          return 'Working: coding assistant is using a tool...';
+          return null; // No useful detail — suppress generic filler
         }
 
         // Assistant message — extract thinking or text content
@@ -3138,6 +3178,21 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
 
   _addProgressMessage(projectId, sessionId, content, broadcastFn, tasks = null, { transient = false } = {}) {
     // sessionId is now passed explicitly to avoid concurrency issues
+
+    // Dedup: suppress identical content for the same session within 5s
+    const now = Date.now();
+    const last = this._lastProgress.get(sessionId);
+    if (last && last.content === content && (now - last.ts) < 5000) {
+      return;
+    }
+    this._lastProgress.set(sessionId, { content, ts: now });
+
+    // When running under orchestrator, never persist here — orchestrator handles durable events
+    const ctx = this._running.get(sessionId);
+    if (ctx?.orchestrated && !transient) {
+      transient = true;
+    }
+
     if (transient) {
       // Broadcast only — do not persist to disk so the message never appears in history.
       // The client already renders these via the transient streamingMessage overlay.

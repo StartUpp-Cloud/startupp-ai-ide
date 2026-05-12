@@ -92,8 +92,9 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     const wantsRepoPath = hasOwn(req.body, 'repoPath');
     const wantsAssistantSettings = ['tool', 'model', 'effort'].some((field) => hasOwn(req.body, field));
     const wantsRolePrompts = hasOwn(req.body, 'activeRolePromptIds');
+    const wantsStatus = hasOwn(req.body, 'status');
 
-    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsRolePrompts) {
+    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsRolePrompts && !wantsStatus) {
       return res.status(400).json({ error: 'No supported session fields were provided' });
     }
 
@@ -117,7 +118,15 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     }
 
     if (wantsRepoPath) {
-      updates.repoPath = req.body.repoPath?.trim() || null;
+      const newRepoPath = req.body.repoPath?.trim() || null;
+      const previousRepoPath = session.repoPath || null;
+      updates.repoPath = newRepoPath;
+      if (newRepoPath !== previousRepoPath && session.cliSessionId) {
+        updates.cliSessionId = null;
+        updates.cliSessionTool = null;
+        updates.toolSessions = {};
+        agentGateway.resetSession(sessionId);
+      }
     }
 
     if (wantsAssistantSettings) {
@@ -129,6 +138,12 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
 
     if (wantsRolePrompts) {
       updates.activeRolePromptIds = normalizeRolePromptIds(req.body.activeRolePromptIds);
+    }
+
+    if (wantsStatus) {
+      const valid = ['open', 'closed'];
+      const status = String(req.body.status).toLowerCase();
+      if (valid.includes(status)) updates.status = status;
     }
 
     chatStore.updateSessionMeta(projectId, sessionId, updates);

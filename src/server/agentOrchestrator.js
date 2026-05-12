@@ -6,9 +6,11 @@ import { agentGateway } from './agentGateway.js';
 import { llmProvider } from './llmProvider.js';
 import { memoryStore } from './memoryStore.js';
 import { shouldOrchestrateRequest } from './orchestratorRouting.js';
+import { batchTasks } from './orchestratorBatching.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_TASKS = 6;
+const PROGRESS_DEDUP_WINDOW_MS = 5000; // Suppress identical progress within 5s
 const ACTIVE_RUN_STATUSES = ['running'];
 const ACTIVE_RUN_STATUS_SQL = ACTIVE_RUN_STATUSES.map(() => '?').join(', ');
 
@@ -99,6 +101,8 @@ class AgentOrchestrator extends EventEmitter {
   constructor() {
     super();
     this.activeRuns = new Map();
+    // Dedup: track last emitted progress per run to suppress identical repeats
+    this._lastProgress = new Map(); // runId -> { content, ts }
   }
 
   async init() {
@@ -160,6 +164,7 @@ class AgentOrchestrator extends EventEmitter {
       }
       this._emitRun(run, broadcastFn);
       this.activeRuns.delete(run.id);
+      this._lastProgress.delete(run.id);
     });
 
     return run;
@@ -269,7 +274,7 @@ class AgentOrchestrator extends EventEmitter {
 
   async _executeRun(run, opts) {
     const active = this.activeRuns.get(run.id);
-    const { tool, model, effort, broadcastFn, skipUnread } = opts;
+    const { mode, tool, model, effort, broadcastFn, skipUnread } = opts;
 
     const tasks = await this._planTasks(run, opts);
     for (const task of tasks) this._saveTask(task);
@@ -282,13 +287,33 @@ class AgentOrchestrator extends EventEmitter {
     await this._event(run, null, 'tasks-created', `Created ${tasks.length} agent task${tasks.length === 1 ? '' : 's'}.`, { tasks: tasks.map(t => ({ id: t.id, title: t.title, type: t.taskType })) }, broadcastFn);
 
     const completed = [];
-    for (const task of tasks) {
+    const batches = this._batchTasks(tasks);
+    for (const batch of batches) {
       if (active?.aborted) throw new Error('Run cancelled');
-      const result = await this._runTaskWithRetries(run, task, { tool, model, effort, broadcastFn, skipUnread });
-      if (active?.aborted || result?.errorType === 'cancelled') throw new Error('Run cancelled');
-      completed.push({ task, result });
-      if (!result.success && !result.retryable) break;
-      if (!result.success) break;
+
+      if (batch.parallel) {
+        // Run all parallelSafe tasks in the batch concurrently
+        const promises = batch.tasks.map(task =>
+          this._runTaskWithRetries(run, task, { mode, tool, model, effort, broadcastFn, skipUnread })
+            .then(result => ({ task, result }))
+        );
+        const results = await Promise.all(promises);
+
+        if (active?.aborted) throw new Error('Run cancelled');
+        for (const item of results) {
+          completed.push(item);
+        }
+        // If any parallel task failed, stop execution
+        const failed = results.find(item => !item.result.success);
+        if (failed) break;
+      } else {
+        // Serial task — single item batch
+        const task = batch.tasks[0];
+        const result = await this._runTaskWithRetries(run, task, { mode, tool, model, effort, broadcastFn, skipUnread });
+        if (active?.aborted || result?.errorType === 'cancelled') throw new Error('Run cancelled');
+        completed.push({ task, result });
+        if (!result.success) break;
+      }
     }
 
     const failed = completed.find(item => !item.result.success);
@@ -314,6 +339,7 @@ class AgentOrchestrator extends EventEmitter {
       broadcastFn({ type: 'chat-message', message: msg });
       this._emitRun(run, broadcastFn);
       this.activeRuns.delete(run.id);
+      this._lastProgress.delete(run.id);
       return;
     }
 
@@ -352,6 +378,7 @@ class AgentOrchestrator extends EventEmitter {
     await this._event(run, null, 'run-completed', 'Autonomous run completed.', null, broadcastFn, 'success');
     this._emitRun(run, broadcastFn);
     this.activeRuns.delete(run.id);
+    this._lastProgress.delete(run.id);
   }
 
   async _planTasks(run, { tool, model, effort, mode, executeReviewedPlan }) {
@@ -430,6 +457,10 @@ Return this exact shape:
 
   _buildTaskPrompt(run, prompt, priorResults = []) {
     const memory = memoryStore.buildContextForLLM(run.projectId, { query: `${run.goal}\n${prompt}`, maxTokens: 1400 });
+    const workContext = this._runWorkContext(run);
+    const workContextBlock = workContext
+      ? `\n\nIDE-selected workspace context:\n${workContext}`
+      : '';
     const prior = priorResults.length
       ? `\n\nPrior completed task results:\n${priorResults.map((r, i) => `${i + 1}. ${r.task.title}: ${String(r.result.content || '').slice(0, 1200)}`).join('\n')}`
       : '';
@@ -437,6 +468,7 @@ Return this exact shape:
 
 Original user goal:
 ${run.goal}
+${workContextBlock}
 
 Durable project memory:
 ${memory || '(none)'}${prior}
@@ -445,6 +477,35 @@ Assigned task:
 ${prompt}
 
 Report clearly what you did, files changed, commands run, verification results, and blockers. Do not wait for user input unless truly blocked.`;
+  }
+
+  _runWorkContext(run) {
+    const session = chatStore.getSession(run.projectId, run.sessionId);
+    if (!session) return '';
+
+    const repoPath = session.repoPath?.trim() || null;
+    const branch = session.branch?.trim() || null;
+    const worktreePath = session.worktreePath?.trim()
+      || (branch ? `/workspace/.worktrees/${branch.replace(/[^a-zA-Z0-9._-]/g, '-')}` : null);
+
+    const lines = [];
+    if (branch) lines.push(`- Branch: ${branch}`);
+    if (repoPath) lines.push(`- Selected repo path: ${repoPath}`);
+    if (worktreePath) lines.push(`- Working directory for this branch: ${worktreePath}`);
+    if (!branch && !repoPath) lines.push('- Working directory: /workspace');
+    if (branch && worktreePath) lines.push(`- All file reads, edits, commands, tests, commits, deploys, and PR operations must target ${worktreePath}.`);
+    else if (repoPath) lines.push(`- All file reads, edits, commands, tests, commits, deploys, and PR operations must target ${repoPath}.`);
+    else lines.push('- Do not infer a repository branch from another folder unless the user explicitly selects or names it.');
+    return lines.join('\n');
+  }
+
+  /**
+   * Partition tasks into sequential batches: contiguous research/investigation
+   * tasks explicitly marked parallelSafe are grouped into a single parallel
+   * batch; all other tasks each become their own serial batch.
+   */
+  _batchTasks(tasks) {
+    return batchTasks(tasks);
   }
 
   async _runTaskWithRetries(run, task, opts) {
@@ -472,11 +533,12 @@ Report clearly what you did, files changed, commands run, verification results, 
         sessionId: agentSession.id,
         content: prompt,
         attachments: [],
-        mode: 'agent',
         tool: opts.tool,
         model: opts.model,
         effort: opts.effort,
         skipUnread: true,
+        orchestrated: true,
+        mode: opts.mode || 'agent',
         broadcastFn: (data) => this._handleAgentBroadcast(run, task, data, opts.broadcastFn),
       });
 
@@ -539,22 +601,54 @@ Report clearly what you did, files changed, commands run, verification results, 
       if (existing) return existing;
     }
     const session = chatStore.createSession(run.projectId, `[Agent] ${task.title}`, { tool, model, effort });
+    const parentSession = chatStore.getSession(run.projectId, run.sessionId);
+    const inheritedContext = {};
+    for (const field of ['branch', 'repoPath', 'worktreePath']) {
+      if (parentSession?.[field]) inheritedContext[field] = parentSession[field];
+    }
+
     chatStore.updateSessionMeta(run.projectId, session.id, {
       archived: true,
       orchestratorChild: true,
       orchestratorRunId: run.id,
       orchestratorTaskId: task.id,
+      parentSessionId: run.sessionId,
+      ...inheritedContext,
     });
     return chatStore.getSession(run.projectId, session.id) || session;
   }
 
   _handleAgentBroadcast(run, task, data, broadcastFn) {
     if (!broadcastFn) return;
+
+    // Unified progress dedup: both chat-progress and job-progress feed
+    // through the same dedup gate so the same content is never emitted twice.
+    let progressContent = null;
+    let progressMeta = null;
+
     if (data?.type === 'chat-progress' && data.message?.content) {
-      this._event(run, task, 'agent-progress', `${task.title}: ${data.message.content}`, data.message.metadata || null, broadcastFn).catch(() => {});
+      progressContent = data.message.content;
+      progressMeta = data.message.metadata || null;
+    } else if (data?.type === 'job-progress' && data.progress?.summary) {
+      progressContent = data.progress.summary;
+      progressMeta = data.progress;
     }
-    if (data?.type === 'job-progress' && data.progress?.summary) {
-      this._event(run, task, 'agent-progress', `${task.title}: ${data.progress.summary}`, data.progress, broadcastFn).catch(() => {});
+
+    if (progressContent) {
+      // Suppress generic filler messages that carry no meaningful detail
+      if (/^Working: coding assistant is using a tool/i.test(progressContent)) {
+        return;
+      }
+
+      const now = Date.now();
+      const key = run.id;
+      const last = this._lastProgress.get(key);
+      // Skip if identical content was emitted within dedup window
+      if (last && last.content === progressContent && (now - last.ts) < PROGRESS_DEDUP_WINDOW_MS) {
+        return;
+      }
+      this._lastProgress.set(key, { content: progressContent, ts: now });
+      this._event(run, task, 'agent-progress', `${task.title}: ${progressContent}`, progressMeta, broadcastFn).catch(() => {});
     }
     if (data?.type === 'agent-status') {
       broadcastFn({ type: 'orchestrator-task-status', projectId: run.projectId, sessionId: run.sessionId, runId: run.id, taskId: task.id, busy: data.busy });
