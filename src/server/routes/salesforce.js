@@ -6,13 +6,13 @@ import { getSalesforceStatus } from '../salesforce/salesforceStatusService.js';
 import { listSalesforceOrgs } from '../salesforce/salesforceOrgService.js';
 import { describeObject, listObjects } from '../salesforce/salesforceObjectService.js';
 import { runReadOnlySoql, validateReadOnlySoql } from '../salesforce/salesforceSoqlService.js';
-import { searchFlows, indexFlows } from '../salesforce/salesforceFlowService.js';
+import { searchFlows, indexFlows, answerFlowQuestion } from '../salesforce/salesforceFlowService.js';
 import { buildCompactSalesforceContext } from '../salesforce/salesforceContextService.js';
 
 const router = express.Router();
 
 function boolQuery(value) {
-  return value === '1' || value === 'true';
+  return value === true || value === '1' || value === 'true';
 }
 
 function contextFromRequest(req, { requireRepo = false } = {}) {
@@ -167,6 +167,32 @@ router.get('/flows/search', async (req, res) => {
       refresh: boolQuery(req.query.refresh),
     });
     res.json({ ok: true, data: { results: result.results, parseWarnings: result.parseWarnings, indexedAt: result.indexedAt, cached: result.cached } });
+  } catch (error) {
+    salesforceErrorResponse(res, error);
+  }
+});
+
+router.post('/flows/ask', async (req, res) => {
+  try {
+    const context = await contextFromRequest(req, { requireRepo: true });
+    const result = await answerFlowQuestion(context, {
+      question: req.body.question,
+      refresh: boolQuery(req.body.refresh),
+    });
+    res.json({
+      ok: true,
+      data: {
+        answer: result.answer,
+        llmUsed: result.llmUsed,
+        provider: result.provider,
+        model: result.model,
+        fallbackReason: result.fallbackReason,
+        candidates: result.candidates,
+        parseWarnings: result.parseWarnings,
+        indexedAt: result.indexedAt,
+        cached: result.cached,
+      },
+    });
   } catch (error) {
     salesforceErrorResponse(res, error);
   }

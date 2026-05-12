@@ -550,35 +550,45 @@ export default function IDE() {
         <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, height: '100%', width: '100%' }}>
           {/* Sessions container - position relative with flex:1 to fill available space */}
           <div style={{ position: 'relative', flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}>
-            {cachedProjectIds.map(projectId => (
-              <div
-                key={projectId}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  overflow: 'hidden',
-                  visibility: projectId === selectedProjectId ? 'visible' : 'hidden',
-                  pointerEvents: projectId === selectedProjectId ? 'auto' : 'none',
-                  zIndex: projectId === selectedProjectId ? 1 : 0,
-                  backgroundColor: '#0d1117',
-                }}
-              >
-                <ChatPanel
-                  projectId={projectId}
-                  wsRef={chatWsRef}
-                  mode={agentMode}
-                  tool={selectedTool}
-                  isActive={projectId === selectedProjectId}
-                  onUnreadChange={handleUnreadChange}
-                  onProjectRead={handleProjectRead}
-                />
-              </div>
-            ))}
+            {cachedProjectIds.map(projectId => {
+              const chatProject = projectId === selectedProjectId
+                ? selectedProject
+                : projects.find((project) => project.id === projectId);
+              const chatContainerRepos = projectId === selectedProjectId ? containerRepos : [];
+
+              return (
+                <div
+                  key={projectId}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden',
+                    visibility: projectId === selectedProjectId ? 'visible' : 'hidden',
+                    pointerEvents: projectId === selectedProjectId ? 'auto' : 'none',
+                    zIndex: projectId === selectedProjectId ? 1 : 0,
+                    backgroundColor: '#0d1117',
+                  }}
+                >
+                  <ChatPanel
+                    projectId={projectId}
+                    wsRef={chatWsRef}
+                    mode={agentMode}
+                    tool={selectedTool}
+                    isActive={projectId === selectedProjectId}
+                    onUnreadChange={handleUnreadChange}
+                    onProjectRead={handleProjectRead}
+                    project={chatProject}
+                    containerRepos={chatContainerRepos}
+                    onProjectUpdated={(project) => setSelectedProject(project)}
+                  />
+                </div>
+              );
+            })}
             {/* Show empty state if no project selected */}
             {!selectedProjectId && (
               <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -603,9 +613,6 @@ export default function IDE() {
             projectPath={selectedProject?.folderPath}
             selectedTool={selectedTool}
             containerName={selectedProject?.containerName}
-            selectedProject={selectedProject}
-            containerRepos={containerRepos}
-            onProjectUpdated={(project) => setSelectedProject(project)}
           />
         </div>
       </div>

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Cloud, Database, GitPullRequestArrow, RefreshCw, Search, ShieldAlert } from 'lucide-react';
+import { Cloud, Database, GitPullRequestArrow, RefreshCw, Search, ShieldAlert, TerminalSquare } from 'lucide-react';
 
 function envelopeError(data, fallback) {
   return data?.error?.message || data?.error || fallback;
 }
 
 export default function SalesforceWorkspace({ project, containerRepos = [], onProjectUpdated }) {
+  const [activeTab, setActiveTab] = useState('status');
   const [repoPath, setRepoPath] = useState('');
   const [status, setStatus] = useState(null);
   const [objects, setObjects] = useState([]);
@@ -25,6 +26,12 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
   const orgs = status?.orgs || [];
   const selectedOrgSummary = orgs.find((org) => org.username === selectedOrg);
   const filteredObjects = objects.filter((name) => name.toLowerCase().includes(filter.toLowerCase())).slice(0, 200);
+  const tabs = [
+    { id: 'status', label: 'Status', icon: Cloud },
+    { id: 'objects', label: 'Objects', icon: Database },
+    { id: 'soql', label: 'SOQL', icon: TerminalSquare },
+    { id: 'flows', label: 'Flows', icon: GitPullRequestArrow },
+  ];
 
   useEffect(() => {
     if (!repoPath && repos.length === 1) setRepoPath(repos[0].path);
@@ -175,7 +182,7 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
 
   if (!isSalesforce) {
     return (
-      <div className="h-full overflow-auto p-3 space-y-3 text-xs">
+      <div className="h-full overflow-auto p-3 space-y-3 text-xs bg-surface-850">
         <div className="flex items-center gap-2 text-surface-200 font-medium">
           <Cloud className="w-4 h-4 text-sky-400" />
           Salesforce
@@ -199,7 +206,7 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
   }
 
   return (
-    <div className="h-full overflow-auto p-3 space-y-3 text-xs">
+    <div className="h-full overflow-auto p-3 space-y-3 text-xs bg-surface-850">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-surface-200 font-medium">
           <Cloud className="w-4 h-4 text-sky-400" />
@@ -215,11 +222,6 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         {repos.map((repo) => <option key={repo.path} value={repo.path}>{repo.name}</option>)}
       </select>
 
-      <div className="grid grid-cols-2 gap-2">
-        <StatusPill label="CLI" value={status?.cli?.available ? status.cli.version || 'ready' : 'missing'} ok={status?.cli?.available} />
-        <StatusPill label="Detect" value={status?.detection?.detectedStack || 'unknown'} ok={status?.detection?.detectedStack === 'salesforce'} />
-      </div>
-
       {selectedOrgSummary?.orgType && ['production', 'unknown'].includes(selectedOrgSummary.orgType) && (
         <div className="flex items-start gap-2 p-2 rounded border border-yellow-500/30 bg-yellow-500/10 text-yellow-300">
           <ShieldAlert className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
@@ -227,6 +229,38 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         </div>
       )}
 
+      <div className="flex items-center gap-1 rounded-md border border-surface-700 bg-surface-900/60 p-0.5 overflow-x-auto">
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] whitespace-nowrap transition-colors ${
+                activeTab === tab.id
+                  ? 'bg-sky-600 text-white'
+                  : 'text-surface-400 hover:text-surface-200 hover:bg-surface-800'
+              }`}
+            >
+              <Icon className="w-3 h-3" />
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeTab === 'status' && (
+        <section className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <StatusPill label="CLI" value={status?.cli?.available ? status.cli.version || 'ready' : 'missing'} ok={status?.cli?.available} />
+            <StatusPill label="Detect" value={status?.detection?.detectedStack || 'unknown'} ok={status?.detection?.detectedStack === 'salesforce'} />
+          </div>
+          {status?.warnings?.map((warning) => <p key={warning} className="text-yellow-300">{warning}</p>)}
+          {!repoPath && <p className="text-surface-500">Select a repo to keep Salesforce workspace context explicit.</p>}
+        </section>
+      )}
+
+      {activeTab === 'objects' && (
       <section className="space-y-2">
         <div className="flex items-center gap-2 text-surface-300 font-medium">
           <Database className="w-3.5 h-3.5" />
@@ -252,8 +286,9 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
           {objects.length === 0 && <div className="p-2 text-surface-500">No objects loaded.</div>}
         </div>
       </section>
+      )}
 
-      {describe && (
+      {activeTab === 'objects' && describe && (
         <section className="space-y-2 border-t border-surface-700 pt-3">
           <div className="text-surface-200 font-medium">{describe.name || selectedObject}</div>
           <div className="text-surface-500">{describe.label}</div>
@@ -268,6 +303,7 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         </section>
       )}
 
+      {activeTab === 'soql' && (
       <section className="space-y-2 border-t border-surface-700 pt-3">
         <div className="text-surface-200 font-medium">SOQL Builder</div>
         <textarea
@@ -300,7 +336,9 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
           </div>
         )}
       </section>
+      )}
 
+      {activeTab === 'flows' && (
       <section className="space-y-2 border-t border-surface-700 pt-3">
         <div className="flex items-center gap-2 text-surface-200 font-medium">
           <GitPullRequestArrow className="w-3.5 h-3.5" />
@@ -334,8 +372,8 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
           {flowResults.length === 0 && <div className="p-2 text-surface-500">No flow results loaded.</div>}
         </div>
       </section>
+      )}
 
-      {status?.warnings?.map((warning) => <p key={warning} className="text-yellow-300">{warning}</p>)}
       {error && <p className="text-danger-400">{error}</p>}
     </div>
   );

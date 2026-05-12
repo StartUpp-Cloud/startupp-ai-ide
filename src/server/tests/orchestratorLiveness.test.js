@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import {
   INTERRUPTED_RUN_ERROR,
   buildLivenessHeartbeatMessage,
+  buildProgressMessageId,
   shouldEmitLivenessHeartbeat,
+  shouldPersistProgressMessage,
   shouldSuppressAgentProgress,
 } from '../orchestratorLiveness.js';
 
@@ -32,20 +34,44 @@ assert.equal(
 
 assert.equal(
   buildLivenessHeartbeatMessage({ taskTitle: 'Investigate stalled child agent', phase: 'executing', silenceMs: 10_200 }),
-  'Task still running: Investigate stalled child agent; no new agent output for 10s.',
-  'task heartbeat should include the active task and silence duration',
+  'Listening for the next signal from Investigate stalled child agent... 10s',
+  'task heartbeat should include the active task and elapsed waiting duration',
 );
 
 assert.equal(
   buildLivenessHeartbeatMessage({ phase: 'planning', silenceMs: 4_000 }),
-  'Still planning agent tasks; no new agent output for 4s.',
-  'planning heartbeat should be explicit when no child task exists yet',
+  'Charting the route through the fog... 4s',
+  'planning heartbeat should keep one neutral waiting line moving',
 );
 
 assert.equal(
   buildLivenessHeartbeatMessage({ phase: 'synthesizing', silenceMs: 4_000 }),
-  'Still synthesizing final response; no new agent output for 4s.',
+  'Gathering the final threads... 4s',
   'synthesis heartbeat should show final-response progress instead of silence',
+);
+
+assert.equal(
+  shouldPersistProgressMessage('run-heartbeat'),
+  false,
+  'heartbeat progress should be broadcast-only so waiting updates do not accumulate in chat history',
+);
+
+assert.equal(
+  shouldPersistProgressMessage('task-started'),
+  true,
+  'meaningful task progress should still be persisted in chat history',
+);
+
+assert.equal(
+  buildProgressMessageId({ eventType: 'run-heartbeat', runId: 'run-123', messageId: 'msg-1' }),
+  'orchestrator-heartbeat-run-123',
+  'heartbeat progress should reuse a stable visible message id for replacement',
+);
+
+assert.equal(
+  buildProgressMessageId({ eventType: 'task-started', runId: 'run-123', messageId: 'msg-1' }),
+  'msg-1',
+  'non-heartbeat progress should keep unique message ids',
 );
 
 assert.equal(

@@ -10,7 +10,9 @@ import { batchTasks } from './orchestratorBatching.js';
 import {
   INTERRUPTED_RUN_ERROR,
   buildLivenessHeartbeatMessage,
+  buildProgressMessageId,
   shouldEmitLivenessHeartbeat,
+  shouldPersistProgressMessage,
   shouldSuppressAgentProgress,
 } from './orchestratorLiveness.js';
 
@@ -824,13 +826,21 @@ Instructions:
       event.level, event.message, metadata ? safeJson(metadata) : null, event.createdAt
     );
 
-    const msg = chatStore.addMessage({
+    const transient = !shouldPersistProgressMessage(eventType);
+    const progressMessage = {
       projectId: run.projectId,
       sessionId: run.sessionId,
       role: 'progress',
       content: message,
-      metadata: { orchestratorRunId: run.id, orchestratorTaskId: task?.id || null, eventType, level, transient: false, live: true },
-    });
+      metadata: { orchestratorRunId: run.id, orchestratorTaskId: task?.id || null, eventType, level, transient, live: true },
+    };
+    const msg = transient
+      ? {
+          ...progressMessage,
+          id: buildProgressMessageId({ eventType, runId: run.id, messageId: event.id }),
+          createdAt: event.createdAt,
+        }
+      : chatStore.addMessage(progressMessage);
     broadcastFn?.({ type: 'chat-progress', projectId: run.projectId, message: msg });
     broadcastFn?.({ type: 'orchestrator-event', event });
     this.emit('event', event);
