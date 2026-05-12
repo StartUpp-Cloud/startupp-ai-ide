@@ -471,7 +471,7 @@ Return this exact shape:
     const prior = priorResults.length
       ? `\n\nPrior completed task results:\n${priorResults.map((r, i) => `${i + 1}. ${r.task.title}: ${String(r.result.content || '').slice(0, 1200)}`).join('\n')}`
       : '';
-    return `You are a coding agent working under an IDE orchestrator. Complete ONLY the task below. The orchestrator will coordinate other tasks and final synthesis.
+    return `You are a coding agent working under an IDE orchestrator. Complete ONLY the task below. The orchestrator will coordinate other tasks and final synthesis. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.
 
 Original user goal:
 ${run.goal}
