@@ -10,7 +10,7 @@ export function assertWorkspacePath(inputPath, { allowWorkspaceRoot = true } = {
   }
 
   const normalized = path.posix.normalize(inputPath);
-  if (normalized.includes('\0') || !normalized.startsWith('/workspace')) {
+  if (normalized.includes('\0') || (normalized !== '/workspace' && !normalized.startsWith('/workspace/'))) {
     throw new SalesforceApiError('PATH_OUTSIDE_WORKSPACE', 'Path must stay inside /workspace');
   }
   return normalized;

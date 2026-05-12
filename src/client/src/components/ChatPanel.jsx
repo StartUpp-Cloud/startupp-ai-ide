@@ -1421,6 +1421,10 @@ function ChatSessionContent({
           project={project}
           containerRepos={containerRepos}
           onProjectUpdated={onProjectUpdated}
+          onRunGuidedAction={(prompt) => {
+            setChatChannel('assistant');
+            handleSend(prompt, [], { channel: 'assistant' });
+          }}
         />
       ) : (
         <>

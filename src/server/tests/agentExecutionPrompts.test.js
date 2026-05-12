@@ -14,6 +14,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
     subAgentInstruction,
     'Autonomous execution preamble should encourage focused sub-agents with rich context',
   );
+  assert.match(
+    agentGatewaySource,
+    /resolveSalesforceContext\(\{[\s\S]*repoPath: sessionMeta\?\.repoPath[\s\S]*worktreePath: sessionMeta\?\.worktreePath[\s\S]*branch: sessionMeta\?\.branch/,
+    'Salesforce prompt context should use the selected repo/worktree/branch resolver context',
+  );
+  assert.match(
+    agentGatewaySource,
+    /fullMessage = `\$\{salesforceContext\}\\n\\n---\\n\\n\$\{fullMessage\}`/,
+    'Salesforce compact context should be injected into CLI prompts',
+  );
+  assert.match(
+    agentGatewaySource,
+    /agentShellPool\.write\(shellSessionId, 'n\\n'\)/,
+    'Unresolved auto-confirm prompts should receive a safe decline fallback',
+  );
 }
 
 {
@@ -23,6 +38,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
     agentOrchestratorSource,
     subAgentInstruction,
     'Orchestrated child task prompts should encourage focused sub-agents with rich context',
+  );
+  assert.match(
+    agentOrchestratorSource,
+    /for \(const field of \['branch', 'repoPath', 'worktreePath', 'workDir', 'cwd'\]\)/,
+    'Orchestrated child sessions should inherit parent workspace metadata',
+  );
+  assert.match(
+    agentOrchestratorSource,
+    /active\.agentSessionIds\.add\(agentSession\.id\)/,
+    'Orchestrator should track all active child agent sessions for cancellation',
   );
 }
 

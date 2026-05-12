@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isUnsafeAutoConfirmPrompt, orchestratedAutoConfirm } from '../agentAutoConfirm.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const safePrompts = [
   'Do you want to run git push now?',
@@ -41,5 +46,14 @@ assert.equal(
   null,
   'Subjective prompts should not receive orchestrated approval',
 );
+
+{
+  const agentGatewaySource = readFileSync(resolve(__dirname, '../agentGateway.js'), 'utf8');
+  assert.match(
+    agentGatewaySource,
+    /const autoResponse = unsafePrompt \? null : await this\._smartAutoConfirm\([\s\S]*?if \(autoResponse !== null\)[\s\S]*?agentShellPool\.write\(shellSessionId, 'n\\n'\)/,
+    'Prompts unresolved by _smartAutoConfirm should be safely declined instead of leaving the shell waiting',
+  );
+}
 
 console.log('agentGatewayAutoConfirm tests passed');

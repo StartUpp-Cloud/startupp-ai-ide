@@ -1,11 +1,47 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Cloud, Database, GitPullRequestArrow, RefreshCw, Search, ShieldAlert, TerminalSquare } from 'lucide-react';
+import { Cloud, Database, GitPullRequestArrow, RefreshCw, Search, ShieldAlert, Sparkles, TerminalSquare } from 'lucide-react';
 
 function envelopeError(data, fallback) {
   return data?.error?.message || data?.error || fallback;
 }
 
-export default function SalesforceWorkspace({ project, containerRepos = [], onProjectUpdated }) {
+const GUIDED_ACTIONS = [
+  {
+    id: 'org-health',
+    title: 'Org Health Snapshot',
+    description: 'Summarize connected org status, limits, enabled features, and obvious setup risks.',
+    outcome: 'Return a concise health summary with any warnings and the exact read-only commands used.',
+    commands: [
+      'sf org display --target-org <targetOrg> --verbose --json',
+      'sf limits api display --target-org <targetOrg> --json',
+      'sf org list --json',
+    ],
+  },
+  {
+    id: 'schema-summary',
+    title: 'Schema Summary',
+    description: 'Inspect key objects and fields so the user can understand the org data model quickly.',
+    outcome: 'Return important standard/custom objects, notable required fields, and follow-up questions if the result is too broad.',
+    commands: [
+      'sf sobject list --target-org <targetOrg> --sobject all --json',
+      'sf sobject describe --target-org <targetOrg> --sobject <objectName> --json',
+      'sf data query --target-org <targetOrg> --query "SELECT QualifiedApiName, Label, DataType, EntityDefinition.QualifiedApiName FROM FieldDefinition LIMIT 200" --json',
+    ],
+  },
+  {
+    id: 'automation-inventory',
+    title: 'Automation Inventory',
+    description: 'Find local Salesforce automation metadata and use CLI read commands when useful.',
+    outcome: 'Return flows/triggers/process automation found, where they live, and any high-risk concentration points.',
+    commands: [
+      'sf org list metadata --target-org <targetOrg> --metadata-type Flow --json',
+      'sf org list metadata --target-org <targetOrg> --metadata-type ApexTrigger --json',
+      'Search the selected repo for force-app/**/flows, triggers, and related metadata files.',
+    ],
+  },
+];
+
+export default function SalesforceWorkspace({ project, containerRepos = [], onProjectUpdated, onRunGuidedAction }) {
   const [activeTab, setActiveTab] = useState('status');
   const [repoPath, setRepoPath] = useState('');
   const [status, setStatus] = useState(null);
@@ -18,13 +54,22 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
   const [flowQuery, setFlowQuery] = useState('');
   const [flowResults, setFlowResults] = useState([]);
   const [filter, setFilter] = useState('');
+  const [authUrl, setAuthUrl] = useState('');
+  const [authAlias, setAuthAlias] = useState('default-org');
+  const [setupMessage, setSetupMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const isSalesforce = project?.stack === 'salesforce';
   const repos = useMemo(() => containerRepos.filter((repo) => repo.isGitRepo), [containerRepos]);
   const orgs = status?.orgs || [];
+  const cliAvailable = status?.cli?.available === true;
+  const orgConnected = status?.auth?.connected === true || orgs.some((org) => !org.isExpired);
+  const safeAlias = authAlias.trim() || 'default-org';
+  const hostLoginCommand = `sf org login web --alias ${safeAlias} --set-default`;
+  const hostTokenCommand = `sf org display --target-org ${safeAlias} --verbose --json`;
   const selectedOrgSummary = orgs.find((org) => org.username === selectedOrg);
+  const selectedRepo = repos.find((repo) => repo.path === repoPath);
   const filteredObjects = objects.filter((name) => name.toLowerCase().includes(filter.toLowerCase())).slice(0, 200);
   const tabs = [
     { id: 'status', label: 'Status', icon: Cloud },
@@ -96,6 +141,51 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Salesforce status failed'));
       setStatus(data.data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function installCli() {
+    if (!project?.id) return;
+    setLoading(true);
+    setError('');
+    setSetupMessage('');
+    try {
+      const response = await fetch('/api/salesforce/cli/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: project.id, repoPath: repoPath || undefined }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Salesforce CLI install failed'));
+      setSetupMessage(`Salesforce CLI ready${data.data?.version ? `: ${data.data.version}` : ''}`);
+      await loadStatus();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function importAuthUrl() {
+    if (!repoPath || !authUrl.trim()) return;
+    setLoading(true);
+    setError('');
+    setSetupMessage('');
+    try {
+      const response = await fetch('/api/salesforce/auth/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: project.id, repoPath, authUrl, alias: safeAlias, setDefault: true }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Salesforce auth import failed'));
+      setAuthUrl('');
+      setSetupMessage('Salesforce org imported into the project container. Actions can now use the CLI safely.');
+      await loadStatus();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -178,6 +268,36 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
     }
   }
 
+  function runGuidedAction(action) {
+    if (!action || !repoPath || !selectedOrg || !onRunGuidedAction) return;
+    const targetOrgLabel = selectedOrgSummary?.alias || selectedOrgSummary?.usernameRedacted || selectedOrg;
+    const targetOrgValue = selectedOrgSummary?.alias || selectedOrg;
+    const prompt = `Salesforce guided action: ${action.title}
+
+IDE-selected workspace context:
+- projectId: ${project.id}
+- repoPath: ${repoPath}
+- worktreePath: ${selectedRepo?.worktreePath || repoPath}
+- branch: ${selectedRepo?.branch || 'unknown'}
+- selected Salesforce org: ${targetOrgLabel}
+- targetOrg value for sf commands: ${targetOrgValue}
+
+Working directory instructions:
+- Run Salesforce CLI commands inside the selected project Docker container, not on the host.
+- Use the selected repo/worktree above as the working directory.
+- Keep this read-only. Do not deploy, mutate data, execute anonymous Apex, open OAuth UI, or remediate automatically.
+
+Goal:
+${action.description}
+
+Useful read-only commands to consider, adapting as needed:
+${action.commands.map((command) => `- ${command.replaceAll('<targetOrg>', targetOrgValue)}`).join('\n')}
+
+Run one or more safe Salesforce CLI/read-only repo inspection commands until you have a useful result. If a command fails or the result is too broad, adjust with another safe read-only command rather than stopping at the first failure. ${action.outcome}`;
+
+    onRunGuidedAction(prompt);
+  }
+
   if (!project) return null;
 
   if (!isSalesforce) {
@@ -253,10 +373,76 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         <section className="space-y-2">
           <div className="grid grid-cols-2 gap-2">
             <StatusPill label="CLI" value={status?.cli?.available ? status.cli.version || 'ready' : 'missing'} ok={status?.cli?.available} />
+            <StatusPill label="Org" value={orgConnected ? `${orgs.filter((org) => !org.isExpired).length} connected` : 'not connected'} ok={orgConnected} />
             <StatusPill label="Detect" value={status?.detection?.detectedStack || 'unknown'} ok={status?.detection?.detectedStack === 'salesforce'} />
+            <StatusPill label="Container" value={status?.container?.name || 'required'} ok={status?.container?.running} />
           </div>
+          {!cliAvailable && (
+            <SetupCard title="1. Install Salesforce CLI in this project container">
+              <p className="text-surface-500 leading-relaxed">Actions run inside the selected project Docker container. Install the CLI there before checking org data.</p>
+              <button onClick={installCli} disabled={loading} className="btn-primary text-xs py-1.5 px-2 w-full">
+                Install Salesforce CLI
+              </button>
+            </SetupCard>
+          )}
+          {cliAvailable && !orgConnected && (
+            <SetupCard title="2. Connect an org with a host token">
+              <p className="text-surface-500 leading-relaxed">Authenticate on your host browser, copy the SFDX auth URL, then paste it here. The app imports it into the CLI inside this container and does not save it to project records.</p>
+              <label className="block space-y-1">
+                <span className="text-surface-400">Alias</span>
+                <input value={authAlias} onChange={(e) => setAuthAlias(e.target.value)} className="input text-xs font-mono" placeholder="default-org" />
+              </label>
+              <CopyCommand label="Host step 1" command={hostLoginCommand} />
+              <CopyCommand label="Host step 2" command={hostTokenCommand} />
+              <p className="text-surface-500 leading-relaxed">From the JSON output, copy <span className="font-mono text-surface-300">result.sfdxAuthUrl</span>. You can also paste the whole JSON output below.</p>
+              <textarea
+                value={authUrl}
+                onChange={(e) => setAuthUrl(e.target.value)}
+                rows={4}
+                className="input text-xs font-mono resize-none"
+                placeholder="force://... or full sf org display JSON"
+              />
+              <button onClick={importAuthUrl} disabled={!repoPath || !authUrl.trim() || loading} className="btn-primary text-xs py-1.5 px-2 w-full">
+                Import Auth Into Container
+              </button>
+              {!repoPath && <p className="text-yellow-300">Select a repo first so the import uses explicit workspace context.</p>}
+            </SetupCard>
+          )}
+          {cliAvailable && orgConnected && (
+            <SetupCard title="Ready for guided actions">
+              <p className="text-green-300">Salesforce CLI and org auth are ready. Pick a safe read-only action and the assistant will run the needed CLI checks through the existing orchestrator flow.</p>
+            </SetupCard>
+          )}
+          {setupMessage && <p className="text-green-300">{setupMessage}</p>}
           {status?.warnings?.map((warning) => <p key={warning} className="text-yellow-300">{warning}</p>)}
           {!repoPath && <p className="text-surface-500">Select a repo to keep Salesforce workspace context explicit.</p>}
+        </section>
+      )}
+
+      {cliAvailable && orgConnected && (
+        <section className="space-y-2 border-t border-surface-700 pt-3">
+          <div className="flex items-center gap-2 text-surface-200 font-medium">
+            <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+            Guided Actions
+          </div>
+          <select value={selectedOrg} onChange={(e) => setSelectedOrg(e.target.value)} className="select text-xs" disabled={orgs.length === 0}>
+            <option value="">Select org...</option>
+            {orgs.map((org) => <option key={org.username} value={org.username}>{org.alias || org.usernameRedacted} {org.isDefault ? '(default)' : ''}</option>)}
+          </select>
+          <div className="space-y-2">
+            {GUIDED_ACTIONS.map((action) => (
+              <button
+                key={action.id}
+                onClick={() => runGuidedAction(action)}
+                disabled={!repoPath || !selectedOrg || loading || !onRunGuidedAction}
+                className="w-full text-left rounded border border-surface-700 bg-surface-900/50 p-2 hover:border-sky-500/60 disabled:opacity-50 disabled:hover:border-surface-700"
+              >
+                <div className="text-surface-200 font-medium">{action.title}</div>
+                <div className="text-surface-500 leading-relaxed mt-0.5">{action.description}</div>
+              </button>
+            ))}
+          </div>
+          {!repoPath && <p className="text-yellow-300">Select a repo so the orchestrator request includes explicit workspace context.</p>}
         </section>
       )}
 
@@ -384,6 +570,39 @@ function StatusPill({ label, value, ok }) {
     <div className="rounded border border-surface-700 bg-surface-900/50 px-2 py-1.5">
       <div className="text-[10px] uppercase tracking-wide text-surface-500">{label}</div>
       <div className={ok ? 'text-green-300 truncate' : 'text-yellow-300 truncate'}>{value}</div>
+    </div>
+  );
+}
+
+function SetupCard({ title, children }) {
+  return (
+    <div className="space-y-2 rounded border border-surface-700 bg-surface-900/50 p-2">
+      <div className="text-surface-200 font-medium">{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function CopyCommand({ label, command }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="text-surface-400">{label}</div>
+      <button onClick={copy} className="w-full text-left rounded border border-surface-700 bg-surface-950 px-2 py-1.5 font-mono text-[11px] text-sky-300 hover:border-sky-500/60">
+        {command}
+      </button>
+      {copied && <div className="text-green-300">Copied</div>}
     </div>
   );
 }

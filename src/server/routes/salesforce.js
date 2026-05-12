@@ -8,6 +8,8 @@ import { describeObject, listObjects } from '../salesforce/salesforceObjectServi
 import { runReadOnlySoql, validateReadOnlySoql } from '../salesforce/salesforceSoqlService.js';
 import { searchFlows, indexFlows, answerFlowQuestion } from '../salesforce/salesforceFlowService.js';
 import { buildCompactSalesforceContext } from '../salesforce/salesforceContextService.js';
+import { analyzeSalesforceDependency } from '../salesforce/salesforceDependencyService.js';
+import { importSalesforceAuthUrl, installSalesforceCli } from '../salesforce/salesforceCommandService.js';
 
 const router = express.Router();
 
@@ -75,6 +77,30 @@ router.get('/status', async (req, res) => {
     const context = await contextFromRequest(req);
     const status = await getSalesforceStatus(context);
     res.json({ ok: true, data: status, warnings: status.warnings });
+  } catch (error) {
+    salesforceErrorResponse(res, error);
+  }
+});
+
+router.post('/cli/install', async (req, res) => {
+  try {
+    const context = await contextFromRequest(req);
+    const result = await installSalesforceCli(context);
+    res.json({ ok: true, data: { version: result.version }, auditId: result.auditId });
+  } catch (error) {
+    salesforceErrorResponse(res, error);
+  }
+});
+
+router.post('/auth/import', async (req, res) => {
+  try {
+    const context = await contextFromRequest(req, { requireRepo: true });
+    const result = await importSalesforceAuthUrl(context, {
+      authUrl: req.body.authUrl,
+      alias: req.body.alias,
+      setDefault: req.body.setDefault !== false,
+    });
+    res.json({ ok: true, data: { imported: true, result: result.json?.result || null }, auditId: result.auditId });
   } catch (error) {
     salesforceErrorResponse(res, error);
   }
@@ -188,6 +214,38 @@ router.post('/flows/ask', async (req, res) => {
         model: result.model,
         fallbackReason: result.fallbackReason,
         candidates: result.candidates,
+        parseWarnings: result.parseWarnings,
+        indexedAt: result.indexedAt,
+        cached: result.cached,
+      },
+    });
+  } catch (error) {
+    salesforceErrorResponse(res, error);
+  }
+});
+
+router.post('/dependencies/analyze', async (req, res) => {
+  try {
+    const context = await contextFromRequest(req, { requireRepo: true });
+    const result = await analyzeSalesforceDependency(context, {
+      objectName: req.body.objectName,
+      fieldName: req.body.fieldName,
+      refresh: boolQuery(req.body.refresh),
+    });
+    res.json({
+      ok: true,
+      data: {
+        target: result.target,
+        risk: result.risk,
+        referenceCount: result.referenceCount,
+        references: result.references,
+        suggestedRemovalOrder: result.suggestedRemovalOrder,
+        verificationSteps: result.verificationSteps,
+        plan: result.plan,
+        llmUsed: result.llmUsed,
+        provider: result.provider,
+        model: result.model,
+        fallbackReason: result.fallbackReason,
         parseWarnings: result.parseWarnings,
         indexedAt: result.indexedAt,
         cached: result.cached,

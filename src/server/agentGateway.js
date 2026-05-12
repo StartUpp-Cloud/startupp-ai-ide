@@ -32,6 +32,8 @@ import {
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import { resolveSalesforceContext } from './salesforce/salesforceContextResolver.js';
+import { buildCompactSalesforceContext } from './salesforce/salesforceContextService.js';
 
 class AgentGateway extends EventEmitter {
   constructor() {
@@ -98,6 +100,9 @@ class AgentGateway extends EventEmitter {
   }
 
   _sessionWorkDir(projectId, sessionMeta) {
+    const inheritedWorkDir = sessionMeta?.workDir?.trim() || sessionMeta?.cwd?.trim();
+    if (inheritedWorkDir) return inheritedWorkDir;
+
     const explicitWorktreePath = sessionMeta?.worktreePath?.trim();
     if (explicitWorktreePath) return explicitWorktreePath;
 
@@ -114,21 +119,64 @@ class AgentGateway extends EventEmitter {
   _sessionWorkContext(projectId, sessionMeta) {
     const sessionBranch = sessionMeta?.branch || null;
     const repoPath = sessionMeta?.repoPath?.trim() || null;
+    const worktreePath = sessionMeta?.worktreePath?.trim() || null;
     const workDir = this._sessionWorkDir(projectId, sessionMeta);
+    const contextLines = [
+      'IDE-selected workspace context:',
+      `- Branch: ${sessionBranch || '(none selected)'}`,
+      `- repoPath: ${repoPath || '(none selected)'}`,
+      `- worktreePath: ${worktreePath || '(none selected)'}`,
+      `- Working directory: ${workDir || '(none resolved)'}`,
+    ];
     if (sessionBranch) {
       const sourceRepo = repoPath ? `\n- Source repository path selected in the IDE: ${repoPath}.` : '';
       return {
         workDir,
-        message: `WORKING BRANCH: You are assigned to branch '${sessionBranch}' in a git worktree at ${workDir}.${sourceRepo}\n- ALWAYS work within this directory. All file reads, edits, commands, and tests must target ${workDir}.\n- Do NOT modify files outside this worktree.\n- When committing, you are already on branch '${sessionBranch}' — do not switch branches.\n- Your current working directory has been set to ${workDir}.`,
+        message: `${contextLines.join('\n')}\n\nWORKING BRANCH: You are assigned to branch '${sessionBranch}' in a git worktree at ${workDir}.${sourceRepo}\n- ALWAYS work within this directory. All file reads, edits, commands, and tests must target ${workDir}.\n- Do NOT modify files outside this worktree.\n- When committing, you are already on branch '${sessionBranch}' — do not switch branches.\n- Your current working directory has been set to ${workDir}.`,
         reminder: `[Working on branch '${sessionBranch}' in ${workDir}${repoPath ? `; source repo ${repoPath}` : ''} — stay in this directory]`,
       };
     }
     if (!workDir) return null;
     return {
       workDir,
-      message: `WORKING DIRECTORY: Your current working directory has been set to ${workDir}.\n- Use this directory for file reads, edits, commands, and tests unless the user explicitly selects or names another path.\n- Do not infer a repository branch when ${workDir} is not a git repository.`,
+      message: `${contextLines.join('\n')}\n\nWORKING DIRECTORY: Your current working directory has been set to ${workDir}.\n- Use this directory for file reads, edits, commands, and tests unless the user explicitly selects or names another path.\n- Do not infer a repository branch when ${workDir} is not a git repository.`,
       reminder: `[Working directory: ${workDir}]`,
     };
+  }
+
+  async _buildSalesforcePromptContext(projectId, sessionMeta) {
+    if (!projectId) return '';
+
+    const project = Project.findById(projectId);
+    if (project?.stack !== 'salesforce') return '';
+
+    try {
+      const context = await resolveSalesforceContext({
+        projectId,
+        repoPath: sessionMeta?.repoPath || null,
+        worktreePath: sessionMeta?.worktreePath || null,
+        branch: sessionMeta?.branch || null,
+      });
+      const compact = await buildCompactSalesforceContext(context);
+      const summary = compact.indexedMetadataSummary || {};
+      const org = compact.defaultOrg
+        ? `${compact.defaultOrg.alias || '(no alias)'} / ${compact.defaultOrg.usernameRedacted || 'unknown'} (${compact.defaultOrg.orgType || 'unknown'})`
+        : '(none detected)';
+      return [
+        '[Salesforce Project Context — use this compact context when answering or making changes. Do not repeat it back.]',
+        `- cwd: ${context.cwd}`,
+        `- repoPath: ${compact.repoPath || '(none selected)'}`,
+        `- worktreePath: ${compact.worktreePath || '(none selected)'}`,
+        `- gitBranch: ${compact.gitBranch || '(unknown)'}`,
+        `- packageDirectories: ${(compact.packageDirectories || []).join(', ') || '(none detected)'}`,
+        `- metadataRoots: ${(compact.metadataRoots || []).join(', ') || '(none detected)'}`,
+        `- defaultOrg: ${org}`,
+        `- indexedMetadataSummary: Apex classes ${summary.apexClassCount || 0}, triggers ${summary.triggerCount || 0}, flows ${summary.flowCount || 0}, objects ${summary.objectMetadataCount || 0}`,
+      ].join('\n');
+    } catch (err) {
+      console.warn('[agentGateway] Salesforce prompt context skipped:', err.message);
+      return '';
+    }
   }
 
   // ── Entry point ──
@@ -988,7 +1036,8 @@ RULES:
     }
 
     const cliState = this._getCliState(chatSessionId, tool);
-    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode, assistantSettings, distilledContext);
+    const salesforceContext = await this._buildSalesforcePromptContext(projectId, sessionMeta);
+    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode, assistantSettings, distilledContext, salesforceContext);
     const isFollowUp = !!(cliState?.cliSessionId);
 
     this._addProgressMessage(projectId, chatSessionId,
@@ -1134,6 +1183,8 @@ RULES:
               projectId,
               mode,
               assistantSettings,
+              distilledContext,
+              salesforceContext,
             );
             agentShellPool.write(shellSessionId, followUpCmd + '\n');
             resultEventSeen = false; // Reset to wait for the new result
@@ -1210,15 +1261,18 @@ RULES:
               agentShellPool.write(shellSessionId, autoResponse + '\n');
               this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
             } else {
-              // Fallback: in orchestrated/autonomous sessions, decline the prompt
-              // to prevent the shell from hanging indefinitely with no user to respond.
-              if (runCtx?.orchestrated) {
-                agentShellPool.write(shellSessionId, 'n\n');
-                this._addProgressMessage(projectId, chatSessionId,
-                  `⚠ Declined agent prompt requiring user confirmation (orchestrated mode): "${cleanChunk.slice(-200).trim()}"`,
-                  broadcastFn);
-              }
+              // Safe fallback: decline unresolved prompts so shells never wait
+              // indefinitely for user input that cannot be provided in-band.
+              agentShellPool.write(shellSessionId, 'n\n');
+              this._addProgressMessage(projectId, chatSessionId,
+                `⚠ Declined agent prompt requiring user confirmation${runCtx?.orchestrated ? ' (orchestrated mode)' : ''}: "${cleanChunk.slice(-200).trim()}"`,
+                broadcastFn);
             }
+          } else if (this._looksLikePrompt(cleanChunk)) {
+            agentShellPool.write(shellSessionId, 'n\n');
+            this._addProgressMessage(projectId, chatSessionId,
+              `⚠ Declined agent prompt requiring user confirmation${runCtx?.orchestrated ? ' (orchestrated mode)' : ''}: "${cleanChunk.slice(-200).trim()}"`,
+              broadcastFn);
           }
         }
       }
@@ -1980,7 +2034,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     return args;
   }
 
-  _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}, distilledContext = null) {
+  _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}, distilledContext = null, salesforceContext = '') {
     let cliState = this._getCliState(chatSessionId, tool);
     if (!cliState?.cliSessionId && chatSessionId && projectId) {
       const stored = chatStore.getSession(projectId, chatSessionId);
@@ -2044,6 +2098,10 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       if (branchReminder) contextParts.push(branchReminder);
       if (distilledContext) contextParts.push(distilledContext);
       fullMessage = `[Session Context — do not repeat this back, use it to inform your response]\n${contextParts.join('\n')}\n\n[User Request]\n${fullMessage}`;
+    }
+
+    if (salesforceContext) {
+      fullMessage = `${salesforceContext}\n\n---\n\n${fullMessage}`;
     }
 
     const memoryContext = this._buildProjectMemoryContext(projectId, message);

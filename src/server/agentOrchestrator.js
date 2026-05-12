@@ -184,6 +184,9 @@ class AgentOrchestrator extends EventEmitter {
     const active = this.activeRuns.get(runId);
     if (!active) return false;
     active.aborted = true;
+    for (const agentSessionId of active.agentSessionIds || []) {
+      agentGateway.abort(agentSessionId);
+    }
     if (active.currentAgentSessionId) agentGateway.abort(active.currentAgentSessionId);
     const run = this.getRun(runId);
     if (run) {
@@ -496,14 +499,15 @@ Report clearly what you did, files changed, commands run, verification results, 
     const branch = session.branch?.trim() || null;
     const worktreePath = session.worktreePath?.trim()
       || (branch ? `/workspace/.worktrees/${branch.replace(/[^a-zA-Z0-9._-]/g, '-')}` : null);
+    const workDir = session.workDir?.trim() || session.cwd?.trim() || worktreePath || repoPath || '/workspace';
 
     const lines = [];
-    if (branch) lines.push(`- Branch: ${branch}`);
-    if (repoPath) lines.push(`- Selected repo path: ${repoPath}`);
-    if (worktreePath) lines.push(`- Working directory for this branch: ${worktreePath}`);
-    if (!branch && !repoPath) lines.push('- Working directory: /workspace');
-    if (branch && worktreePath) lines.push(`- All file reads, edits, commands, tests, commits, deploys, and PR operations must target ${worktreePath}.`);
-    else if (repoPath) lines.push(`- All file reads, edits, commands, tests, commits, deploys, and PR operations must target ${repoPath}.`);
+    lines.push(`- Branch: ${branch || '(none selected)'}`);
+    lines.push(`- repoPath: ${repoPath || '(none selected)'}`);
+    lines.push(`- worktreePath: ${worktreePath || '(none selected)'}`);
+    lines.push(`- Working directory: ${workDir}`);
+    if (branch && worktreePath) lines.push(`- All file reads, edits, commands, tests, commits, deploys, and PR operations must target ${workDir}.`);
+    else if (repoPath) lines.push(`- All file reads, edits, commands, tests, commits, deploys, and PR operations must target ${workDir}.`);
     else lines.push('- Do not infer a repository branch from another folder unless the user explicitly selects or names it.');
     return lines.join('\n');
   }
@@ -532,6 +536,10 @@ Report clearly what you did, files changed, commands run, verification results, 
       this._saveTask(task);
       const active = this.activeRuns.get(run.id);
       if (active) active.currentAgentSessionId = agentSession.id;
+      if (active) {
+        active.agentSessionIds = active.agentSessionIds || new Set();
+        active.agentSessionIds.add(agentSession.id);
+      }
 
       const prompt = attempt === 1
         ? task.prompt
@@ -612,9 +620,10 @@ Report clearly what you did, files changed, commands run, verification results, 
     const session = chatStore.createSession(run.projectId, `[Agent] ${task.title}`, { tool, model, effort });
     const parentSession = chatStore.getSession(run.projectId, run.sessionId);
     const inheritedContext = {};
-    for (const field of ['branch', 'repoPath', 'worktreePath']) {
+    for (const field of ['branch', 'repoPath', 'worktreePath', 'workDir', 'cwd']) {
       if (parentSession?.[field]) inheritedContext[field] = parentSession[field];
     }
+    const sessionWorkDir = inheritedContext.workDir || inheritedContext.cwd || this._sessionWorkDirFromMeta(inheritedContext);
 
     chatStore.updateSessionMeta(run.projectId, session.id, {
       archived: true,
@@ -623,8 +632,17 @@ Report clearly what you did, files changed, commands run, verification results, 
       orchestratorTaskId: task.id,
       parentSessionId: run.sessionId,
       ...inheritedContext,
+      ...(sessionWorkDir ? { workDir: sessionWorkDir } : {}),
     });
     return chatStore.getSession(run.projectId, session.id) || session;
+  }
+
+  _sessionWorkDirFromMeta(meta = {}) {
+    const worktreePath = meta.worktreePath?.trim();
+    if (worktreePath) return worktreePath;
+    const repoPath = meta.repoPath?.trim();
+    if (repoPath) return repoPath;
+    return '/workspace';
   }
 
   _handleAgentBroadcast(run, task, data, broadcastFn) {

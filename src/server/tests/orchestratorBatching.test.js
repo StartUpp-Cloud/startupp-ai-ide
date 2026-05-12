@@ -105,6 +105,30 @@ assert.deepEqual(batchTasks([]), [], 'Empty task list produces no batches');
   assert.equal(batches[3].tasks[0].id, 'v1');
 }
 
+// --- Contiguous research-only batches do not cross implementation/verification gates ---
+{
+  const tasks = [
+    task('r1', 'research', true),
+    task('r2', 'research', true),
+    task('i1', 'implementation', true),
+    task('r3', 'research', true),
+    task('v1', 'verification', true),
+    task('r4', 'research', true),
+  ];
+  const batches = batchTasks(tasks);
+  assert.deepEqual(
+    batches.map(batch => ({ parallel: batch.parallel, ids: batch.tasks.map(t => t.id) })),
+    [
+      { parallel: true, ids: ['r1', 'r2'] },
+      { parallel: false, ids: ['i1'] },
+      { parallel: true, ids: ['r3'] },
+      { parallel: false, ids: ['v1'] },
+      { parallel: true, ids: ['r4'] },
+    ],
+    'Implementation and verification tasks must stay serial even if marked parallelSafe',
+  );
+}
+
 // --- Single parallelSafe task still gets a parallel batch (Promise.all of 1 is fine) ---
 {
   const batches = batchTasks([task('r1', 'research', true)]);

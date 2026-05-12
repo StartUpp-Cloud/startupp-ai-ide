@@ -4,6 +4,7 @@ import { redactSalesforceText, redactSalesforceObject, redactUsername } from './
 import { SalesforceApiError } from './salesforceErrors.js';
 
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const SAFE_ALIAS_PATTERN = /^[A-Za-z0-9._-]{1,80}$/;
 
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'"'"'`)}'`;
@@ -102,5 +103,137 @@ export async function checkSalesforceCli(context) {
     return { available: true, command: 'sf', version: result.raw?.split('\n')[0] || null };
   } catch {
     return { available: false, command: null, version: null };
+  }
+}
+
+export async function installSalesforceCli(context) {
+  const startedAt = Date.now();
+  const operation = 'cli.install';
+  const audit = logSalesforceAudit({
+    projectId: context.projectId,
+    repoPath: context.repoPath,
+    worktreePath: context.worktreePath,
+    operation,
+    riskLevel: 'setup',
+    status: 'started',
+  });
+
+  const command = [
+    `cd ${shellQuote(context.cwd)}`,
+    'if command -v sf >/dev/null 2>&1; then sf --version; elif command -v npm >/dev/null 2>&1; then npm install --global @salesforce/cli && sf --version; else echo "npm is required to install Salesforce CLI" >&2; exit 127; fi',
+  ].join(' && ');
+  const output = await containerManager.execInContainerAsync(context.containerName, command, {
+    timeout: 180000,
+    maxBuffer: MAX_OUTPUT_BYTES,
+  });
+
+  if (output === null) {
+    logSalesforceAudit({
+      projectId: context.projectId,
+      repoPath: context.repoPath,
+      worktreePath: context.worktreePath,
+      operation,
+      riskLevel: 'setup',
+      status: 'failed',
+      errorCode: 'CLI_INSTALL_FAILED',
+      durationMs: Date.now() - startedAt,
+    });
+    throw new SalesforceApiError('CLI_INSTALL_FAILED', 'Salesforce CLI install failed inside the project container', 502);
+  }
+
+  logSalesforceAudit({
+    projectId: context.projectId,
+    repoPath: context.repoPath,
+    worktreePath: context.worktreePath,
+    operation,
+    riskLevel: 'setup',
+    status: 'succeeded',
+    outputPreview: output,
+    durationMs: Date.now() - startedAt,
+  });
+
+  return { raw: redactSalesforceText(output), version: output.split('\n').filter(Boolean).at(-1) || null, auditId: audit.id };
+}
+
+function extractSalesforceAuthUrl(input) {
+  const value = String(input || '').trim();
+  if (!value) throw new SalesforceApiError('AUTH_URL_REQUIRED', 'Paste the Salesforce auth URL before importing', 400);
+
+  try {
+    const parsed = JSON.parse(value);
+    const url = parsed?.result?.sfdxAuthUrl || parsed?.sfdxAuthUrl || parsed?.authUrl;
+    if (url) return String(url).trim();
+  } catch {
+    // Plain auth URL paste is expected; JSON paste is optional convenience.
+  }
+
+  return value;
+}
+
+export async function importSalesforceAuthUrl(context, { authUrl, alias, setDefault = true } = {}) {
+  const normalizedAuthUrl = extractSalesforceAuthUrl(authUrl);
+  if (!normalizedAuthUrl.startsWith('force://')) {
+    throw new SalesforceApiError('INVALID_AUTH_URL', 'Expected an SFDX auth URL starting with force://', 400);
+  }
+  if (alias && !SAFE_ALIAS_PATTERN.test(alias)) {
+    throw new SalesforceApiError('INVALID_ALIAS', 'Alias can contain only letters, numbers, dots, underscores, and dashes', 400);
+  }
+
+  const startedAt = Date.now();
+  const operation = 'org.auth.import';
+  const audit = logSalesforceAudit({
+    projectId: context.projectId,
+    repoPath: context.repoPath,
+    worktreePath: context.worktreePath,
+    operation,
+    riskLevel: 'auth_write',
+    status: 'started',
+  });
+
+  const encodedAuthUrl = Buffer.from(normalizedAuthUrl, 'utf8').toString('base64');
+  const args = ['sf', 'org', 'login', 'sfdx-url', '--sfdx-url-file', '$tmp', '--json'];
+  if (alias) args.push('--alias', alias);
+  if (setDefault) args.push('--set-default');
+  const command = [
+    `cd ${shellQuote(context.cwd)}`,
+    'tmp=$(mktemp)',
+    'trap "rm -f $tmp" EXIT',
+    `printf %s ${shellQuote(encodedAuthUrl)} | base64 -d > "$tmp"`,
+    args.map((arg) => (arg === '$tmp' ? '"$tmp"' : shellQuote(arg))).join(' '),
+  ].join(' && ');
+  const output = await containerManager.execInContainerAsync(context.containerName, command, {
+    timeout: 30000,
+    maxBuffer: MAX_OUTPUT_BYTES,
+  });
+
+  if (output === null) {
+    logSalesforceAudit({
+      projectId: context.projectId,
+      repoPath: context.repoPath,
+      worktreePath: context.worktreePath,
+      operation,
+      riskLevel: 'auth_write',
+      status: 'failed',
+      errorCode: 'AUTH_IMPORT_FAILED',
+      durationMs: Date.now() - startedAt,
+    });
+    throw new SalesforceApiError('AUTH_IMPORT_FAILED', 'Salesforce auth import failed inside the project container', 502);
+  }
+
+  logSalesforceAudit({
+    projectId: context.projectId,
+    repoPath: context.repoPath,
+    worktreePath: context.worktreePath,
+    operation,
+    riskLevel: 'auth_write',
+    status: 'succeeded',
+    outputPreview: output,
+    durationMs: Date.now() - startedAt,
+  });
+
+  try {
+    return { raw: redactSalesforceText(output), json: redactSalesforceObject(JSON.parse(output)), auditId: audit.id };
+  } catch {
+    return { raw: redactSalesforceText(output), json: null, auditId: audit.id };
   }
 }
