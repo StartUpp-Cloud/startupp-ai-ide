@@ -45,7 +45,14 @@ function getStoredHeight() {
  * Opens its own WebSocket + PTY session independently from the chat system.
  * Includes visibility-aware reconnection for stability and a drag-to-resize handle.
  */
-export default function InternalConsole({ projectId, chatWsRef, activeChatSessionId }) {
+export default function InternalConsole({
+  projectId,
+  chatWsRef,
+  activeChatSessionId,
+  embedded = false,
+  queuedCommand,
+  onQueuedCommandHandled,
+}) {
   const [open, setOpen] = useState(true);
   const [connected, setConnected] = useState(false);
   const [consoleHeight, setConsoleHeight] = useState(getStoredHeight);
@@ -60,6 +67,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
   const prevProjectIdRef = useRef(null);
   const mountedRef = useRef(true);
   const forceNewSessionRef = useRef(false);
+  const isOpen = embedded || open;
 
   /**
    * Capture the visible terminal buffer text (last N lines).
@@ -161,7 +169,7 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
 
   // Create xterm + WS + session when opened
   useEffect(() => {
-    if (!open || !projectId || !termRef.current) return;
+    if (!isOpen || !projectId || !termRef.current) return;
 
     // Avoid re-init if same project and already connected
     if (xtermRef.current && prevProjectIdRef.current === projectId && wsRef.current?.readyState === WebSocket.OPEN) {
@@ -358,6 +366,13 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
     const resizeHandler = () => fit.fit();
     window.addEventListener('resize', resizeHandler);
 
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(() => {
+          try { fit.fit(); } catch {}
+        })
+      : null;
+    if (resizeObserver && termRef.current) resizeObserver.observe(termRef.current);
+
     return () => {
       mountedRef.current = false;
       document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -366,59 +381,125 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (inputTimer) clearTimeout(inputTimer);
+      resizeObserver?.disconnect();
       xterm.dispose();
       xtermRef.current = null;
       if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.close();
       wsRef.current = null;
       sessionIdRef.current = null;
     };
-  }, [open, projectId, sessionResetKey]);
+  }, [isOpen, projectId, sessionResetKey]);
+
+  useEffect(() => {
+    if (!queuedCommand) return undefined;
+
+    let attempts = 0;
+    const sendQueuedCommand = () => {
+      attempts += 1;
+      if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'input',
+          sessionId: sessionIdRef.current,
+          data: queuedCommand.endsWith('\n') ? queuedCommand : `${queuedCommand}\n`,
+        }));
+        onQueuedCommandHandled?.();
+        return true;
+      }
+      if (attempts >= 20) {
+        onQueuedCommandHandled?.();
+        return true;
+      }
+      return false;
+    };
+
+    if (sendQueuedCommand()) return undefined;
+    const timer = setInterval(() => {
+      if (sendQueuedCommand()) clearInterval(timer);
+    }, 250);
+    return () => clearInterval(timer);
+  }, [queuedCommand, onQueuedCommandHandled]);
 
   // Refit xterm when height changes (after drag)
   useEffect(() => {
-    if (open && fitRef.current) {
+    if (isOpen && fitRef.current) {
       try { fitRef.current.fit(); } catch {}
     }
-  }, [consoleHeight, open]);
+  }, [consoleHeight, isOpen]);
 
   return (
-    <div className="border-t border-surface-700 flex-shrink-0">
+    <div className={embedded ? 'flex flex-col flex-1 min-h-0 bg-surface-950' : 'border-t border-surface-700 flex-shrink-0'}>
       {/* Toggle button */}
-      <button
-        onClick={() => setOpen(!open)}
-        className={`flex items-center gap-2 w-full px-3 py-1.5 text-xs transition-colors ${
-          open
-            ? 'text-surface-500 hover:text-surface-200 bg-surface-850/50'
-            : 'text-surface-300 hover:text-surface-100 bg-surface-800 hover:bg-surface-750'
-        }`}
-      >
-        <TerminalIcon size={open ? 12 : 14} className={open ? '' : 'text-primary-400'} />
-        Internal Console
-        {open && (
+      {embedded ? (
+        <div className="flex items-center gap-2 px-3 py-1.5 text-xs bg-surface-850/80 border-b border-surface-700 flex-shrink-0">
+          <TerminalIcon size={13} className="text-amber-400" />
+          <span className="font-medium text-surface-200">Shell</span>
           <div
             className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}
             title={connected ? 'Connected' : restarting ? 'Restarting...' : 'Connecting...'}
           />
-        )}
-        <span className="flex-1" />
-        {open && (
-          <span
-            role="button"
-            tabIndex={0}
+          <span className="text-[10px] text-surface-500 truncate">Full terminal PTY inside this project container</span>
+          <span className="flex-1" />
+          {connected && activeChatSessionId && (
+            <button
+              onClick={handleShareToAgent}
+              disabled={shareStatus === 'sending'}
+              className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition-colors ${
+                shareStatus === 'sent'
+                  ? 'text-green-400 bg-green-500/10'
+                  : 'text-surface-400 hover:text-primary-300 hover:bg-surface-800'
+              }`}
+              title="Share terminal output with the AI agent"
+            >
+              <Share2 size={10} />
+              {shareStatus === 'sent' ? 'Shared' : 'Share'}
+            </button>
+          )}
+          <button
             onClick={handleRestartConsole}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') handleRestartConsole(e);
-            }}
             className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-surface-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors"
-            title="Terminate this bottom console and start a fresh session"
+            title="Terminate this shell and start a fresh session"
           >
             <RotateCcw size={10} className={restarting ? 'animate-spin' : ''} />
             {restarting ? 'Restarting...' : 'New session'}
-          </span>
-        )}
-        {open ? <ChevronDown size={12} /> : <ChevronUp size={14} className="text-primary-400" />}
-      </button>
-      {open && connected && activeChatSessionId && (
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => setOpen(!open)}
+          className={`flex items-center gap-2 w-full px-3 py-1.5 text-xs transition-colors ${
+            open
+              ? 'text-surface-500 hover:text-surface-200 bg-surface-850/50'
+              : 'text-surface-300 hover:text-surface-100 bg-surface-800 hover:bg-surface-750'
+          }`}
+        >
+          <TerminalIcon size={open ? 12 : 14} className={open ? '' : 'text-primary-400'} />
+          Internal Console
+          {open && (
+            <div
+              className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}
+              title={connected ? 'Connected' : restarting ? 'Restarting...' : 'Connecting...'}
+            />
+          )}
+          <span className="flex-1" />
+          {open && (
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={handleRestartConsole}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') handleRestartConsole(e);
+              }}
+              className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-surface-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors"
+              title="Terminate this bottom console and start a fresh session"
+            >
+              <RotateCcw size={10} className={restarting ? 'animate-spin' : ''} />
+              {restarting ? 'Restarting...' : 'New session'}
+            </span>
+          )}
+          {open ? <ChevronDown size={12} /> : <ChevronUp size={14} className="text-primary-400" />}
+        </button>
+      )}
+      {!embedded && open && connected && activeChatSessionId && (
         <button
           onClick={(e) => { e.stopPropagation(); handleShareToAgent(); }}
           disabled={shareStatus === 'sending'}
@@ -434,19 +515,23 @@ export default function InternalConsole({ projectId, chatWsRef, activeChatSessio
         </button>
       )}
 
-      {open && (
+      {isOpen && (
         <>
           {/* Drag-to-resize handle */}
-          <div
+          {!embedded && <div
             onMouseDown={handleResizeMouseDown}
             className="flex items-center justify-center h-2 bg-surface-800 hover:bg-surface-700 cursor-ns-resize border-b border-surface-700/50 group select-none"
             title="Drag to resize console"
           >
             <GripHorizontal size={12} className="text-surface-600 group-hover:text-surface-400 transition-colors" />
-          </div>
+          </div>}
 
           {/* Terminal canvas */}
-          <div ref={termRef} style={{ height: consoleHeight }} className="bg-[#0d1117]" />
+          <div
+            ref={termRef}
+            style={embedded ? undefined : { height: consoleHeight }}
+            className={embedded ? 'flex-1 min-h-0 bg-[#0d1117]' : 'bg-[#0d1117]'}
+          />
 
           {/* AI command builder */}
           <CommandBuilder
@@ -508,7 +593,7 @@ function CommandBuilder({ onRun }) {
   };
 
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-surface-850 border-t border-surface-700/50">
+    <div className="flex items-center gap-1 px-2 py-1 bg-surface-850 border-t border-surface-700/50 flex-shrink-0">
       <Sparkles size={12} className="text-primary-400 flex-shrink-0" />
       <select
         value={quickCommand}

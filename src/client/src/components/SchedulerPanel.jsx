@@ -56,6 +56,29 @@ function relativeTime(timestamp) {
   return `${days}d ago`;
 }
 
+function timeUntil(timestamp) {
+  if (!timestamp) return '';
+  const then = new Date(timestamp).getTime();
+  const diff = then - Date.now();
+  if (diff <= 0) return 'due now';
+
+  const minutes = Math.ceil(diff / 60000);
+  if (minutes < 60) return `in ${minutes}m`;
+
+  const hours = Math.ceil(diff / 3600000);
+  if (hours < 24) return `in ${hours}h`;
+
+  const days = Math.ceil(diff / 86400000);
+  return `in ${days}d`;
+}
+
+function getNextRunAt(schedule) {
+  if (!schedule.enabled || !schedule.intervalMs) return null;
+  const base = schedule.lastRunAt || schedule.createdAt;
+  if (!base) return null;
+  return new Date(new Date(base).getTime() + schedule.intervalMs).toISOString();
+}
+
 export default function SchedulerPanel({ projectId, projectPath, selectedTool }) {
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -69,6 +92,9 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
   const [formName, setFormName] = useState('');
   const [formType, setFormType] = useState('command');
   const [formCommand, setFormCommand] = useState('');
+  const [formWebhookUrl, setFormWebhookUrl] = useState('');
+  const [formWebhookMethod, setFormWebhookMethod] = useState('POST');
+  const [formWebhookBody, setFormWebhookBody] = useState('');
   const [formIntervalMs, setFormIntervalMs] = useState(300000);
   const [formCliTool, setFormCliTool] = useState('');
   const [formRunTarget, setFormRunTarget] = useState('container');
@@ -104,9 +130,11 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
   const handleCreate = async () => {
     if (!formName.trim()) return;
     if (formType === 'command' && !formCommand.trim()) return;
+    if (formType === 'webhook' && !formWebhookUrl.trim()) return;
 
     try {
       setCreating(true);
+      const isWebhook = formType === 'webhook';
       const res = await fetch('/api/schedules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -114,11 +142,14 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
           projectId,
           name: formName.trim(),
           type: formType,
-          command: formCommand.trim(),
-          cliTool: formCliTool || undefined,
+          command: isWebhook ? undefined : formCommand.trim(),
+          webhookUrl: isWebhook ? formWebhookUrl.trim() : undefined,
+          webhookMethod: isWebhook ? formWebhookMethod : undefined,
+          webhookBody: isWebhook && formWebhookBody.trim() ? formWebhookBody.trim() : undefined,
+          cliTool: isWebhook ? undefined : (formCliTool || undefined),
           projectPath,
           intervalMs: formIntervalMs,
-          runTarget: formRunTarget,
+          runTarget: isWebhook ? undefined : formRunTarget,
           enabled: true,
         }),
       });
@@ -138,6 +169,9 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
     setFormName('');
     setFormType('command');
     setFormCommand('');
+    setFormWebhookUrl('');
+    setFormWebhookMethod('POST');
+    setFormWebhookBody('');
     setFormIntervalMs(300000);
     setFormCliTool('');
     setFormRunTarget('container');
@@ -193,6 +227,11 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
     setExpanded(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const createDisabled = creating
+    || !formName.trim()
+    || (formType === 'command' && !formCommand.trim())
+    || (formType === 'webhook' && !formWebhookUrl.trim());
+
   return (
     <div className="flex flex-col h-full bg-surface-850">
       {/* Header */}
@@ -243,8 +282,12 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
                     const data = await res.json();
                     if (data.config) {
                       setFormName(data.config.name || '');
-                      setFormType(data.config.type || 'command');
-                      setFormCommand(data.config.command || data.config.webhookUrl || '');
+                      const generatedType = data.config.type || 'command';
+                      setFormType(generatedType);
+                      setFormCommand(data.config.command || '');
+                      setFormWebhookUrl(data.config.webhookUrl || '');
+                      setFormWebhookMethod(data.config.webhookMethod || 'POST');
+                      setFormWebhookBody(data.config.webhookBody || '');
                       setFormIntervalMs(data.config.intervalMs || 300000);
                       setFormCliTool(selectedTool || 'claude');
                       setAiQuery('');
@@ -306,8 +349,41 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
             />
           )}
 
+          {/* Webhook fields */}
+          {formType === 'webhook' && (
+            <div className="space-y-2">
+              <div className="flex gap-1">
+                <select
+                  value={formWebhookMethod}
+                  onChange={(e) => setFormWebhookMethod(e.target.value)}
+                  className="px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500"
+                >
+                  {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(method => (
+                    <option key={method} value={method}>{method}</option>
+                  ))}
+                </select>
+                <input
+                  type="url"
+                  value={formWebhookUrl}
+                  onChange={(e) => setFormWebhookUrl(e.target.value)}
+                  placeholder="https://example.com/webhook"
+                  className="flex-1 px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 placeholder-surface-500 focus:ring-1 focus:ring-primary-500 font-mono"
+                />
+              </div>
+              {formWebhookMethod !== 'GET' && (
+                <textarea
+                  value={formWebhookBody}
+                  onChange={(e) => setFormWebhookBody(e.target.value)}
+                  placeholder='Optional JSON body, e.g. {"text":"Scheduled check"}'
+                  rows={2}
+                  className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 placeholder-surface-500 focus:ring-1 focus:ring-primary-500 font-mono resize-none"
+                />
+              )}
+            </div>
+          )}
+
           {/* CLI Tool selector */}
-          <div>
+          {formType !== 'webhook' && <div>
             <label className="text-[10px] text-surface-500 uppercase mb-1 block">Run via</label>
             <div className="flex gap-1 flex-wrap">
               {[
@@ -329,10 +405,10 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
                 </button>
               ))}
             </div>
-          </div>
+          </div>}
 
           {/* Run target */}
-          <div>
+          {formType !== 'webhook' && <div>
             <label className="text-[10px] text-surface-500 uppercase mb-1 block">Run in</label>
             <div className="flex gap-1">
               {[
@@ -356,7 +432,7 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
                 </button>
               ))}
             </div>
-          </div>
+          </div>}
 
           {/* Interval dropdown */}
           <select
@@ -375,7 +451,7 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
           <div className="flex gap-2">
             <button
               onClick={handleCreate}
-              disabled={creating || !formName.trim() || (formType === 'command' && !formCommand.trim())}
+              disabled={createDisabled}
               className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs bg-primary-500 hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded transition-colors"
             >
               {creating ? (
@@ -424,11 +500,13 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
               const isTriggering = triggeringIds[schedule.id];
               const lastResult = schedule.lastResult;
               const hasLastResult = lastResult && (lastResult.output || lastResult.error || lastResult.time);
+              const failed = lastResult && !lastResult.success;
+              const nextRunAt = getNextRunAt(schedule);
 
               return (
                 <div
                   key={schedule.id}
-                  className="border-b border-surface-700"
+                  className={`border-b ${failed ? 'border-red-500/30 bg-red-500/[0.03]' : 'border-surface-700'}`}
                 >
                   {/* Schedule row */}
                   <div className="flex items-center gap-2 px-3 py-2 hover:bg-surface-800/50 transition-colors group">
@@ -490,14 +568,25 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
                         )}
                       </div>
 
-                      {/* Last run time */}
-                      {lastResult?.time && (
-                        <div className="mt-0.5">
-                          <span className="text-[10px] text-surface-500">
-                            {relativeTime(lastResult.time)}
+                      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        {schedule.enabled ? (
+                          <span className="text-[10px] text-green-400">
+                            Rule: every {formatInterval(schedule.intervalMs)}
                           </span>
-                        </div>
-                      )}
+                        ) : (
+                          <span className="text-[10px] text-surface-500">Paused</span>
+                        )}
+                        {nextRunAt && (
+                          <span className="text-[10px] text-green-400">
+                            Next run {timeUntil(nextRunAt)}
+                          </span>
+                        )}
+                        {lastResult?.time && (
+                          <span className={`text-[10px] ${failed ? 'text-red-400' : 'text-surface-500'}`}>
+                            Last {failed ? 'failed' : 'succeeded'} {relativeTime(lastResult.time)}
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     {/* Action buttons */}
@@ -547,6 +636,11 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
                   {/* Expanded last result */}
                   {isExpanded && hasLastResult && (
                     <div className="mx-3 mb-2 ml-[30px] p-2 bg-surface-800 rounded border border-surface-700">
+                      {schedule.type === 'webhook' && schedule.webhookUrl && (
+                        <div className="mb-2 text-[10px] text-surface-500 font-mono break-all">
+                          {schedule.webhookMethod || 'POST'} {schedule.webhookUrl}
+                        </div>
+                      )}
                       <div className="flex items-center gap-1.5 mb-1">
                         {lastResult.success ? (
                           <Check className="w-3 h-3 text-green-400" />

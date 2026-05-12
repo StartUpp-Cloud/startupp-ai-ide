@@ -28,6 +28,9 @@ const MAX_OUTPUT_LENGTH = 10_000;
 /** Valid schedule types */
 const VALID_TYPES = new Set(['command', 'test', 'plan', 'webhook']);
 
+/** Valid HTTP methods for webhook schedules */
+const VALID_WEBHOOK_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+
 /**
  * @typedef {Object} ScheduleLastResult
  * @property {boolean} success - Whether the last run succeeded
@@ -40,10 +43,13 @@ const VALID_TYPES = new Set(['command', 'test', 'plan', 'webhook']);
  * @property {string} id - UUID v4
  * @property {string} projectId - Associated project ID
  * @property {string} name - Human-readable name
- * @property {'command'|'test'|'plan'} type - Task type
+ * @property {'command'|'test'|'plan'|'webhook'} type - Task type
  * @property {string|null} command - Shell command (for type='command')
  * @property {string|null} testCommand - Override test command (for type='test')
  * @property {Array|null} planSteps - Plan steps to execute (for type='plan')
+ * @property {string|null} webhookUrl - URL to call (for type='webhook')
+ * @property {string|null} webhookMethod - HTTP method (for type='webhook')
+ * @property {string|Object|null} webhookBody - Request body (for type='webhook')
  * @property {string|null} projectPath - Working directory for commands
  * @property {number} intervalMs - Interval in milliseconds (minimum 60000)
  * @property {boolean} enabled - Whether the schedule is active
@@ -108,10 +114,13 @@ class Scheduler extends EventEmitter {
    * @param {Object} params
    * @param {string} params.projectId - Associated project ID
    * @param {string} params.name - Human-readable name
-   * @param {'command'|'test'|'plan'} params.type - Task type
+   * @param {'command'|'test'|'plan'|'webhook'} params.type - Task type
    * @param {string} [params.command] - Shell command (for type='command')
    * @param {string} [params.testCommand] - Override test command (for type='test')
    * @param {Array} [params.planSteps] - Plan steps (for type='plan')
+   * @param {string} [params.webhookUrl] - URL to call (for type='webhook')
+   * @param {string} [params.webhookMethod] - HTTP method (for type='webhook')
+   * @param {string|Object} [params.webhookBody] - Request body (for type='webhook')
    * @param {string} [params.projectPath] - Working directory
    * @param {number} params.intervalMs - Interval in milliseconds (minimum 60000)
    * @param {boolean} [params.enabled=true] - Whether the schedule starts enabled
@@ -128,6 +137,9 @@ class Scheduler extends EventEmitter {
       command = null,
       testCommand = null,
       planSteps = null,
+      webhookUrl = null,
+      webhookMethod = 'POST',
+      webhookBody = null,
       projectPath = null,
       intervalMs,
       enabled = true,
@@ -152,6 +164,20 @@ class Scheduler extends EventEmitter {
     if (type === 'command' && (!command || typeof command !== 'string')) {
       throw new Error('command is required for type="command"');
     }
+    const normalizedWebhookMethod = (webhookMethod || 'POST').toUpperCase();
+    if (type === 'webhook') {
+      if (!webhookUrl || typeof webhookUrl !== 'string') {
+        throw new Error('webhookUrl is required for type="webhook"');
+      }
+      try {
+        new URL(webhookUrl);
+      } catch {
+        throw new Error('webhookUrl must be a valid URL');
+      }
+      if (!VALID_WEBHOOK_METHODS.has(normalizedWebhookMethod)) {
+        throw new Error(`webhookMethod must be one of: ${[...VALID_WEBHOOK_METHODS].join(', ')}`);
+      }
+    }
 
     const now = new Date().toISOString();
 
@@ -164,6 +190,9 @@ class Scheduler extends EventEmitter {
       command: type === 'command' ? command : null,
       testCommand: type === 'test' ? (testCommand || null) : null,
       planSteps: type === 'plan' ? (planSteps || null) : null,
+      webhookUrl: type === 'webhook' ? webhookUrl.trim() : null,
+      webhookMethod: type === 'webhook' ? normalizedWebhookMethod : null,
+      webhookBody: type === 'webhook' ? (webhookBody || null) : null,
       projectPath: projectPath || null,
       intervalMs,
       enabled,
@@ -224,6 +253,28 @@ class Scheduler extends EventEmitter {
         throw new Error('name must be a non-empty string');
       }
       updates.name = updates.name.trim();
+    }
+
+    const nextType = updates.type || schedule.type;
+    const nextWebhookUrl = updates.webhookUrl !== undefined ? updates.webhookUrl : schedule.webhookUrl;
+    if (nextType === 'webhook') {
+      if (!nextWebhookUrl || typeof nextWebhookUrl !== 'string') {
+        throw new Error('webhookUrl is required for type="webhook"');
+      }
+      try {
+        new URL(nextWebhookUrl);
+      } catch {
+        throw new Error('webhookUrl must be a valid URL');
+      }
+    }
+    if (updates.webhookUrl !== undefined && updates.webhookUrl !== null) {
+      updates.webhookUrl = updates.webhookUrl.trim();
+    }
+    if (updates.webhookMethod !== undefined) {
+      updates.webhookMethod = updates.webhookMethod.toUpperCase();
+      if (!VALID_WEBHOOK_METHODS.has(updates.webhookMethod)) {
+        throw new Error(`webhookMethod must be one of: ${[...VALID_WEBHOOK_METHODS].join(', ')}`);
+      }
     }
 
     // Prevent updating immutable fields

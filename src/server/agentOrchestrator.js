@@ -7,6 +7,7 @@ import { llmProvider } from './llmProvider.js';
 import { memoryStore } from './memoryStore.js';
 import { shouldOrchestrateRequest } from './orchestratorRouting.js';
 import { batchTasks } from './orchestratorBatching.js';
+import { ACTIVE_RUN_STALE_MS, LLM_STEP_TIMEOUT_MS } from './sessionRecovery.js';
 import {
   INTERRUPTED_RUN_ERROR,
   buildLivenessHeartbeatMessage,
@@ -213,6 +214,46 @@ class AgentOrchestrator extends EventEmitter {
     return aborted;
   }
 
+  hasActiveSession(projectId, sessionId) {
+    for (const [runId] of this.activeRuns) {
+      const run = this.getRun(runId);
+      if (run?.projectId === projectId && run?.sessionId === sessionId && ACTIVE_RUN_STATUSES.includes(run.status)) return true;
+    }
+    return false;
+  }
+
+  recoverStaleActiveRuns({ staleMs = ACTIVE_RUN_STALE_MS, broadcastFn = null } = {}) {
+    const now = Date.now();
+    const recovered = [];
+    for (const [runId, active] of this.activeRuns) {
+      if (!active || active.aborted) continue;
+      const silenceMs = now - (active.lastMeaningfulActivityAt || active.lastActivityAt || now);
+      if (silenceMs < staleMs) continue;
+      if (active.lastStaleRecoveryAt && now - active.lastStaleRecoveryAt < staleMs) continue;
+
+      const run = this.getRun(runId);
+      if (!run || !ACTIVE_RUN_STATUSES.includes(run.status)) continue;
+
+      active.lastStaleRecoveryAt = now;
+      active.lastMeaningfulActivityAt = now;
+      const task = this._currentActiveTask(runId);
+      if (active.currentAgentSessionId) agentGateway.abort(active.currentAgentSessionId);
+
+      const seconds = Math.max(1, Math.round(silenceMs / 1000));
+      this._event(
+        run,
+        task,
+        'task-stalled-retry',
+        `No useful agent progress for ${seconds}s. Retrying automatically.`,
+        { silenceSeconds: seconds, autoRetry: true },
+        active.broadcastFn || broadcastFn,
+        'warning'
+      ).catch(() => {});
+      recovered.push({ run, task, silenceMs });
+    }
+    return recovered;
+  }
+
   getRun(runId) {
     const row = sqliteStore.db.prepare('SELECT * FROM orchestrator_runs WHERE id = ?').get(runId);
     return rowToRun(row);
@@ -405,7 +446,7 @@ class AgentOrchestrator extends EventEmitter {
 
     try {
       const memory = memoryStore.buildContextForLLM(run.projectId, { query: run.goal, maxTokens: 1200 });
-      const result = await llmProvider.generateResponse(
+      const result = await this._withTimeout(llmProvider.generateResponse(
         `Create a safe task breakdown for an autonomous coding-agent orchestrator.
 
 The orchestrator will assign tasks to ${tool}. The orchestrator itself will not edit files.
@@ -427,7 +468,7 @@ ${run.goal.slice(0, 5000)}
 Return this exact shape:
 {"tasks":[{"title":"short title","type":"research|implementation|verification|review|general","prompt":"standalone prompt for coding agent","parallelSafe":false}]}`,
         { maxTokens: 2400, temperature: 0.1, model, effort }
-      );
+      ), LLM_STEP_TIMEOUT_MS, 'Task planning timed out');
       const match = result.response.match(/\{[\s\S]*\}/);
       if (!match) return fallback;
       const parsed = JSON.parse(match[0]);
@@ -761,7 +802,7 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
     }
 
     try {
-      const result = await llmProvider.generateResponse(
+      const result = await this._withTimeout(llmProvider.generateResponse(
         `Write the final user-facing response for this autonomous coding run.
 
 Original user goal:
@@ -775,11 +816,22 @@ Instructions:
 - Explain what was done, verification performed, and any remaining blockers/risks.
 - Do not mention internal orchestration mechanics unless relevant.`,
         { maxTokens: 1600, temperature: 0.1 }
-      );
+      ), LLM_STEP_TIMEOUT_MS, 'Final synthesis timed out');
       return result.response?.trim() || `Autonomous run completed.\n\n${summary}`;
     } catch {
       return `Autonomous run completed.\n\n${summary}`;
     }
+  }
+
+  _withTimeout(promise, ms, label) {
+    let timeout;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(label)), ms);
+        timeout.unref?.();
+      }),
+    ]).finally(() => clearTimeout(timeout));
   }
 
   _saveRun(run) {
@@ -889,7 +941,7 @@ Instructions:
         sessionId: run.sessionId,
         role: 'error',
         content: error,
-        metadata: { orchestratorRunId: run.id, interrupted: true },
+        metadata: { orchestratorRunId: run.id, interrupted: true, recoveryPending: true },
       });
       broadcastFn?.({ type: 'chat-message', message: msg });
       run.data = { ...run.data, reliabilityNoticeCreated: true };

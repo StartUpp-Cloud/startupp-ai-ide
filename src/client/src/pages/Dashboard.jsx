@@ -14,6 +14,7 @@ import {
   X,
   AlertTriangle,
   Upload,
+  Terminal,
 } from "lucide-react";
 
 const Dashboard = () => {
@@ -167,6 +168,11 @@ const Dashboard = () => {
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
+          <Link to="/project/new" className="btn-primary !py-1.5 !px-3 !text-xs !gap-1.5">
+            <Plus className="w-3.5 h-3.5" />
+            New Project
+          </Link>
+
           {/* Import button */}
           <label
             className={`btn-secondary cursor-pointer !py-1.5 !px-3 !text-xs !gap-1.5 ${importing ? "opacity-50 pointer-events-none" : ""}`}
@@ -217,12 +223,31 @@ const Dashboard = () => {
           <p className="text-surface-400 text-sm mb-8 max-w-sm mx-auto">
             {searchTerm
               ? "Try different search terms"
-              : "Create your first project to start managing AI prompts with custom rules"}
+              : "Create your first project, then use the Shell tab to connect GitHub and install agent CLIs inside its container."}
           </p>
           {!searchTerm && (
-            <Link to="/" className="btn-primary">
+            <div className="max-w-xl mx-auto mb-8 grid grid-cols-1 sm:grid-cols-3 gap-2 text-left">
+              <div className="rounded-lg border border-surface-700 bg-surface-800/60 p-3">
+                <BookOpen className="w-4 h-4 text-primary-400 mb-2" />
+                <p className="text-xs font-medium text-surface-200">Define rules</p>
+                <p className="text-[11px] text-surface-500 mt-1">Add project context and coding standards once.</p>
+              </div>
+              <div className="rounded-lg border border-surface-700 bg-surface-800/60 p-3">
+                <Terminal className="w-4 h-4 text-green-400 mb-2" />
+                <p className="text-xs font-medium text-surface-200">Open Shell</p>
+                <p className="text-[11px] text-surface-500 mt-1">Run quick setup commands in the project container.</p>
+              </div>
+              <div className="rounded-lg border border-surface-700 bg-surface-800/60 p-3">
+                <MessageSquare className="w-4 h-4 text-amber-400 mb-2" />
+                <p className="text-xs font-medium text-surface-200">Start agents</p>
+                <p className="text-[11px] text-surface-500 mt-1">Use Claude Code, OpenCode, Copilot, Aider, or shell.</p>
+              </div>
+            </div>
+          )}
+          {!searchTerm && (
+            <Link to="/project/new" className="btn-primary">
               <Plus className="w-4 h-4" />
-              Open IDE
+              Create First Project
             </Link>
           )}
         </div>

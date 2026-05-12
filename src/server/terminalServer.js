@@ -16,6 +16,12 @@ import { agentShellPool } from './agentShellPool.js';
 import { slackService } from './slackService.js';
 import { mergeSessionAssistantSettings } from './sessionSettings.js';
 import { shellProxy } from './shellProxy.js';
+import {
+  ACTIVE_RUN_STALE_MS,
+  RELIABILITY_SWEEP_INTERVAL_MS,
+  STREAM_AUTO_RETRY_MAX_AGE_MS,
+  STREAM_RECOVERY_STALE_MS,
+} from './sessionRecovery.js';
 
 const ROLE_PROMPT_IDS = new Set([
   'principal-engineer',
@@ -53,6 +59,8 @@ class TerminalServer {
     this.sessionCliTools = new Map(); // sessionId -> cliTool
     this.autoResponseTimers = new Map(); // sessionId -> pending auto-response timer
     this.shellStreams = new Map(); // projectId:chatSessionId -> active shell output stream
+    this.reliabilityMonitor = null;
+    this.reliabilitySweepRunning = false;
 
     // Per-session WebSocket tracking for isolation
     // Each chat session gets its own dedicated client set
@@ -363,7 +371,66 @@ class TerminalServer {
       this.broadcast({ type: 'activity-entry', entry });
     });
 
+    this._startReliabilityMonitor();
+
     console.log('Terminal WebSocket server initialized on /ws/terminal');
+  }
+
+  _startReliabilityMonitor() {
+    if (this.reliabilityMonitor) return;
+    this.reliabilityMonitor = setInterval(() => {
+      this._runReliabilitySweep().catch(err => {
+        console.warn('[TerminalServer] Reliability sweep failed:', err.message);
+      });
+    }, RELIABILITY_SWEEP_INTERVAL_MS);
+    this.reliabilityMonitor.unref?.();
+  }
+
+  async _runReliabilitySweep() {
+    if (this.reliabilitySweepRunning) return;
+    this.reliabilitySweepRunning = true;
+    try {
+      const { chatStore } = await import('./chatStore.js');
+      const { jobManager } = await import('./jobManager.js');
+      const { agentOrchestrator } = await import('./agentOrchestrator.js');
+
+      agentOrchestrator.recoverStaleActiveRuns({
+        staleMs: ACTIVE_RUN_STALE_MS,
+        broadcastFn: (data) => this.broadcastChatData(data),
+      });
+
+      const interruptedRuns = agentOrchestrator.reconcileInterruptedRuns((data) => this.broadcastChatData(data));
+      for (const run of interruptedRuns) {
+        const pending = this._findPendingRecoveredMessage(run.projectId, run.sessionId, chatStore);
+        if (pending) {
+          this._autoRetryRecoveredSession(null, run.projectId, run.sessionId, pending).catch(err => {
+            console.warn('[TerminalServer] Run recovery retry failed:', err.message);
+          });
+        }
+      }
+
+      const staleStreams = chatStore.getStaleStreamingMessages({
+        staleMs: STREAM_RECOVERY_STALE_MS,
+        maxAgeMs: STREAM_AUTO_RETRY_MAX_AGE_MS,
+        limit: 50,
+      });
+      for (const item of staleStreams) {
+        const recovered = await this._recoverOneStreamingMessage({ item, chatStore, jobManager });
+        if (recovered?.metadata?.recoveryPending) {
+          this._autoRetryRecoveredSession(null, recovered.projectId, recovered.sessionId, recovered).catch(err => {
+            console.warn('[TerminalServer] Stream recovery retry failed:', err.message);
+          });
+        }
+      }
+    } finally {
+      this.reliabilitySweepRunning = false;
+    }
+  }
+
+  broadcastChatData(data) {
+    const sessionId = data?.message?.sessionId || data?.sessionId || data?.chatSessionId;
+    if (sessionId) this.broadcastToChatSession(sessionId, data);
+    this.broadcast(data);
   }
 
   /**
@@ -558,19 +625,9 @@ class TerminalServer {
             }
           }
 
-          // Handle incomplete streaming messages (connection dropped mid-stream)
-          if (incomplete.length > 0) {
-            this.send(ws, {
-              type: 'chat-session-recovery',
-              chatSessionId,
-              projectId,
-              incompleteMessages: incomplete.map(i => ({
-                messageId: i.message.id,
-                partialContent: i.partialContent,
-                chunkCount: i.chunks.length,
-              })),
-            });
-          }
+          const recoveredMessages = incomplete.length > 0
+            ? await this._recoverIncompleteStreamingMessages({ projectId, chatSessionId, incomplete, chatStore, jobManager })
+            : [];
 
           // Handle resumable jobs (server restarted while Claude was working)
           if (resumableJobs.length > 0) {
@@ -590,9 +647,16 @@ class TerminalServer {
             this._autoResumeJob(ws, projectId, chatSessionId, mostRecent);
           }
 
-          // Check if last message looks incomplete (e.g., "Waiting on agent...")
-          // This handles cases where job completed but Claude was waiting for background agents
-          if (incomplete.length === 0 && resumableJobs.length === 0) {
+          // Retry recovered no-output streams without asking the user to intervene.
+          const pendingRecovered = recoveredMessages.find(message => message?.metadata?.recoveryPending)
+            || this._findPendingRecoveredMessage(projectId, chatSessionId, chatStore);
+          if (pendingRecovered && resumableJobs.length === 0) {
+            this._autoRetryRecoveredSession(ws, projectId, chatSessionId, pendingRecovered).catch(err => {
+              console.warn('[terminalServer] Auto-retry recovered session failed:', err.message);
+            });
+          } else if (incomplete.length === 0 && resumableJobs.length === 0) {
+            // Check if last message looks incomplete (e.g., "Waiting on agent...")
+            // This handles cases where job completed but Claude was waiting for background agents.
             const lastIncomplete = await this._checkForIncompleteResponse(projectId, chatSessionId, chatStore);
             if (lastIncomplete) {
               console.log(`[terminalServer] Last message looks incomplete, auto-resuming: "${lastIncomplete.snippet}"`);
@@ -2145,6 +2209,127 @@ class TerminalServer {
     }
   }
 
+  async _recoverIncompleteStreamingMessages({ projectId, chatSessionId, incomplete, chatStore, jobManager }) {
+    const recovered = [];
+    for (const item of incomplete || []) {
+      const recoveredMsg = await this._recoverOneStreamingMessage({
+        item: { ...item, message: { ...(item.message || {}), projectId, sessionId: chatSessionId } },
+        chatStore,
+        jobManager,
+      });
+      if (!recoveredMsg) continue;
+      recovered.push(recoveredMsg);
+    }
+    return recovered;
+  }
+
+  async _recoverOneStreamingMessage({ item, chatStore, jobManager }) {
+    const messageId = item?.message?.id;
+    const projectId = item?.message?.projectId;
+    const sessionId = item?.message?.sessionId;
+    if (!messageId || !projectId || !sessionId) return null;
+
+    const jobId = item.message?.metadata?.jobId || null;
+    const job = jobId ? jobManager.getJob(jobId) : null;
+    if (job?.status === 'running' || job?.status === 'pending') {
+      if (jobManager.isJobActive(job.id)) return null;
+      jobManager.markJobFailed(job.id, 'Recovered stale job with no active backend worker.');
+    }
+    if (!item.stale && !job) return null;
+
+    const recoveredMsg = chatStore.recoverStreamingMessage({ projectId, sessionId, messageId });
+    if (!recoveredMsg) return null;
+    this.broadcastChatData({
+      type: 'chat-message-recovered',
+      projectId,
+      sessionId,
+      message: recoveredMsg,
+    });
+    return recoveredMsg;
+  }
+
+  _findPendingRecoveredMessage(projectId, chatSessionId, chatStore) {
+    const messages = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 20 });
+    return messages.find(message =>
+      (message.role === 'agent' || message.role === 'error') && message.metadata?.recoveryPending
+    ) || null;
+  }
+
+  async _autoRetryRecoveredSession(ws, projectId, chatSessionId, recoveryMessage) {
+    const { chatStore } = await import('./chatStore.js');
+    const { agentGateway } = await import('./agentGateway.js');
+    const { agentOrchestrator } = await import('./agentOrchestrator.js');
+    const { jobManager } = await import('./jobManager.js');
+
+    if (agentGateway.isRunning(chatSessionId) || agentOrchestrator.hasActiveSession(projectId, chatSessionId)) return;
+
+    const activeJob = jobManager.getSessionJobs(projectId, chatSessionId, 5)
+      .find(job => job.status === 'running' || job.status === 'pending');
+    if (activeJob) return;
+
+    const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
+    if (sessionMeta?.lastAutoRecoveryMessageId === recoveryMessage?.id) return;
+
+    const messages = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 50 });
+    const lastUser = messages.find(message => message.role === 'user');
+    if (!lastUser?.content) return;
+
+    chatStore.updateSessionMeta(projectId, chatSessionId, {
+      lastAutoRecoveryMessageId: recoveryMessage?.id || null,
+      lastAutoRecoveryAt: new Date().toISOString(),
+    });
+
+    const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, lastUser.metadata || {}, {
+      tool: lastUser.metadata?.tool || sessionMeta?.tool || 'claude',
+      model: lastUser.metadata?.model ?? sessionMeta?.model,
+      effort: lastUser.metadata?.effort ?? sessionMeta?.effort,
+    });
+    const mode = lastUser.metadata?.mode || 'agent';
+    const attachments = Array.isArray(lastUser.metadata?.attachments) ? lastUser.metadata.attachments : [];
+
+    const sharedBroadcast = (data) => {
+      this.broadcastToChatSession(chatSessionId, data);
+      this.broadcast(data);
+    };
+
+    const runner = agentOrchestrator.shouldOrchestrate({ mode, content: lastUser.content })
+      ? agentOrchestrator.startRun.bind(agentOrchestrator)
+      : agentGateway.handleTask.bind(agentGateway);
+
+    try {
+      await runner({
+        projectId,
+        sessionId: chatSessionId,
+        content: lastUser.content,
+        attachments,
+        mode,
+        tool: assistantSettings.tool,
+        model: assistantSettings.model,
+        effort: assistantSettings.effort,
+        broadcastFn: sharedBroadcast,
+      });
+    } catch (err) {
+      const errMsg = chatStore.addMessage({
+        projectId,
+        sessionId: chatSessionId,
+        role: 'error',
+        content: `Automatic retry failed: ${err.message}`,
+        metadata: { recovery: true, recoveryMessageId: recoveryMessage?.id || null },
+      });
+      this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: errMsg });
+      this.broadcast({ type: 'chat-message', message: errMsg });
+    } finally {
+      if (ws) {
+        this.send(ws, {
+          type: 'chat-recovery-complete',
+          chatSessionId,
+          projectId,
+          message: 'Automatic retry completed.',
+        });
+      }
+    }
+  }
+
   /**
    * Auto-resume an interrupted job by sending a follow-up prompt to Claude.
    * Uses the preserved CLI session ID to continue the conversation.
@@ -2241,6 +2426,8 @@ class TerminalServer {
    * Cleanup on shutdown
    */
   cleanup() {
+    if (this.reliabilityMonitor) clearInterval(this.reliabilityMonitor);
+    this.reliabilityMonitor = null;
     // Clear all auto-response timers
     for (const timer of this.autoResponseTimers.values()) {
       clearTimeout(timer);

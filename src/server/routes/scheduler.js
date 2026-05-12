@@ -10,7 +10,10 @@ import { llmProvider } from '../llmProvider.js';
 const router = express.Router();
 
 /** Valid schedule types for request validation */
-const VALID_TYPES = new Set(['command', 'test', 'plan']);
+const VALID_TYPES = new Set(['command', 'test', 'plan', 'webhook']);
+
+/** HTTP methods accepted for webhook schedules */
+const VALID_WEBHOOK_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 
 /** Minimum interval in milliseconds (1 minute) */
 const MIN_INTERVAL_MS = 60_000;
@@ -57,10 +60,13 @@ router.get('/:id', (req, res) => {
  * Body:
  *   - projectId (string, required)
  *   - name (string, required)
- *   - type ('command' | 'test' | 'plan', required)
+ *   - type ('command' | 'test' | 'plan' | 'webhook', required)
  *   - command (string, required for type='command')
  *   - testCommand (string, optional for type='test')
  *   - planSteps (Array, optional for type='plan')
+ *   - webhookUrl (string, required for type='webhook')
+ *   - webhookMethod (string, optional for type='webhook')
+ *   - webhookBody (string | object, optional for type='webhook')
  *   - projectPath (string, optional)
  *   - intervalMs (number, required, >= 60000)
  *   - enabled (boolean, optional, default true)
@@ -76,6 +82,9 @@ router.post('/', async (req, res) => {
       command,
       testCommand,
       planSteps,
+      webhookUrl,
+      webhookMethod,
+      webhookBody,
       projectPath,
       intervalMs,
       enabled,
@@ -100,6 +109,22 @@ router.post('/', async (req, res) => {
     if (type === 'command' && (!command || typeof command !== 'string')) {
       errors.push('command is required for type="command"');
     }
+    if (type === 'webhook') {
+      if (!webhookUrl || typeof webhookUrl !== 'string') {
+        errors.push('webhookUrl is required for type="webhook"');
+      } else {
+        try {
+          new URL(webhookUrl);
+        } catch {
+          errors.push('webhookUrl must be a valid URL');
+        }
+      }
+
+      const method = (webhookMethod || 'POST').toUpperCase();
+      if (!VALID_WEBHOOK_METHODS.has(method)) {
+        errors.push(`webhookMethod must be one of: ${[...VALID_WEBHOOK_METHODS].join(', ')}`);
+      }
+    }
     if (intervalMs === undefined || intervalMs === null) {
       errors.push('intervalMs is required');
     } else if (typeof intervalMs !== 'number' || intervalMs < MIN_INTERVAL_MS) {
@@ -117,6 +142,9 @@ router.post('/', async (req, res) => {
       command,
       testCommand,
       planSteps,
+      webhookUrl,
+      webhookMethod,
+      webhookBody,
       projectPath,
       intervalMs,
       enabled,

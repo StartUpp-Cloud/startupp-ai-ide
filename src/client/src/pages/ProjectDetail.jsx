@@ -781,6 +781,39 @@ const ProjectDetail = () => {
         </div>
       </div>
 
+      {(project.promptCount || 0) === 0 && (
+        <div className="card bg-amber-500/5 border-amber-500/20">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center flex-shrink-0">
+                <Terminal className="w-5 h-5 text-amber-300" />
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-surface-100">Prepare the project shell</h2>
+                <p className="text-xs text-surface-400 leading-relaxed mt-1 max-w-2xl">
+                  Open this project in the IDE, switch to Shell, then use Quick commands for GitHub login, Claude Code, OpenCode, GitHub Copilot, Aider, and version checks. Those commands run in this project container so credentials and tools stay isolated.
+                </p>
+                <div className="flex flex-wrap gap-1.5 mt-3">
+                  {['GitHub auth', 'Claude Code', 'OpenCode', 'Copilot', 'Aider'].map((item) => (
+                    <span key={item} className="px-2 py-0.5 rounded-full bg-surface-800 border border-surface-700 text-[10px] text-surface-300">
+                      {item}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <Link
+              to="/"
+              onClick={() => localStorage.setItem('ide-selected-project', project.id)}
+              className="btn-secondary flex-shrink-0 justify-center"
+            >
+              <Terminal className="w-4 h-4" />
+              Open IDE Shell
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* Selected Presets Section */}
       {project.selectedPresets?.length > 0 && (
         <div className="card">

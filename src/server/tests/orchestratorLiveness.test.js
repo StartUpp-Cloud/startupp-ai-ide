@@ -7,6 +7,11 @@ import {
   shouldPersistProgressMessage,
   shouldSuppressAgentProgress,
 } from '../orchestratorLiveness.js';
+import {
+  buildStreamingRecoveryContent,
+  shouldRecoverStreamingMessage,
+  streamingSilenceMs,
+} from '../sessionRecovery.js';
 
 assert.match(
   INTERRUPTED_RUN_ERROR,
@@ -84,6 +89,24 @@ assert.equal(
   shouldSuppressAgentProgress('Reading src/server/agentOrchestrator.js'),
   false,
   'specific progress details should still be emitted',
+);
+
+assert.equal(
+  streamingSilenceMs({ now: Date.parse('2026-05-12T10:05:00.000Z'), streamStartedAt: '2026-05-12T10:00:00.000Z' }),
+  300000,
+  'streaming recovery should measure silence from stream start when no chunks exist',
+);
+
+assert.equal(
+  shouldRecoverStreamingMessage({ now: Date.parse('2026-05-12T10:06:00.000Z'), streamStartedAt: '2026-05-12T10:00:00.000Z', staleMs: 300000 }),
+  true,
+  'stale zero-output streaming messages should be recoverable instead of hidden forever',
+);
+
+assert.match(
+  buildStreamingRecoveryContent({ tool: 'claude', retrying: true }),
+  /retrying the request automatically/i,
+  'streaming recovery response should tell the session that the backend is retrying',
 );
 
 console.log('orchestratorLiveness tests passed');

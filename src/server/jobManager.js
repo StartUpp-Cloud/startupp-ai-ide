@@ -348,6 +348,29 @@ class JobManager extends EventEmitter {
     return Array.from(this.activeJobs.values()).map(a => a.job);
   }
 
+  isJobActive(jobId) {
+    return this.activeJobs.has(jobId);
+  }
+
+  markJobFailed(jobId, error) {
+    const active = this.activeJobs.get(jobId);
+    if (active) return this.failJob(jobId, error);
+
+    const job = this.getJob(jobId);
+    if (!job) return null;
+    job.status = 'failed';
+    job.completedAt = new Date().toISOString();
+    job.error = error;
+    if (job.progress) {
+      job.progress.status = 'error';
+      job.progress.detail = error;
+      job.progress.updatedAt = job.completedAt;
+    }
+    this._saveJob(job);
+    this.emit('job-failed', { job, error });
+    return job;
+  }
+
   /**
    * Get resumable jobs for a session (recently interrupted with CLI session ID).
    * These are jobs that can be continued via --resume.

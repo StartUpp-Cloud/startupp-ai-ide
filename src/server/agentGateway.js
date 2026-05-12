@@ -35,6 +35,11 @@ import { execSync } from 'child_process';
 import { resolveSalesforceContext } from './salesforce/salesforceContextResolver.js';
 import { buildCompactSalesforceContext } from './salesforce/salesforceContextService.js';
 
+const CLI_WATCHDOG_INTERVAL_MS = 5000;
+const CLI_NO_OUTPUT_RETRY_MS = 30000;
+const CLI_SILENCE_RETRY_MS = 2 * 60 * 1000;
+const ORCHESTRATED_SILENCE_RETRY_MS = 60 * 1000;
+
 class AgentGateway extends EventEmitter {
   constructor() {
     super();
@@ -1054,6 +1059,8 @@ RULES:
     let lastOutputTime = Date.now();
     let lastProgressTime = 0;
     let lastFilePollTime = 0;
+    let lastWatchdogTime = 0;
+    let lastWatchdogPromptSignature = null;
     let resultEventSeen = false;
 
     const maybeBroadcastFileChanges = (force = false) => {
@@ -1095,6 +1102,43 @@ RULES:
         idleRounds++;
         const silenceMs = now - lastOutputTime;
         maybeBroadcastFileChanges();
+
+        if (now - lastWatchdogTime >= CLI_WATCHDOG_INTERVAL_MS) {
+          lastWatchdogTime = now;
+          const recentOutput = this._stripAnsi(agentShellPool.getRecentOutput(shellSessionId) || totalOutput).slice(-1200);
+          const promptSignature = recentOutput.slice(-300);
+          const responded = promptSignature && promptSignature !== lastWatchdogPromptSignature
+            ? await this._maybeAutoRespondToPrompt({
+                cleanText: recentOutput,
+                projectId,
+                chatSessionId,
+                shellSessionId,
+                broadcastFn,
+                mode,
+              })
+            : false;
+          if (responded) {
+            lastWatchdogPromptSignature = promptSignature;
+            lastOutputTime = now;
+            continue;
+          }
+        }
+
+        const runCtx = this._running.get(chatSessionId);
+        const silenceRetryMs = runCtx?.orchestrated ? ORCHESTRATED_SILENCE_RETRY_MS : CLI_SILENCE_RETRY_MS;
+        const noOutputStalled = totalOutput.length === 0 && silenceMs >= CLI_NO_OUTPUT_RETRY_MS;
+        const outputStalled = totalOutput.length > 0 && silenceMs >= silenceRetryMs;
+        if (noOutputStalled || outputStalled) {
+          try { agentShellPool.killSession(shellSessionId); } catch {}
+          return {
+            success: false,
+            retry: true,
+            retryReason: `No ${tool} output for ${Math.round(silenceMs / 1000)}s`,
+            retryType: 'stalled',
+            displayOutput: lastResultText || totalOutput.slice(-2000),
+            cleanOutput: this._stripAnsi(totalOutput),
+          };
+        }
 
         // Show periodic progress for long-running operations
         if (silenceMs > PROGRESS_INTERVAL_MS && totalOutput.length > 0 && now - lastProgressTime > PROGRESS_INTERVAL_MS) {
@@ -1244,38 +1288,7 @@ RULES:
       }
 
       // ── Auto-approve prompts (write-capable modes only) ──
-      // In Plan mode, Claude should only analyze — no prompts expected
-      if (mode !== 'plan' && mode !== 'plan-review') {
-        const runCtx = this._running.get(chatSessionId);
-        const unsafePrompt = this._looksLikePrompt(cleanChunk) && this._isUnsafeAutoConfirmPrompt(cleanChunk);
-        const orchestratedResponse = !unsafePrompt && runCtx?.orchestrated ? this._orchestratedAutoConfirm(cleanChunk) : null;
-        const fastResponse = !unsafePrompt ? (orchestratedResponse ?? this._fastPromptDetect(cleanChunk)) : null;
-        if (fastResponse !== null) {
-          agentShellPool.write(shellSessionId, fastResponse + '\n');
-          this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed`, broadcastFn);
-        } else {
-          const provider = llmProvider.getSettings().provider;
-          if (provider !== 'ollama' && this._looksLikePrompt(cleanChunk)) {
-            const autoResponse = unsafePrompt ? null : await this._smartAutoConfirm(cleanChunk, projectId, chatSessionId, broadcastFn);
-            if (autoResponse !== null) {
-              agentShellPool.write(shellSessionId, autoResponse + '\n');
-              this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
-            } else {
-              // Safe fallback: decline unresolved prompts so shells never wait
-              // indefinitely for user input that cannot be provided in-band.
-              agentShellPool.write(shellSessionId, 'n\n');
-              this._addProgressMessage(projectId, chatSessionId,
-                `⚠ Declined agent prompt requiring user confirmation${runCtx?.orchestrated ? ' (orchestrated mode)' : ''}: "${cleanChunk.slice(-200).trim()}"`,
-                broadcastFn);
-            }
-          } else if (this._looksLikePrompt(cleanChunk)) {
-            agentShellPool.write(shellSessionId, 'n\n');
-            this._addProgressMessage(projectId, chatSessionId,
-              `⚠ Declined agent prompt requiring user confirmation${runCtx?.orchestrated ? ' (orchestrated mode)' : ''}: "${cleanChunk.slice(-200).trim()}"`,
-              broadcastFn);
-          }
-        }
-      }
+      await this._maybeAutoRespondToPrompt({ cleanText: cleanChunk, projectId, chatSessionId, shellSessionId, broadcastFn, mode });
     }
 
     maybeBroadcastFileChanges(true);
@@ -2598,6 +2611,39 @@ Reply with exactly one word: YES or NO.`,
    */
   _looksLikePrompt(text) {
     return looksLikePrompt(text);
+  }
+
+  async _maybeAutoRespondToPrompt({ cleanText, projectId, chatSessionId, shellSessionId, broadcastFn, mode }) {
+    if (mode === 'plan' || mode === 'plan-review') return false;
+    if (!this._looksLikePrompt(cleanText)) return false;
+
+    const runCtx = this._running.get(chatSessionId);
+    const unsafePrompt = this._isUnsafeAutoConfirmPrompt(cleanText);
+    const orchestratedResponse = !unsafePrompt && runCtx?.orchestrated ? this._orchestratedAutoConfirm(cleanText) : null;
+    const fastResponse = !unsafePrompt ? (orchestratedResponse ?? this._fastPromptDetect(cleanText)) : null;
+    if (fastResponse !== null) {
+      agentShellPool.write(shellSessionId, fastResponse + '\n');
+      this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed`, broadcastFn);
+      return true;
+    }
+
+    const provider = llmProvider.getSettings().provider;
+    if (provider !== 'ollama') {
+      const autoResponse = unsafePrompt ? null : await this._smartAutoConfirm(cleanText, projectId, chatSessionId, broadcastFn);
+      if (autoResponse !== null) {
+        agentShellPool.write(shellSessionId, autoResponse + '\n');
+        this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
+        return true;
+      }
+    }
+
+    // Safe fallback: decline unresolved prompts so shells never wait
+    // indefinitely for user input that cannot be provided in-band.
+    agentShellPool.write(shellSessionId, 'n\n');
+    this._addProgressMessage(projectId, chatSessionId,
+      `⚠ Declined agent prompt requiring user confirmation${runCtx?.orchestrated ? ' (orchestrated mode)' : ''}: "${cleanText.slice(-200).trim()}"`,
+      broadcastFn);
+    return true;
   }
 
   /**

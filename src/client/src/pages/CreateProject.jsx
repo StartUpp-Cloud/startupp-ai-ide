@@ -8,6 +8,7 @@ import {
   Copy as CloneIcon,
   ChevronDown,
   GripVertical,
+  Terminal,
 } from "lucide-react";
 import PresetSelector from "../components/PresetSelector";
 
@@ -120,6 +121,23 @@ const CreateProject = () => {
           <p className="text-surface-400 text-sm mt-0.5">
             Set up rules and guidelines for your AI prompts
           </p>
+        </div>
+      </div>
+
+      <div className="card mb-6 bg-primary-500/5 border-primary-500/20">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 rounded-lg bg-primary-500/15 border border-primary-500/30 flex items-center justify-center flex-shrink-0">
+            <Terminal className="w-4 h-4 text-primary-300" />
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-surface-100">First project setup</h2>
+            <p className="text-xs text-surface-400 leading-relaxed mt-1">
+              After creating the project, open the IDE and switch to the Shell tab. Use the quick commands there to run GitHub login, install Claude Code, install OpenCode, add GitHub Copilot, or check tool versions inside the project container.
+            </p>
+            <p className="text-[11px] text-primary-300 mt-2">
+              This keeps auth and CLI tooling isolated per project while your rules stay attached to every agent prompt.
+            </p>
+          </div>
         </div>
       </div>
 

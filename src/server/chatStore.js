@@ -5,6 +5,12 @@ import { fileURLToPath } from 'url';
 import { createMessage } from './models/ChatMessage.js';
 import { resolveSessionAssistantSettings } from './sessionSettings.js';
 import { sqliteStore } from './sqliteStore.js';
+import {
+  STREAM_AUTO_RETRY_MAX_AGE_MS,
+  STREAM_RECOVERY_STALE_MS,
+  buildStreamingRecoveryContent,
+  shouldRecoverStreamingMessage,
+} from './sessionRecovery.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const JOBS_DIR = path.join(__dirname, '../../data/jobs');
@@ -213,9 +219,10 @@ class ChatStore {
   recoverStreamingMessage({ projectId, sessionId, messageId }) {
     const chunks = this.getStreamChunks({ projectId, messageId });
     let rawContent = chunks.map(c => c.content).join('');
+    const originalMsg = this._getMessage(projectId, sessionId, messageId);
 
     try {
-      const msg = this._getMessage(projectId, sessionId, messageId);
+      const msg = originalMsg;
       if (msg?.metadata?.jobId) {
         const jobOutputPath = path.join(JOBS_DIR, `${msg.metadata.jobId}.output`);
         if (fs.existsSync(jobOutputPath)) {
@@ -225,7 +232,21 @@ class ChatStore {
       }
     } catch {}
 
-    if (!rawContent || rawContent.length < 50) return null;
+    if (!rawContent || rawContent.length < 50) {
+      return this.finalizeStreamingMessage({
+        projectId,
+        sessionId,
+        messageId,
+        finalContent: buildStreamingRecoveryContent({ tool: originalMsg?.metadata?.tool, retrying: true }),
+        metadata: {
+          recovered: true,
+          recoveryPending: true,
+          staleNoOutput: true,
+          chunkCount: chunks.length,
+          jobId: originalMsg?.metadata?.jobId || null,
+        },
+      });
+    }
 
     const { content: cleanedContent, cliSessionId } = this._parseRawChunksWithSessionId(rawContent);
     if (cliSessionId) {
@@ -347,8 +368,43 @@ class ChatStore {
     return rows.map(row => {
       const message = sqliteStore.rowToMessage(row);
       const chunks = this.getStreamChunks({ projectId, messageId: message.id });
-      return { message, chunks, partialContent: chunks.map(c => c.content).join('') };
+      const lastChunkAt = chunks.length > 0 ? chunks[chunks.length - 1].timestamp : null;
+      const streamStartedAt = message.metadata?.streamStartedAt || message.createdAt;
+      return {
+        message,
+        chunks,
+        partialContent: chunks.map(c => c.content).join(''),
+        streamStartedAt,
+        lastChunkAt,
+        stale: shouldRecoverStreamingMessage({ streamStartedAt, lastChunkAt, staleMs: STREAM_RECOVERY_STALE_MS }),
+      };
     });
+  }
+
+  getStaleStreamingMessages({ staleMs = STREAM_RECOVERY_STALE_MS, maxAgeMs = STREAM_AUTO_RETRY_MAX_AGE_MS, limit = 50 } = {}) {
+    const rows = this._db().prepare(`SELECT * FROM chat_messages
+      WHERE metadata LIKE '%"streaming":true%' ORDER BY created_at DESC LIMIT ?`).all(Math.max(1, Math.min(parseInt(limit, 10) || 50, 200)));
+    const now = Date.now();
+    const stale = [];
+    for (const row of rows) {
+      const message = sqliteStore.rowToMessage(row);
+      if (!message) continue;
+      const streamStartedAt = message.metadata?.streamStartedAt || message.createdAt;
+      const streamStartMs = new Date(streamStartedAt).getTime();
+      if (maxAgeMs && Number.isFinite(streamStartMs) && now - streamStartMs > maxAgeMs) continue;
+      const chunks = this.getStreamChunks({ projectId: message.projectId, messageId: message.id });
+      const lastChunkAt = chunks.length > 0 ? chunks[chunks.length - 1].timestamp : null;
+      if (!shouldRecoverStreamingMessage({ now, streamStartedAt, lastChunkAt, staleMs })) continue;
+      stale.push({
+        message,
+        chunks,
+        partialContent: chunks.map(c => c.content).join(''),
+        streamStartedAt,
+        lastChunkAt,
+        stale: true,
+      });
+    }
+    return stale;
   }
 
   addMessage({ projectId, sessionId = null, role, content, metadata }) {
@@ -393,7 +449,10 @@ class ChatStore {
           ? new Date(msg.metadata.streamStartedAt).getTime()
           : new Date(msg.createdAt).getTime();
         const silenceMs = now - (lastChunkTime || streamStarted);
-        if (silenceMs > 5 * 60 * 1000) {
+        if (silenceMs > STREAM_RECOVERY_STALE_MS) {
+          const jobId = msg.metadata?.jobId || null;
+          const job = jobId ? this._db().prepare('SELECT status FROM jobs WHERE id = ?').get(jobId) : null;
+          if (job?.status === 'running' || job?.status === 'pending') continue;
           const recovered = this.recoverStreamingMessage({ projectId, sessionId, messageId: msg.id });
           if (recovered) messages.push(recovered);
         }
