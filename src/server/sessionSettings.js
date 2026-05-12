@@ -28,7 +28,22 @@ function normalizeModel(tool, model) {
   if (!supportsModelSelection(tool)) return null;
   if (typeof model !== 'string') return null;
   const value = model.trim();
+  if (!isModelCompatibleWithTool(tool, value)) return null;
   return value || null;
+}
+
+function isModelCompatibleWithTool(tool, model) {
+  if (!model) return true;
+  if (tool === 'claude') {
+    return /^(claude-|opus$|sonnet$|haiku$)/i.test(model);
+  }
+  if (tool === 'codex') {
+    return !model.includes('/') && /^(gpt-|o\d)/i.test(model);
+  }
+  if (tool === 'ollama') {
+    return !model.includes('/');
+  }
+  return true;
 }
 
 function normalizeEffort(tool, effort) {
@@ -48,14 +63,17 @@ export function resolveSessionAssistantSettings(input = {}, fallback = {}) {
 }
 
 export function mergeSessionAssistantSettings(existing = {}, updates = {}, fallback = {}) {
+  const existingTool = normalizeTool(existing.tool, fallback.tool || 'claude');
+  const updatedTool = hasOwn(updates, 'tool') ? normalizeTool(updates.tool, existingTool) : existingTool;
+  const toolChanged = updatedTool !== existingTool;
   const merged = {
-    tool: hasOwn(updates, 'tool') ? updates.tool : existing.tool,
-    model: hasOwn(updates, 'model') ? updates.model : existing.model,
-    effort: hasOwn(updates, 'effort') ? updates.effort : existing.effort,
+    tool: updatedTool,
+    model: hasOwn(updates, 'model') ? updates.model : (toolChanged ? null : existing.model),
+    effort: hasOwn(updates, 'effort') ? updates.effort : (toolChanged ? null : existing.effort),
   };
 
   return resolveSessionAssistantSettings(merged, {
-    tool: existing.tool || fallback.tool || 'claude',
+    tool: updatedTool || existing.tool || fallback.tool || 'claude',
   });
 }
 

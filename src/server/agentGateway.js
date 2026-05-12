@@ -132,8 +132,8 @@ class AgentGateway extends EventEmitter {
       const isOllamaAssistant = ollamaWorkspaceOrchestrator.isOllamaAssistant(tool);
 
       if (mode !== 'plan' && this._requiresRepoInspection(fullContent)) {
-        this._addProgressMessage(projectId, sessionId, `This needs opencode's repository access — delegating...`, broadcastFn, null, { transient: true });
-        return await this._sendToCliTool(projectId, sessionId, fullContent, 'opencode', assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
+        this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s repository access — delegating...`, broadcastFn, null, { transient: true });
+        return await this._sendToCliTool(projectId, sessionId, fullContent, tool, assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
       }
 
       let routedContent = fullContent;

@@ -643,9 +643,9 @@ class TerminalServer {
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
         const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
-        // sessionMeta (persisted via PATCH) is authoritative for tool/model/effort.
-        // Only use payload values as fallback for sessions not yet configured.
-        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+        // The current chat payload reflects the visible assistant selector; use it
+        // to avoid stale persisted metadata sending a run to the wrong CLI tool.
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
           tool: payload.tool || 'claude',
           model: payload.model,
           effort: payload.effort,
@@ -767,8 +767,8 @@ class TerminalServer {
         chatStore.migrateIfNeeded(payload.projectId);
         const chatSessionId = payload.sessionId || chatStore.getActiveSession(payload.projectId).id;
         const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
-        // sessionMeta (persisted via PATCH) is authoritative for tool/model/effort.
-        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+        // The retry payload reflects the visible assistant selector.
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
           tool: payload.tool || 'claude',
           model: payload.model,
           effort: payload.effort,
@@ -874,7 +874,7 @@ class TerminalServer {
         }
 
         const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
-        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
           tool: payload.tool || 'claude',
           model: payload.model,
           effort: payload.effort,
@@ -972,7 +972,7 @@ class TerminalServer {
         }
 
         const sessionMeta = chatStore.getSession(payload.projectId, chatSessionId);
-        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, {}, {
+        const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
           tool: payload.tool || 'claude',
           model: payload.model,
           effort: payload.effort,
