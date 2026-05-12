@@ -23,6 +23,12 @@ import { ollamaWorkspaceOrchestrator } from './ollamaWorkspaceOrchestrator.js';
 import { getDB } from './db.js';
 import Project from './models/Project.js';
 import { supportsSessionEffortSelection, supportsSessionModelSelection } from './sessionSettings.js';
+import {
+  isSafeOrchestratedPrompt,
+  isUnsafeAutoConfirmPrompt,
+  looksLikePrompt,
+  orchestratedAutoConfirm,
+} from './agentAutoConfirm.js';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
@@ -2518,26 +2524,22 @@ Reply with exactly one word: YES or NO.`,
   }
 
   _orchestratedAutoConfirm(text) {
-    const lastBit = text.slice(-500);
-    if (!this._looksLikePrompt(lastBit) || this._isUnsafeAutoConfirmPrompt(lastBit)) return null;
-    if (this._isSafeOrchestratedPrompt(lastBit)) return 'y';
-    return null;
+    return orchestratedAutoConfirm(text);
   }
 
   _isSafeOrchestratedPrompt(text) {
-    return /\b(git\s+push|push(?:ed)?\b|deploy(?:ment|ed)?\b|git\s+status|status\b|changes?\b|pending\b)\b/i.test(text);
+    return isSafeOrchestratedPrompt(text);
   }
 
   _isUnsafeAutoConfirmPrompt(text) {
-    return /\b(force\s+push|--force(?:-with-lease)?|delete|remove|destroy|drop\s+(?:table|database|db)|rm\s+-rf|git\s+reset\s+--hard|git\s+clean\s+-[\w-]*[fd]|irreversible|credential|credentials|secret|secrets|token|password|private\s+key)\b/i.test(text);
+    return isUnsafeAutoConfirmPrompt(text);
   }
 
   /**
    * Check if output looks like it's waiting for user input.
    */
   _looksLikePrompt(text) {
-    const lastBit = text.slice(-300);
-    return /\?\s*$/.test(lastBit) || /\[.*\]\s*$/.test(lastBit) || /:\s*$/.test(lastBit);
+    return looksLikePrompt(text);
   }
 
   /**
