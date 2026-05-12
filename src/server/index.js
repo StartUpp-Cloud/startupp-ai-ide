@@ -47,6 +47,7 @@ import chatRoutes from "./routes/chat.js";
 import profileRoutes from "./routes/profile.js";
 import slackRoutes from "./routes/slack.js";
 import connectionRoutes from "./routes/connections.js";
+import salesforceRoutes from "./routes/salesforce.js";
 import { authMiddleware, getToken } from "./authToken.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
@@ -156,6 +157,7 @@ async function startServer() {
     app.use("/api/profile", profileRoutes);
     app.use("/api/slack", slackRoutes);
     app.use("/api/connections", connectionRoutes);
+    app.use("/api/salesforce", salesforceRoutes);
     app.use("/api/jobs", (await import("./routes/jobs.js")).default);
 
     // Health check endpoint

@@ -411,6 +411,7 @@ export default function IDE() {
         onModeChange={setAgentMode}
         selectedTool={selectedTool}
         onToolChange={setSelectedTool}
+        onProjectUpdated={(project) => setSelectedProject(project)}
         projects={projects}
         notificationSlot={
           <NotificationCenter
@@ -602,6 +603,9 @@ export default function IDE() {
             projectPath={selectedProject?.folderPath}
             selectedTool={selectedTool}
             containerName={selectedProject?.containerName}
+            selectedProject={selectedProject}
+            containerRepos={containerRepos}
+            onProjectUpdated={(project) => setSelectedProject(project)}
           />
         </div>
       </div>

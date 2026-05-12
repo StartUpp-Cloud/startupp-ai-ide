@@ -26,6 +26,7 @@ export default function TopBar({
   onModeChange,
   selectedTool,
   onToolChange,
+  onProjectUpdated,
   notificationSlot,
   projects,
 }) {
@@ -38,6 +39,19 @@ export default function TopBar({
   const toolMenuRef = useRef(null);
 
   const activeTool = CLI_TOOLS.find(t => t.id === selectedTool) || CLI_TOOLS[0];
+
+  const updateProjectStack = async (stack) => {
+    if (!selectedProject?.id) return;
+    try {
+      const response = await fetch('/api/salesforce/project-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: selectedProject.id, stack }),
+      });
+      const data = await response.json();
+      if (response.ok && data.ok) onProjectUpdated?.(data.data.project);
+    } catch {}
+  };
 
   useEffect(() => {
     const handler = (e) => {
@@ -123,6 +137,20 @@ export default function TopBar({
             </div>
             <span className="text-[10px]">{completedSteps}/{totalSteps}</span>
           </div>
+        )}
+
+        <div className="w-px h-4 bg-surface-700" />
+
+        {selectedProject && (
+          <select
+            value={selectedProject.stack || 'generic'}
+            onChange={(e) => updateProjectStack(e.target.value)}
+            className="bg-surface-800 border border-surface-700 rounded px-1.5 py-1 text-[11px] text-surface-300 focus:outline-none focus:ring-1 focus:ring-primary-500"
+            title="Project stack"
+          >
+            <option value="generic">Generic</option>
+            <option value="salesforce">Salesforce</option>
+          </select>
         )}
 
         <div className="w-px h-4 bg-surface-700" />

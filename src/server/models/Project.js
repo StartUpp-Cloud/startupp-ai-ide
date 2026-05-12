@@ -56,14 +56,23 @@ export function normalizePromptSettings(input) {
   };
 }
 
+export function normalizeStackSettings(project) {
+  if (!project) return project;
+  project.stack = project.stack === "salesforce" ? "salesforce" : "generic";
+  project.stackManualOverride = project.stackManualOverride === true;
+  project.stackDetection = project.stackDetection || null;
+  project.salesforce = project.salesforce && typeof project.salesforce === "object" ? project.salesforce : {};
+  return project;
+}
+
 export function getAllProjects() {
-  return db.data.projects.sort(
+  return db.data.projects.map(normalizeStackSettings).sort(
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
   );
 }
 
 export function findProjectById(id) {
-  return db.data.projects.find((p) => p.id === id);
+  return normalizeStackSettings(db.data.projects.find((p) => p.id === id));
 }
 
 export function findProjectByName(name) {
@@ -75,6 +84,7 @@ export function findProjectByName(name) {
 export function searchProjects(searchTerm) {
   const term = searchTerm.toLowerCase();
   return db.data.projects
+    .map(normalizeStackSettings)
     .filter(
       (p) =>
         p.name.toLowerCase().includes(term) ||
@@ -93,6 +103,10 @@ export async function createProject({
   gitUrl,
   repos,
   containerPorts,
+  stack,
+  stackManualOverride,
+  stackDetection,
+  salesforce,
 }) {
   const now = new Date().toISOString();
   const project = {
@@ -107,6 +121,10 @@ export async function createProject({
     repos: repos || [], // Array of { url, folder } for multi-repo workspaces
     containerPorts: containerPorts || [], // Port mappings e.g. ['3000:3000']
     containerStatus: null, // Last known status ('running', 'stopped', etc.)
+    stack: stack === "salesforce" ? "salesforce" : "generic",
+    stackManualOverride: stackManualOverride === true,
+    stackDetection: stackDetection || null,
+    salesforce: salesforce && typeof salesforce === "object" ? salesforce : {},
     promptCount: 0,
     createdAt: now,
     updatedAt: now,
@@ -114,7 +132,7 @@ export async function createProject({
 
   db.data.projects.push(project);
   await db.write();
-  return project;
+  return normalizeStackSettings(project);
 }
 
 export async function updateProject(id, updates) {
@@ -130,7 +148,7 @@ export async function updateProject(id, updates) {
 
   db.data.projects[index] = updatedProject;
   await db.write();
-  return updatedProject;
+  return normalizeStackSettings(updatedProject);
 }
 
 export async function deleteProject(id) {

@@ -42,6 +42,44 @@ function mergeModelsByName(...modelLists) {
   return merged;
 }
 
+function normalizeSalesforceSettings(input) {
+  if (!input || typeof input !== "object") return {};
+  return {
+    ...(typeof input.defaultOrgAlias === "string" && { defaultOrgAlias: input.defaultOrgAlias.trim() }),
+    ...(typeof input.defaultOrgUsername === "string" && { defaultOrgUsername: input.defaultOrgUsername.trim() }),
+    ...(typeof input.preferredApiVersion === "string" && { preferredApiVersion: input.preferredApiVersion.trim() }),
+    ...(typeof input.packageDirectory === "string" && { packageDirectory: input.packageDirectory.trim() }),
+    ...(Array.isArray(input.metadataRoots) && { metadataRoots: input.metadataRoots.filter((root) => typeof root === "string" && root.trim()).map((root) => root.trim()) }),
+  };
+}
+
+function applyStackUpdates(source, updates, body) {
+  if (body.stack !== undefined) {
+    if (!["generic", "salesforce"].includes(body.stack)) {
+      return "Project stack must be generic or salesforce";
+    }
+    updates.stack = body.stack;
+    updates.stackManualOverride = true;
+  }
+
+  if (body.stackManualOverride !== undefined) {
+    updates.stackManualOverride = body.stackManualOverride === true;
+  }
+
+  if (body.stackDetection !== undefined) {
+    updates.stackDetection = body.stackDetection || null;
+  }
+
+  if (body.salesforce !== undefined) {
+    updates.salesforce = {
+      ...(source.salesforce || {}),
+      ...normalizeSalesforceSettings(body.salesforce),
+    };
+  }
+
+  return null;
+}
+
 // GET /api/projects - Get all projects
 router.get("/", async (req, res) => {
   try {
@@ -87,7 +125,7 @@ router.get("/:id", async (req, res) => {
 // POST /api/projects - Create new project
 router.post("/", async (req, res) => {
   try {
-    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath } = req.body;
+    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath, stack, stackManualOverride, salesforce } = req.body;
 
     // Handle project cloning
     if (cloneFromId) {
@@ -104,6 +142,9 @@ router.post("/", async (req, res) => {
         selectedPresets: sourceProject.selectedPresets || [],
         promptSettings: sourceProject.promptSettings,
         folderPath: folderPath || sourceProject.folderPath,
+        stack: sourceProject.stack || "generic",
+        stackManualOverride: sourceProject.stackManualOverride === true,
+        salesforce: sourceProject.salesforce || {},
       });
 
       res.status(201).json(clonedProject);
@@ -150,6 +191,9 @@ router.post("/", async (req, res) => {
       selectedPresets: validPresets,
       promptSettings: normalizePromptSettings(promptSettings),
       folderPath: folderPath || null,
+      stack,
+      stackManualOverride,
+      salesforce: normalizeSalesforceSettings(salesforce),
     });
 
     res.status(201).json(project);
@@ -193,6 +237,9 @@ router.post("/:id/clone", async (req, res) => {
       rules: sourceProject.rules,
       selectedPresets: sourceProject.selectedPresets || [],
       promptSettings: sourceProject.promptSettings,
+      stack: sourceProject.stack || "generic",
+      stackManualOverride: sourceProject.stackManualOverride === true,
+      salesforce: sourceProject.salesforce || {},
     });
 
     res.status(201).json(clonedProject);
@@ -275,6 +322,9 @@ router.put("/:id", async (req, res) => {
     if (repos !== undefined) updates.repos = Array.isArray(repos) ? repos : [];
     if (containerPorts !== undefined) updates.containerPorts = Array.isArray(containerPorts) ? containerPorts : [];
     if (containerStatus !== undefined) updates.containerStatus = containerStatus || null;
+
+    const stackError = applyStackUpdates(project, updates, req.body);
+    if (stackError) return res.status(400).json({ error: stackError });
 
     const updatedProject = await Project.update(id, updates);
     res.json(updatedProject);
