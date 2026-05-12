@@ -17,7 +17,9 @@ for (const prompt of safePrompts) {
 
 const riskyPrompts = [
   'Force push to origin/main?',
+  'Force push to main with --force-with-lease?',
   'Delete the production database?',
+  'Run git reset --hard to discard the worktree?',
   'Expose this secret token?',
 ];
 

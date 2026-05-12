@@ -3,6 +3,7 @@ const ORCHESTRATION_INTENT_RE = /\b(implement|fix|debug|build|refactor|migrate|d
 export function shouldOrchestrateRequest({ mode, content, executeReviewedPlan = false }) {
   if (executeReviewedPlan) return true;
   if (mode === 'plan') return false;
+  if (mode === 'autonomous') return true;
   const text = String(content || '').trim();
   if (text.length > 180) return true;
   return ORCHESTRATION_INTENT_RE.test(text);

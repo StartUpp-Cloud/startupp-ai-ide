@@ -1,4 +1,4 @@
-import { Brain, Zap } from 'lucide-react';
+import { Brain, Rocket, Zap } from 'lucide-react';
 
 export default function ModeToggle({ mode, onChange }) {
   return (
@@ -24,6 +24,17 @@ export default function ModeToggle({ mode, onChange }) {
       >
         <Zap size={13} />
         Agent
+      </button>
+      <button
+        onClick={() => onChange('autonomous')}
+        className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all ${
+          mode === 'autonomous'
+            ? 'bg-blue-600 text-white shadow-sm'
+            : 'text-gray-400 hover:text-gray-200'
+        }`}
+      >
+        <Rocket size={13} />
+        Autonomous
       </button>
     </div>
   );

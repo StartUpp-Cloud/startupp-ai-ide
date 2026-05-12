@@ -23,9 +23,27 @@ assert.equal(
 );
 
 assert.equal(
+  shouldOrchestrateRequest({ mode: 'plan', content: 'Deploy this end to end and push the changes.' }),
+  false,
+  'Plan mode should not orchestrate even for operational prompts'
+);
+
+assert.equal(
   shouldOrchestrateRequest({ mode: 'agent', content: 'hello' }),
   false,
   'Simple chat should not orchestrate'
+);
+
+assert.equal(
+  shouldOrchestrateRequest({ mode: 'agent', content: 'Can you explain closures conceptually?' }),
+  false,
+  'Selective agent routing should preserve direct answers for conceptual questions'
+);
+
+assert.equal(
+  shouldOrchestrateRequest({ mode: 'autonomous', content: 'hello' }),
+  true,
+  'Autonomous mode should always route through the orchestrator'
 );
 
 assert.equal(

@@ -7,10 +7,18 @@ import { llmProvider } from './llmProvider.js';
 import { memoryStore } from './memoryStore.js';
 import { shouldOrchestrateRequest } from './orchestratorRouting.js';
 import { batchTasks } from './orchestratorBatching.js';
+import {
+  INTERRUPTED_RUN_ERROR,
+  buildLivenessHeartbeatMessage,
+  shouldEmitLivenessHeartbeat,
+  shouldSuppressAgentProgress,
+} from './orchestratorLiveness.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_TASKS = 6;
 const PROGRESS_DEDUP_WINDOW_MS = 5000; // Suppress identical progress within 5s
+const LIVENESS_INTERVAL_MS = 5000;
+const LIVENESS_STALE_MS = 4000;
 const ACTIVE_RUN_STATUSES = ['running'];
 const ACTIVE_RUN_STATUS_SQL = ACTIVE_RUN_STATUSES.map(() => '?').join(', ');
 
@@ -134,7 +142,8 @@ class AgentOrchestrator extends EventEmitter {
     };
 
     this._saveRun(run);
-    this.activeRuns.set(run.id, { aborted: false, broadcastFn });
+    this.activeRuns.set(run.id, { aborted: false, broadcastFn, lastActivityAt: Date.now(), lastMeaningfulActivityAt: Date.now() });
+    this._startLivenessMonitor(run, broadcastFn);
     this._emitRun(run, broadcastFn);
     await this._event(run, null, 'run-started', `Started autonomous run with ${tool}.`, { tool, model, effort }, broadcastFn);
 
@@ -163,8 +172,7 @@ class AgentOrchestrator extends EventEmitter {
         broadcastFn({ type: 'chat-message', message: msg });
       }
       this._emitRun(run, broadcastFn);
-      this.activeRuns.delete(run.id);
-      this._lastProgress.delete(run.id);
+      this._deactivateRun(run.id);
     });
 
     return run;
@@ -187,6 +195,7 @@ class AgentOrchestrator extends EventEmitter {
       this._event(run, null, 'run-cancelled', 'Autonomous run cancelled.', null, active.broadcastFn, 'warning').catch(() => {});
       this._emitRun(run, active.broadcastFn);
     }
+    this._deactivateRun(runId);
     return true;
   }
 
@@ -338,8 +347,7 @@ class AgentOrchestrator extends EventEmitter {
       });
       broadcastFn({ type: 'chat-message', message: msg });
       this._emitRun(run, broadcastFn);
-      this.activeRuns.delete(run.id);
-      this._lastProgress.delete(run.id);
+      this._deactivateRun(run.id);
       return;
     }
 
@@ -377,8 +385,7 @@ class AgentOrchestrator extends EventEmitter {
     this._saveRun(run);
     await this._event(run, null, 'run-completed', 'Autonomous run completed.', null, broadcastFn, 'success');
     this._emitRun(run, broadcastFn);
-    this.activeRuns.delete(run.id);
-    this._lastProgress.delete(run.id);
+    this._deactivateRun(run.id);
   }
 
   async _planTasks(run, { tool, model, effort, mode, executeReviewedPlan }) {
@@ -636,7 +643,7 @@ Report clearly what you did, files changed, commands run, verification results, 
 
     if (progressContent) {
       // Suppress generic filler messages that carry no meaningful detail
-      if (/^Working: coding assistant is using a tool/i.test(progressContent)) {
+      if (shouldSuppressAgentProgress(progressContent)) {
         return;
       }
 
@@ -798,6 +805,7 @@ Instructions:
   }
 
   async _event(run, task, eventType, message, metadata = null, broadcastFn = null, level = 'info') {
+    this._touchRunActivity(run.id, eventType !== 'run-heartbeat');
     const event = {
       id: uuidv4(),
       runId: run.id,
@@ -830,6 +838,7 @@ Instructions:
   }
 
   _emitRun(run, broadcastFn) {
+    this._touchRunActivity(run.id, true);
     const payload = { ...run, tasks: this.getTasks(run.id) };
     broadcastFn?.({ type: 'orchestrator-run', projectId: run.projectId, sessionId: run.sessionId, run: payload });
     this.emit('run', payload);
@@ -837,7 +846,7 @@ Instructions:
 
   _markRunInterrupted(run, broadcastFn = null) {
     const data = { ...(run.data || {}) };
-    const error = 'Autonomous run was interrupted before it could send a final response. Review the persisted events or retry the request.';
+    const error = INTERRUPTED_RUN_ERROR;
     run.status = 'failed';
     run.phase = 'failed';
     run.error = error;
@@ -862,6 +871,68 @@ Instructions:
 
     this._emitRun(run, broadcastFn);
     return run;
+  }
+
+  _startLivenessMonitor(run, broadcastFn) {
+    const active = this.activeRuns.get(run.id);
+    if (!active || active.livenessTimer) return;
+
+    active.livenessTimer = setInterval(() => {
+      this._emitLivenessHeartbeat(run.id, broadcastFn).catch(err => {
+        console.warn('[agentOrchestrator] Liveness heartbeat failed:', err.message);
+      });
+    }, LIVENESS_INTERVAL_MS);
+    active.livenessTimer.unref?.();
+  }
+
+  async _emitLivenessHeartbeat(runId, broadcastFn) {
+    const active = this.activeRuns.get(runId);
+    if (!active || active.aborted) return;
+
+    const now = Date.now();
+    if (!shouldEmitLivenessHeartbeat({ now, lastActivityAt: active.lastActivityAt, staleMs: LIVENESS_STALE_MS })) return;
+
+    const run = this.getRun(runId);
+    if (!run || !ACTIVE_RUN_STATUSES.includes(run.status)) return;
+
+    const session = chatStore.getSession(run.projectId, run.sessionId);
+    if (session?.status !== 'open') return;
+
+    const task = this._currentActiveTask(runId);
+    const silenceMs = now - (active.lastMeaningfulActivityAt || active.lastActivityAt || now);
+    const seconds = Math.max(1, Math.round(silenceMs / 1000));
+    const message = buildLivenessHeartbeatMessage({ taskTitle: task?.title || null, phase: run.phase, silenceMs });
+
+    await this._event(
+      run,
+      task,
+      'run-heartbeat',
+      message,
+      { heartbeat: true, phase: run.phase, silenceSeconds: seconds },
+      broadcastFn
+    );
+  }
+
+  _currentActiveTask(runId) {
+    const row = sqliteStore.db.prepare(`SELECT * FROM orchestrator_tasks
+      WHERE run_id = ? AND status IN ('running', 'retrying')
+      ORDER BY updated_at DESC LIMIT 1`).get(runId);
+    return rowToTask(row);
+  }
+
+  _touchRunActivity(runId, meaningful = true) {
+    const active = this.activeRuns.get(runId);
+    if (!active) return;
+    const now = Date.now();
+    active.lastActivityAt = now;
+    if (meaningful) active.lastMeaningfulActivityAt = now;
+  }
+
+  _deactivateRun(runId) {
+    const active = this.activeRuns.get(runId);
+    if (active?.livenessTimer) clearInterval(active.livenessTimer);
+    this.activeRuns.delete(runId);
+    this._lastProgress.delete(runId);
   }
 }
 
