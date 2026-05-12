@@ -245,9 +245,7 @@ class ChatStore {
         projectId,
         sessionId,
         messageId,
-        finalContent: cliSessionId
-          ? '🔄 Connection was briefly interrupted. Resuming conversation automatically...'
-          : '🔄 Reconnecting and recovering progress...',
+        finalContent: 'Continuing progress automatically...',
         metadata: { recovered: true, recoveryPending: true, chunkCount: chunks.length, cliSessionId: cliSessionId || null },
       });
     }

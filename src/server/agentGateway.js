@@ -1189,21 +1189,23 @@ RULES:
       // ── Auto-approve prompts (write-capable modes only) ──
       // In Plan mode, Claude should only analyze — no prompts expected
       if (mode !== 'plan' && mode !== 'plan-review') {
-        const fastResponse = this._fastPromptDetect(cleanChunk);
+        const runCtx = this._running.get(chatSessionId);
+        const unsafePrompt = this._looksLikePrompt(cleanChunk) && this._isUnsafeAutoConfirmPrompt(cleanChunk);
+        const orchestratedResponse = !unsafePrompt && runCtx?.orchestrated ? this._orchestratedAutoConfirm(cleanChunk) : null;
+        const fastResponse = !unsafePrompt ? (orchestratedResponse ?? this._fastPromptDetect(cleanChunk)) : null;
         if (fastResponse !== null) {
           agentShellPool.write(shellSessionId, fastResponse + '\n');
           this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed`, broadcastFn);
         } else {
           const provider = llmProvider.getSettings().provider;
           if (provider !== 'ollama' && this._looksLikePrompt(cleanChunk)) {
-            const autoResponse = await this._smartAutoConfirm(cleanChunk, projectId, chatSessionId, broadcastFn);
+            const autoResponse = unsafePrompt ? null : await this._smartAutoConfirm(cleanChunk, projectId, chatSessionId, broadcastFn);
             if (autoResponse !== null) {
               agentShellPool.write(shellSessionId, autoResponse + '\n');
               this._addProgressMessage(projectId, chatSessionId, `✓ Auto-confirmed: "${autoResponse}"`, broadcastFn);
             } else {
               // Fallback: in orchestrated/autonomous sessions, decline the prompt
               // to prevent the shell from hanging indefinitely with no user to respond.
-              const runCtx = this._running.get(chatSessionId);
               if (runCtx?.orchestrated) {
                 agentShellPool.write(shellSessionId, 'n\n');
                 this._addProgressMessage(projectId, chatSessionId,
@@ -2500,6 +2502,7 @@ Reply with exactly one word: YES or NO.`,
 
   _fastPromptDetect(text) {
     const lastBit = text.slice(-500);
+    if (this._isUnsafeAutoConfirmPrompt(lastBit)) return null;
     if (/\[Y\/n\]/i.test(lastBit)) return 'Y';
     if (/\[y\/N\]/i.test(lastBit)) return 'y';
     if (/\(y\/n\)/i.test(lastBit)) return 'y';
@@ -2512,6 +2515,21 @@ Reply with exactly one word: YES or NO.`,
     if (/Do you want to/i.test(lastBit)) return 'y';
     if (/Would you like to/i.test(lastBit)) return 'y';
     return null;
+  }
+
+  _orchestratedAutoConfirm(text) {
+    const lastBit = text.slice(-500);
+    if (!this._looksLikePrompt(lastBit) || this._isUnsafeAutoConfirmPrompt(lastBit)) return null;
+    if (this._isSafeOrchestratedPrompt(lastBit)) return 'y';
+    return null;
+  }
+
+  _isSafeOrchestratedPrompt(text) {
+    return /\b(git\s+push|push(?:ed)?\b|deploy(?:ment|ed)?\b|git\s+status|status\b|changes?\b|pending\b)\b/i.test(text);
+  }
+
+  _isUnsafeAutoConfirmPrompt(text) {
+    return /\b(force\s+push|--force(?:-with-lease)?|delete|remove|destroy|drop\s+(?:table|database|db)|rm\s+-rf|git\s+reset\s+--hard|git\s+clean\s+-[\w-]*[fd]|irreversible|credential|credentials|secret|secrets|token|password|private\s+key)\b/i.test(text);
   }
 
   /**
