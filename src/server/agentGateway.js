@@ -41,6 +41,7 @@ const CLI_WATCHDOG_INTERVAL_MS = 5000;
 const CLI_NO_OUTPUT_RETRY_MS = 30000;
 const CLI_SILENCE_RETRY_MS = 2 * 60 * 1000;
 const ORCHESTRATED_SILENCE_RETRY_MS = 60 * 1000;
+const SESSION_CONTEXT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 class AgentGateway extends EventEmitter {
   constructor() {
@@ -1349,6 +1350,9 @@ RULES:
       if (parsed.finishReason === 'length' || parsed.finishReason === 'max_tokens') {
         return { success: false, retry: true, retryReason: 'Context limit reached', retryType: 'context-limit', displayOutput, cleanOutput };
       }
+      if (parsed.isIncomplete) {
+        return { success: false, retry: true, retryReason: 'OpenCode did not return a final answer', retryType: 'incomplete-output', displayOutput, cleanOutput };
+      }
       if (parsed.isError) {
         // Permanent errors (model not found, bad config) must not be retried
         if (parsed.isPermanentError) {
@@ -1707,7 +1711,11 @@ ${String(agentResponse || '').slice(0, 6000)}`;
     // Check if we have enough history to warrant distillation
     let messages;
     try {
-      messages = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 30 }).reverse();
+      messages = chatStore.getMessages(projectId, {
+        sessionId: chatSessionId,
+        limit: 120,
+        since: new Date(Date.now() - SESSION_CONTEXT_LOOKBACK_MS).toISOString(),
+      }).reverse();
     } catch { return null; }
 
     // Need at least 2 user+agent exchanges to distill
@@ -1882,7 +1890,11 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
     // Recent messages
     try {
-      const recent = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 15 }).reverse();
+      const recent = chatStore.getMessages(projectId, {
+        sessionId: chatSessionId,
+        limit: 50,
+        since: new Date(Date.now() - SESSION_CONTEXT_LOOKBACK_MS).toISOString(),
+      }).reverse();
       const history = recent
         .filter(m => m.role === 'user' || m.role === 'agent')
         .map(m => `[${m.role}]: ${m.content.slice(0, 200)}`)

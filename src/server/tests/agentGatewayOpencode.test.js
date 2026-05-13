@@ -48,7 +48,23 @@ const commentaryOnly = parseOpencodeJsonOutput(
   ].join('\n'),
   'opencode run test --format json',
 );
-assert.match(commentaryOnly.text, /did not return a final summary/i);
+assert.equal(commentaryOnly.isIncomplete, true);
+assert.match(commentaryOnly.text, /only progress updates/i);
+
+const commentaryAfterToolCalls = [
+  '{"sessionID":"ses_test","type":"step_finish","part":{"type":"step-finish","reason":"tool-calls"}}',
+  '{"sessionID":"ses_test","type":"text","part":{"type":"text","text":"I\\u2019m adding the endpoint now.","metadata":{"openai":{"phase":"commentary"}}}}',
+].join('\n');
+assert.equal(
+  isOpencodeQuietCompletion(commentaryAfterToolCalls),
+  false,
+  'commentary after tool calls is progress, not OpenCode completion',
+);
+assert.equal(
+  parseOpencodeJsonOutput(commentaryAfterToolCalls, 'opencode run test --format json').isIncomplete,
+  true,
+  'commentary-only OpenCode output should be retryable instead of successful',
+);
 
 const contextLimit = parseOpencodeJsonOutput(
   '{"sessionID":"ses_test","type":"step-finish","reason":"length"}',
@@ -85,5 +101,6 @@ const gatewaySource = readFileSync(resolve(__dirname, '../agentGateway.js'), 'ut
 assert.match(gatewaySource, /_silenceRetryMs\(tool, runCtx\)/);
 assert.match(gatewaySource, /if \(tool === 'opencode'\) return CLI_SILENCE_RETRY_MS;/);
 assert.match(gatewaySource, /tool === 'opencode' && isOpencodeQuietCompletion\(clean\)/);
+assert.match(gatewaySource, /parsed\.isIncomplete/);
 
 console.log('agentGatewayOpencode tests passed');

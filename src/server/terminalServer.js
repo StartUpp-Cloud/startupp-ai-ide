@@ -2394,6 +2394,9 @@ class TerminalServer {
         /background.*running/i,
         /working in the background/i,
         /launched.*agent/i,
+        /\bI(?:'|\u2019)ll (?:implement|add|trace|start|look|investigate|work)\b/i,
+        /\bI(?:'|\u2019)m (?:adding|implementing|checking|locating|working)\b/i,
+        /\bstarting by\b/i,
         /\.\.\.$/,  // Ends with ellipsis
       ];
 

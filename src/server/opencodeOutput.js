@@ -33,16 +33,41 @@ function extractProviderModel(cleanOutput) {
   return null;
 }
 
+function opencodeFinishReason(event) {
+  return normalizeAgentEventType(
+    event?.finishReason || event?.part?.finishReason || event?.reason || event?.part?.reason,
+  );
+}
+
+function isTerminalFinishReason(reason) {
+  return !reason || reason === 'stop' || reason === 'end_turn';
+}
+
+function opencodeTextPhase(event) {
+  return normalizeAgentEventType(
+    event?.part?.metadata?.openai?.phase
+      || event?.metadata?.openai?.phase
+      || event?.part?.metadata?.phase
+      || event?.metadata?.phase,
+  );
+}
+
+function isCommentaryTextEvent(event) {
+  return normalizeAgentEventType(event?.type) === 'text' && opencodeTextPhase(event) === 'commentary';
+}
+
 export function isOpencodeQuietCompletion(cleanOutput) {
   let lastEvent = null;
-  let seenStepFinish = false;
+  let seenTerminalStepFinish = false;
 
   for (const line of String(cleanOutput || '').split('\n')) {
     const event = parseOpencodeJsonLine(line);
     if (event?.type || event?.part?.type) {
       const type = normalizeAgentEventType(event.type);
       const partType = normalizeAgentEventType(event.part?.type);
-      if (type === 'step_finish' || partType === 'step_finish') seenStepFinish = true;
+      if ((type === 'step_finish' || partType === 'step_finish') && isTerminalFinishReason(opencodeFinishReason(event))) {
+        seenTerminalStepFinish = true;
+      }
       lastEvent = event;
     }
   }
@@ -50,10 +75,16 @@ export function isOpencodeQuietCompletion(cleanOutput) {
   if (!lastEvent) return false;
   const type = normalizeAgentEventType(lastEvent.type);
   const partType = normalizeAgentEventType(lastEvent.part?.type);
+  const reason = opencodeFinishReason(lastEvent);
 
-  return type === 'step_finish'
-    || partType === 'step_finish'
-    || (seenStepFinish && type === 'text' && typeof lastEvent.part?.text === 'string' && lastEvent.part.text.length > 0);
+  return ((type === 'step_finish' || partType === 'step_finish') && isTerminalFinishReason(reason))
+    || (
+      seenTerminalStepFinish
+      && type === 'text'
+      && !isCommentaryTextEvent(lastEvent)
+      && typeof lastEvent.part?.text === 'string'
+      && lastEvent.part.text.length > 0
+    );
 }
 
 export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = () => '') {
@@ -61,6 +92,7 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
   let sessionId = null;
   let isError = false;
   let isPermanentError = false;
+  let isIncomplete = false;
   let lastFinishReason = null;
   let seenToolUse = false;
   let hasPostToolText = false;
@@ -80,7 +112,7 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
       }
 
       if (type === 'text' && json.part?.text) {
-        const phase = normalizeAgentEventType(json.part?.metadata?.openai?.phase || json.metadata?.openai?.phase || json.part?.metadata?.phase || json.metadata?.phase);
+        const phase = opencodeTextPhase(json);
         if (phase === 'commentary') {
           commentaryParts.push(json.part.text);
         } else {
@@ -100,7 +132,7 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
       }
 
       if (type === 'step_finish' || partType === 'step_finish') {
-        const reason = json.finishReason || json.part?.finishReason || json.reason || json.part?.reason;
+        const reason = opencodeFinishReason(json);
         if (reason) lastFinishReason = reason;
       }
 
@@ -141,7 +173,7 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
     text = extractToolResponse(cleanOutput, cmd);
   }
 
-  const isCleanStop = lastFinishReason === 'stop' || lastFinishReason === 'end-turn';
+  const isCleanStop = lastFinishReason === 'stop' || lastFinishReason === 'end_turn';
   const isContextLimit = lastFinishReason === 'length' || lastFinishReason === 'max_tokens';
 
   if (isContextLimit) {
@@ -157,11 +189,12 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
         ? '⚠️ Response received but could not be parsed. OpenCode may still be processing.'
         : '⚠️ No response received from OpenCode. Please try again.';
     }
-  } else if (commentaryOnly && isCleanStop && !isError) {
-    text += '\n\nOpenCode did not return a final summary. I preserved its last progress update above; ask me to continue if you want me to verify the final state.';
+  } else if (commentaryOnly && !isError) {
+    isIncomplete = true;
+    text += '\n\nOpenCode returned only progress updates and did not provide a final answer.';
   } else if (!isError && seenToolUse && !hasPostToolText && isCleanStop) {
     text += '\n\n✓ Task completed.';
   }
 
-  return { text, sessionId, isError, isPermanentError, finishReason: lastFinishReason };
+  return { text, sessionId, isError, isPermanentError, isIncomplete, finishReason: lastFinishReason };
 }

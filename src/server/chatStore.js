@@ -421,24 +421,31 @@ class ChatStore {
     return msg;
   }
 
-  getMessages(projectId, { sessionId = null, limit = 50, before = null } = {}) {
+  getMessages(projectId, { sessionId = null, limit = 50, before = null, since = null } = {}) {
     if (!sessionId) {
       const active = this.getSessions(projectId)[0];
       if (!active) return [];
       sessionId = active.id;
     }
     const safeLimit = Math.max(1, Math.min(parseInt(limit, 10) || 50, 500));
+    const sinceTime = since ? new Date(since).getTime() : NaN;
+    const sinceIso = Number.isFinite(sinceTime) ? new Date(sinceTime).toISOString() : null;
+    const where = ['project_id = ?', 'session_id = ?'];
+    const params = [projectId, sessionId];
     let rows;
     if (before) {
       const beforeRow = this._db().prepare('SELECT created_at FROM chat_messages WHERE project_id = ? AND session_id = ? AND id = ?')
         .get(projectId, sessionId, before);
       if (!beforeRow) return [];
-      rows = this._db().prepare(`SELECT * FROM chat_messages WHERE project_id = ? AND session_id = ? AND created_at < ?
-        ORDER BY created_at DESC LIMIT ?`).all(projectId, sessionId, beforeRow.created_at, safeLimit * 3);
-    } else {
-      rows = this._db().prepare(`SELECT * FROM chat_messages WHERE project_id = ? AND session_id = ?
-        ORDER BY created_at DESC LIMIT ?`).all(projectId, sessionId, safeLimit * 3);
+      where.push('created_at < ?');
+      params.push(beforeRow.created_at);
     }
+    if (sinceIso) {
+      where.push('created_at >= ?');
+      params.push(sinceIso);
+    }
+    rows = this._db().prepare(`SELECT * FROM chat_messages WHERE ${where.join(' AND ')}
+      ORDER BY created_at DESC LIMIT ?`).all(...params, safeLimit * 3);
 
     const now = Date.now();
     const messages = [];

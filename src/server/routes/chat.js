@@ -169,14 +169,23 @@ router.post('/:projectId/chat/sessions/:sessionId/pin', (req, res) => {
 router.get('/:projectId/chat', (req, res) => {
   try {
     const { projectId } = req.params;
-    const { limit = 50, before, sessionId } = req.query;
+    const { limit = 50, before, sessionId, since } = req.query;
+    const requestedLimit = Math.max(1, Math.min(parseInt(limit, 10) || 50, 499));
     chatStore.migrateIfNeeded(projectId);
-    const messages = chatStore.getMessages(projectId, {
+    const fetched = chatStore.getMessages(projectId, {
       sessionId: sessionId || null,
-      limit: parseInt(limit, 10),
+      limit: requestedLimit + 1,
       before: before || null,
+      since: since || null,
     });
-    res.json({ messages, total: chatStore.getCount(projectId, sessionId || null) });
+    const hasMore = fetched.length > requestedLimit;
+    const messages = hasMore ? fetched.slice(0, requestedLimit) : fetched;
+    res.json({
+      messages,
+      total: chatStore.getCount(projectId, sessionId || null),
+      hasMore,
+      nextBefore: messages[messages.length - 1]?.id || null,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

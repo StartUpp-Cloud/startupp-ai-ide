@@ -16,6 +16,12 @@ import {
 
 const VISIBLE_SESSION_HEALTH_INTERVAL_MS = 5000;
 const NOT_BUSY_CLEAR_GRACE_MS = 12000;
+const CHAT_HISTORY_LOOKBACK_DAYS = 7;
+const CHAT_HISTORY_PAGE_SIZE = 100;
+
+function chatHistorySinceIso() {
+  return new Date(Date.now() - CHAT_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
 
 /**
  * Format job progress for display
@@ -560,6 +566,8 @@ function ChatSessionContent({
   const [typingMessageIds, setTypingMessageIds] = useState(() => new Set());
   const [orchestratorRun, setOrchestratorRun] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
+  const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
 
   const messagesEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
@@ -573,6 +581,10 @@ function ChatSessionContent({
   const isInitialLoadRef = useRef(true);
   const messagesLoadedRef = useRef(false);
   const visibleSinceRef = useRef(isVisible ? Date.now() : 0);
+  const historyCursorRef = useRef(null);
+  const historySinceRef = useRef(chatHistorySinceIso());
+  const historyLoadingOlderRef = useRef(false);
+  const suppressNextAutoScrollRef = useRef(false);
 
   // Scroll position tracking for jump buttons
   const [showJumpBottom, setShowJumpBottom] = useState(false);
@@ -659,6 +671,69 @@ function ChatSessionContent({
       });
   }, [projectId, sessionId, applyPersistedOrchestratorRuns]);
 
+  const loadOlderMessages = useCallback(async () => {
+    if (!projectId || !sessionId || !isVisible || searchResults) return;
+    if (!hasMoreHistory || historyLoadingOlderRef.current) return;
+
+    const before = historyCursorRef.current || messagesRef.current[0]?.id;
+    if (!before) {
+      setHasMoreHistory(false);
+      return;
+    }
+
+    const el = scrollContainerRef.current;
+    const previousHeight = el?.scrollHeight || 0;
+    const previousTop = el?.scrollTop || 0;
+
+    historyLoadingOlderRef.current = true;
+    setHistoryLoadingOlder(true);
+
+    try {
+      const params = new URLSearchParams({
+        limit: String(CHAT_HISTORY_PAGE_SIZE),
+        sessionId,
+        before,
+        since: historySinceRef.current,
+      });
+      const r = await fetch(`/api/projects/${projectId}/chat?${params.toString()}`);
+      const data = await r.json();
+      const older = (data.messages || []).reverse();
+
+      if (older.length === 0) {
+        setHasMoreHistory(false);
+        return;
+      }
+
+      let nextCursor = before;
+      suppressNextAutoScrollRef.current = true;
+      for (const message of older) {
+        if (message?.id) knownIdsRef.current.add(message.id);
+      }
+      updateMessages(prev => {
+        const byId = new Map(prev.map(message => [message.id, message]));
+        for (const message of older) {
+          if (message?.id) byId.set(message.id, message);
+        }
+        const merged = [...byId.values()].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        nextCursor = merged[0]?.id || before;
+        return merged;
+      });
+      historyCursorRef.current = data.nextBefore || nextCursor;
+      setHasMoreHistory(Boolean(data.hasMore));
+
+      requestAnimationFrame(() => {
+        const current = scrollContainerRef.current;
+        if (!current) return;
+        current.scrollTop = current.scrollHeight - previousHeight + previousTop;
+      });
+    } catch (err) {
+      console.warn('[chat] Failed to load older messages:', err.message);
+    } finally {
+      historyLoadingOlderRef.current = false;
+      setHistoryLoadingOlder(false);
+    }
+  }, [projectId, sessionId, isVisible, searchResults, hasMoreHistory, updateMessages]);
+
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -666,7 +741,8 @@ function ChatSessionContent({
     const distFromTop = el.scrollTop;
     setShowJumpBottom(distFromBottom > 300);
     setShowJumpTop(distFromTop > 300);
-  }, []);
+    if (distFromTop < 120) loadOlderMessages();
+  }, [loadOlderMessages]);
 
   // Scroll the messages container to the bottom directly — more reliable than
   // scrollIntoView() which can be defeated by overflow:hidden ancestors.
@@ -792,23 +868,38 @@ function ChatSessionContent({
     // Reset scroll state for fresh load
     isInitialLoadRef.current = true;
     prevMessageCountRef.current = 0;
+    historySinceRef.current = chatHistorySinceIso();
+    historyCursorRef.current = null;
+    setHasMoreHistory(false);
 
     const controller = new AbortController();
     let cancelled = false;
     setLoading(true);
-    fetch(`/api/projects/${projectId}/chat?limit=100&sessionId=${sessionId}`, { signal: controller.signal })
+    const params = new URLSearchParams({
+      limit: String(CHAT_HISTORY_PAGE_SIZE),
+      sessionId,
+      since: historySinceRef.current,
+    });
+    fetch(`/api/projects/${projectId}/chat?${params.toString()}`, { signal: controller.signal })
       .then(r => r.json())
       .then(data => {
         if (cancelled) return;
         const msgs = (data.messages || []).reverse();
         knownIdsRef.current = new Set(msgs.map(m => m.id));
+        historyCursorRef.current = data.nextBefore || msgs[0]?.id || null;
+        setHasMoreHistory(Boolean(data.hasMore));
         updateMessages(msgs);
         messagesLoadedRef.current = true;
         // Mark as read
         markCurrentSessionRead();
         rehydrateOrchestratorRuns(controller.signal);
       })
-      .catch(() => { if (!cancelled) updateMessages([]); })
+      .catch(() => {
+        if (!cancelled) {
+          updateMessages([]);
+          setHasMoreHistory(false);
+        }
+      })
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => {
@@ -1140,7 +1231,9 @@ function ChatSessionContent({
     const currentCount = messages.length;
     const prevCount = prevMessageCountRef.current;
 
-    if (isInitialLoadRef.current && currentCount > 0) {
+    if (suppressNextAutoScrollRef.current) {
+      suppressNextAutoScrollRef.current = false;
+    } else if (isInitialLoadRef.current && currentCount > 0) {
       scheduleScrollToBottom();
       isInitialLoadRef.current = false;
     } else if (currentCount > prevCount && prevCount > 0) {
@@ -1512,6 +1605,20 @@ function ChatSessionContent({
 
       {/* Messages */}
       <div ref={scrollContainerRef} onScroll={handleScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }} className="px-1 py-4">
+        {!searchResults && displayMessages.length > 0 && (hasMoreHistory || historyLoadingOlder) && (
+          <div className="mb-3 flex justify-center px-3">
+            <button
+              type="button"
+              onClick={loadOlderMessages}
+              disabled={historyLoadingOlder}
+              className="inline-flex items-center gap-2 rounded-full border border-surface-700/60 bg-surface-900/80 px-3 py-1.5 text-[11px] text-surface-400 transition-colors hover:border-surface-600 hover:text-surface-200 disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              {historyLoadingOlder && <Loader size={12} className="animate-spin" />}
+              {historyLoadingOlder ? 'Loading earlier messages...' : `Load earlier messages from last ${CHAT_HISTORY_LOOKBACK_DAYS} days`}
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <div className="flex items-center justify-center h-full">
             <Loader size={22} className="animate-spin text-surface-600" />
