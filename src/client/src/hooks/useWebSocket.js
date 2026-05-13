@@ -70,6 +70,7 @@ export function useWebSocket(path, options = {}) {
   const [status, setStatus] = useState(WS_STATUS.DISCONNECTED);
   const [isConnected, setIsConnected] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [connectionVersion, setConnectionVersion] = useState(0);
 
   // Update status and notify callback
   const updateStatus = useCallback((newStatus) => {
@@ -162,6 +163,7 @@ export function useWebSocket(path, options = {}) {
       setReconnectAttempt(0);
 
       updateStatus(WS_STATUS.CONNECTED);
+      setConnectionVersion(version => version + 1);
       startHeartbeat();
 
       // Notify connection established
@@ -366,6 +368,7 @@ export function useWebSocket(path, options = {}) {
     status,
     isConnected,
     reconnectAttempt,
+    connectionVersion,
     send,
     forceReconnect,
     checkConnection,

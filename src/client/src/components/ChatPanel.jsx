@@ -14,6 +14,9 @@ import {
   supportsModelSelection,
 } from '../utils/sessionAssistantOptions';
 
+const VISIBLE_SESSION_HEALTH_INTERVAL_MS = 5000;
+const NOT_BUSY_CLEAR_GRACE_MS = 12000;
+
 /**
  * Format job progress for display
  */
@@ -547,6 +550,7 @@ function ChatSessionContent({
   projectId,
   sessionId,
   wsRef,
+  wsConnectionVersion = 0,
   mode,
   tool,
   session,
@@ -575,10 +579,12 @@ function ChatSessionContent({
 
   const messagesEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
+  const messagesRef = useRef([]);
   const knownIdsRef = useRef(new Set());
-  const busyClearRef = useRef(false);
-  const finalClearRef = useRef(false);
   const streamingChunksRef = useRef('');
+  const agentBusyRef = useRef(false);
+  const streamingMessageIdRef = useRef(null);
+  const notBusySinceRef = useRef(null);
   const prevMessageCountRef = useRef(0);
   const isInitialLoadRef = useRef(true);
   const messagesLoadedRef = useRef(false);
@@ -587,6 +593,26 @@ function ChatSessionContent({
   // Scroll position tracking for jump buttons
   const [showJumpBottom, setShowJumpBottom] = useState(false);
   const [showJumpTop, setShowJumpTop] = useState(false);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const updateMessages = useCallback((updater) => {
+    setMessages(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      messagesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    agentBusyRef.current = agentBusy;
+  }, [agentBusy]);
+
+  useEffect(() => {
+    streamingMessageIdRef.current = streamingMessage?.id || null;
+  }, [streamingMessage?.id]);
 
   const appendLiveProgressEntry = useCallback((message) => {
     const content = String(message?.content || '').trim();
@@ -694,6 +720,86 @@ function ChatSessionContent({
     onUnreadChange?.(projectId, sessionId, false);
   }, [projectId, sessionId, onSessionUpdate, onUnreadChange]);
 
+  const clearBusyState = useCallback(() => {
+    setAgentBusy(false);
+    setStreamingMessage(null);
+    streamingChunksRef.current = '';
+    setLiveProgressEntries([]);
+    setLiveChangedFiles([]);
+    setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
+  }, []);
+
+  const mergeServerMessages = useCallback((serverMessages = [], { authoritativeBusy = null } = {}) => {
+    const incoming = [...(serverMessages || [])]
+      .filter(message => message?.id)
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    let finalMessageChanged = false;
+
+    if (incoming.length > 0) {
+      let merged = [...messagesRef.current];
+
+      for (const message of incoming) {
+        knownIdsRef.current.add(message.id);
+
+        if (message.role === 'user') {
+          merged = merged.filter(existing => {
+            const id = String(existing.id || '');
+            return !(id.startsWith('pending-') && existing.role === 'user' && existing.content === message.content);
+          });
+        }
+
+        const index = merged.findIndex(existing => existing.id === message.id);
+        if (index >= 0) {
+          const existing = merged[index];
+          if (
+            existing.content !== message.content ||
+            existing.role !== message.role ||
+            existing.createdAt !== message.createdAt ||
+            JSON.stringify(existing.metadata || {}) !== JSON.stringify(message.metadata || {})
+          ) {
+            merged[index] = message;
+            if (message.role === 'agent' || message.role === 'error') finalMessageChanged = true;
+          }
+        } else {
+          merged.push(message);
+          if (message.role === 'agent' || message.role === 'error') finalMessageChanged = true;
+        }
+
+        if (message.role === 'agent' || message.role === 'error') {
+          markMessageForTyping(message);
+        }
+      }
+
+      merged = merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      messagesRef.current = merged;
+      updateMessages(merged);
+    }
+
+    const current = messagesRef.current;
+    const lastUserIndex = current.findLastIndex(message => message.role === 'user');
+    const hasFinalAfterUser = lastUserIndex >= 0
+      ? current.slice(lastUserIndex + 1).some(message => message.role === 'agent' || message.role === 'error')
+      : current.some(message => message.role === 'agent' || message.role === 'error');
+    const hasPendingUser = current.some(message => String(message.id || '').startsWith('pending-') && message.role === 'user');
+
+    if (authoritativeBusy === true) {
+      notBusySinceRef.current = null;
+      setAgentBusy(true);
+    } else if (finalMessageChanged && hasFinalAfterUser) {
+      notBusySinceRef.current = null;
+      clearBusyState();
+    } else if (authoritativeBusy === false && agentBusyRef.current && !hasPendingUser && !streamingMessageIdRef.current) {
+      const now = Date.now();
+      notBusySinceRef.current ||= now;
+      if (now - notBusySinceRef.current >= NOT_BUSY_CLEAR_GRACE_MS) {
+        notBusySinceRef.current = null;
+        clearBusyState();
+      }
+    } else if (authoritativeBusy !== false) {
+      notBusySinceRef.current = null;
+    }
+  }, [clearBusyState, markMessageForTyping, updateMessages]);
+
   // Load messages only when visible. Hidden pinned tabs should not block the
   // active session by reading chat files or recovering stale streams.
   useEffect(() => {
@@ -712,20 +818,20 @@ function ChatSessionContent({
         if (cancelled) return;
         const msgs = (data.messages || []).reverse();
         knownIdsRef.current = new Set(msgs.map(m => m.id));
-        setMessages(msgs);
+        updateMessages(msgs);
         messagesLoadedRef.current = true;
         // Mark as read
         markCurrentSessionRead();
         rehydrateOrchestratorRuns(controller.signal);
       })
-      .catch(() => { if (!cancelled) setMessages([]); })
+      .catch(() => { if (!cancelled) updateMessages([]); })
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => {
       cancelled = true;
       controller.abort();
     };
-  }, [projectId, sessionId, isVisible, markCurrentSessionRead, rehydrateOrchestratorRuns]);
+  }, [projectId, sessionId, isVisible, markCurrentSessionRead, rehydrateOrchestratorRuns, updateMessages]);
 
   useEffect(() => {
     if (isVisible) markCurrentSessionRead();
@@ -771,7 +877,48 @@ function ChatSessionContent({
       cancelled = true;
       wsRef?.current?.removeEventListener('open', handleOpen);
     };
-  }, [projectId, sessionId, isVisible, wsRef, rehydrateOrchestratorRuns]);
+  }, [projectId, sessionId, isVisible, wsRef, wsConnectionVersion, rehydrateOrchestratorRuns]);
+
+  const requestSessionHealth = useCallback((reason = 'visible', recover = false) => {
+    if (!projectId || !sessionId || !isVisible) return false;
+    const ws = wsRef?.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({
+      type: 'chat-session-health',
+      projectId,
+      chatSessionId: sessionId,
+      reason,
+      recover,
+      client: {
+        busy: agentBusyRef.current,
+        streamingMessageId: streamingMessageIdRef.current,
+      },
+    }));
+    return true;
+  }, [projectId, sessionId, isVisible, wsRef, wsConnectionVersion]);
+
+  useEffect(() => {
+    if (!isVisible) return undefined;
+    requestSessionHealth('visible', true);
+
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      requestSessionHealth('interval', false);
+    }, VISIBLE_SESSION_HEALTH_INTERVAL_MS);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') requestSessionHealth('tab-visible', true);
+    };
+    const handleFocus = () => requestSessionHealth('focus', true);
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [isVisible, requestSessionHealth, projectSwitchKey, wsConnectionVersion]);
 
   // Handle WebSocket messages for THIS session
   useEffect(() => {
@@ -800,7 +947,7 @@ function ChatSessionContent({
               setLiveProgressEntries([]);
               setLiveChangedFiles([]);
             }
-            setMessages(prev => {
+            updateMessages(prev => {
               const filtered = prev.filter(m => {
                 if (m.id === msg.message.id) return false;
                 // Replace optimistic pending user message once server echoes real one
@@ -817,6 +964,13 @@ function ChatSessionContent({
               });
               return [...filtered, msg.message];
             });
+          }
+          break;
+
+        case 'chat-session-health':
+          if (msg.projectId === projectId && (msg.sessionId === sessionId || msg.chatSessionId === sessionId)) {
+            mergeServerMessages(msg.messages || [], { authoritativeBusy: msg.busy === true });
+            if (Array.isArray(msg.runs)) applyPersistedOrchestratorRuns(msg.runs);
           }
           break;
 
@@ -851,7 +1005,7 @@ function ChatSessionContent({
               setLiveChangedFiles([]);
               markMessageForTyping(msg.message);
             }
-            setMessages(prev => [
+            updateMessages(prev => [
               ...prev.filter(m => m.id !== msg.messageId && m.id !== msg.message.id),
               msg.message,
             ]);
@@ -865,7 +1019,7 @@ function ChatSessionContent({
             setStreamingMessage(null);
             streamingChunksRef.current = '';
             setAgentBusy(false);
-            setMessages(prev => {
+            updateMessages(prev => {
               const filtered = prev.filter(m => m.id !== msg.message.id);
               return [...filtered, msg.message];
             });
@@ -899,7 +1053,7 @@ function ChatSessionContent({
               appendLiveProgressEntry(msg.message);
             } else if (msg.message.id && !knownIdsRef.current.has(msg.message.id)) {
               knownIdsRef.current.add(msg.message.id);
-              setMessages(prev => [...prev, msg.message]);
+              updateMessages(prev => [...prev, msg.message]);
             }
           }
           break;
@@ -966,7 +1120,7 @@ function ChatSessionContent({
 
     wsRef.current.addEventListener('message', handleMessage);
     return () => wsRef.current?.removeEventListener('message', handleMessage);
-  }, [wsRef, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange, appendLiveProgressEntry, markMessageForTyping]);
+  }, [wsRef, wsConnectionVersion, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange, appendLiveProgressEntry, markMessageForTyping, mergeServerMessages, applyPersistedOrchestratorRuns, updateMessages]);
 
   // Detect stalled recovery after 30 seconds
   useEffect(() => {
@@ -982,18 +1136,13 @@ function ChatSessionContent({
   // Retry handler for stalled recovery
   const handleRetry = () => {
     setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
-    // Get the last user message to retry
-    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
-    if (lastUserMsg && wsRef?.current?.readyState === WebSocket.OPEN) {
+    if (wsRef?.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
-        type: 'chat-message',
+        type: 'chat-session-reconcile',
         projectId,
         sessionId,
-        content: lastUserMsg.content,
-        mode,
-        tool,
+        intent: 'recover-latest',
       }));
-      setAgentBusy(true);
     }
   };
 
@@ -1050,53 +1199,7 @@ function ChatSessionContent({
       fetch(`/api/projects/${projectId}/chat?limit=20&sessionId=${sessionId}`)
         .then(r => r.json())
         .then(data => {
-          const serverMsgs = (data.messages || []).reverse();
-          if (serverMsgs.length === 0) return;
-
-          setMessages(prev => {
-            const newMsgs = serverMsgs.filter(m => !knownIdsRef.current.has(m.id));
-            if (newMsgs.length === 0) return prev;
-
-            for (const m of newMsgs) knownIdsRef.current.add(m.id);
-
-            let result = prev.filter(m => {
-              if (!m.id.startsWith('pending-')) return true;
-              const hasReal = newMsgs.some(sm => sm.role === 'user' && sm.content === m.content);
-              return !hasReal;
-            });
-
-            const lastUserIdx = result.findLastIndex(m => m.role === 'user');
-            const lastUserTime = lastUserIdx >= 0 ? result[lastUserIdx].createdAt : '';
-
-            const newProgress = newMsgs.filter(m => m.role === 'progress');
-            const newFinal = newMsgs.filter(m => m.role === 'agent' || m.role === 'error');
-            const newOther = newMsgs.filter(m => m.role !== 'progress' && m.role !== 'agent' && m.role !== 'error');
-
-            const hasNewFinalAfterUser = newFinal.some(m => m.createdAt > lastUserTime);
-
-            if (hasNewFinalAfterUser) {
-              result = result.filter(m => m.role !== 'progress' || result.indexOf(m) <= lastUserIdx);
-              busyClearRef.current = true;
-              finalClearRef.current = true;
-              for (const finalMessage of newFinal) markMessageForTyping(finalMessage);
-            }
-
-            result.push(...newProgress, ...newFinal, ...newOther);
-            return result;
-          });
-
-          if (busyClearRef.current) {
-            busyClearRef.current = false;
-            setAgentBusy(false);
-          }
-          if (finalClearRef.current) {
-            finalClearRef.current = false;
-            setStreamingMessage(null);
-            setLiveProgressEntries([]);
-            setLiveChangedFiles([]);
-            streamingChunksRef.current = '';
-            setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
-          }
+          mergeServerMessages(data.messages || []);
         })
         .catch(() => {});
 
@@ -1106,7 +1209,7 @@ function ChatSessionContent({
     const poll = setInterval(syncMessages, 2000);
 
     return () => clearInterval(poll);
-  }, [projectId, sessionId, isVisible, markMessageForTyping]);
+  }, [projectId, sessionId, isVisible, mergeServerMessages]);
 
   const effectiveTool = session?.tool || tool || 'claude';
   const sessionModel = session?.model || '';
@@ -1131,7 +1234,7 @@ function ChatSessionContent({
       const shellContent = (content || '').trim();
       if (!shellContent) return;
 
-      setMessages(prev => [...prev, {
+      updateMessages(prev => [...prev, {
         id: 'pending-' + Date.now(),
         projectId,
         sessionId,
@@ -1149,7 +1252,7 @@ function ChatSessionContent({
           content: shellContent,
         }));
       } else {
-        setMessages(prev => [...prev, {
+        updateMessages(prev => [...prev, {
           id: 'err-' + Date.now(),
           projectId,
           role: 'error',
@@ -1172,7 +1275,7 @@ function ChatSessionContent({
         : 'User shared recent terminal output. Analyze and continue.';
 
       // Show optimistic message
-      setMessages(prev => [...prev, {
+      updateMessages(prev => [...prev, {
         id: 'pending-' + Date.now(),
         projectId,
         sessionId,
@@ -1212,7 +1315,7 @@ function ChatSessionContent({
       metadata: { mode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null, activeRolePromptIds: selectedRolePromptIds },
       createdAt: new Date().toISOString(),
     };
-    setMessages(prev => [...prev, optimistic]);
+    updateMessages(prev => [...prev, optimistic]);
     setAgentBusy(true);
 
     if (wsRef?.current?.readyState === WebSocket.OPEN) {
@@ -1238,7 +1341,7 @@ function ChatSessionContent({
       }));
     } else {
       setAgentBusy(false);
-      setMessages(prev => [...prev, {
+      updateMessages(prev => [...prev, {
         id: 'err-' + Date.now(),
         projectId,
         role: 'error',
@@ -1246,7 +1349,7 @@ function ChatSessionContent({
         createdAt: new Date().toISOString(),
       }]);
     }
-  }, [projectId, sessionId, mode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions]);
+  }, [projectId, sessionId, mode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions, updateMessages]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -1286,24 +1389,15 @@ function ChatSessionContent({
     const idx = all.findIndex(m => m.id === targetMessage.id);
     if (idx < 0) return;
 
-    // Retry using the user prompt that led to this response
-    const priorUser = [...all.slice(0, idx)].reverse().find(m => m.role === 'user');
-    let retryContent = (priorUser?.content || targetMessage.content || '').trim();
-    if (!retryContent) return;
-
     setLiveProgressEntries([]);
     setLiveChangedFiles([]);
 
-    if (options.executeReviewedPlan && targetMessage?.metadata?.review?.docPath) {
-      retryContent += `\n\nApproved. Execute the plan from ${targetMessage.metadata.review.docPath}. Start implementation now.`;
-    }
-
     if (wsRef?.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
-        type: 'chat-retry',
+        type: 'chat-session-reconcile',
         projectId,
         sessionId,
-        content: retryContent,
+        intent: options.executeReviewedPlan ? 'execute-reviewed-plan' : 'retry-target',
         mode,
         tool: effectiveTool,
         model: sessionModel || null,
@@ -1314,7 +1408,6 @@ function ChatSessionContent({
         review: targetMessage?.metadata?.review || null,
         executeReviewedPlan: !!options.executeReviewedPlan,
       }));
-      setAgentBusy(true);
     }
   }, [messages, projectId, sessionId, wsRef, mode, effectiveTool, sessionModel, sessionEffort, selectedRolePromptIds, rolePromptInstructions]);
 
@@ -1562,7 +1655,7 @@ function ChatSessionContent({
  * Main ChatPanel - manages sessions/tabs and renders all open sessions.
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
-export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], onProjectUpdated }) {
+export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], onProjectUpdated }) {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -2397,6 +2490,7 @@ export default function ChatPanel({ projectId, wsRef, mode = 'agent', tool = 'cl
                   projectId={projectId}
                   sessionId={tabId}
                   wsRef={wsRef}
+                  wsConnectionVersion={wsConnectionVersion}
                   mode={mode}
                   tool={tool}
                   session={tabSession}

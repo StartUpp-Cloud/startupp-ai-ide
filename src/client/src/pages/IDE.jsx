@@ -118,7 +118,7 @@ export default function IDE() {
   const [isResizing, setIsResizing] = useState(null);
 
   // Chat WebSocket connection with robust reconnection
-  const { wsRef: chatWsRef, status: wsStatus, isConnected: wsConnected, forceReconnect } = useWebSocket('/ws/terminal', {
+  const { wsRef: chatWsRef, status: wsStatus, isConnected: wsConnected, connectionVersion: wsConnectionVersion, forceReconnect } = useWebSocket('/ws/terminal', {
     reconnectOnVisible: true,  // Reconnect when tab becomes visible
     checkOnFocus: true,        // Check connection when window gains focus
     heartbeatInterval: 25000,  // Ping every 25 seconds
@@ -577,6 +577,7 @@ export default function IDE() {
                   <ChatPanel
                     projectId={projectId}
                     wsRef={chatWsRef}
+                    wsConnectionVersion={wsConnectionVersion}
                     mode={agentMode}
                     tool={selectedTool}
                     isActive={projectId === selectedProjectId}

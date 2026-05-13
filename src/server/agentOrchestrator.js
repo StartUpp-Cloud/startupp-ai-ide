@@ -299,8 +299,8 @@ class AgentOrchestrator extends EventEmitter {
     return reconciled;
   }
 
-  getRecentSessionRuns(projectId, sessionId, limit = 5) {
-    this.reconcileSessionRuns(projectId, sessionId);
+  getRecentSessionRuns(projectId, sessionId, limit = 5, { reconcile = true } = {}) {
+    if (reconcile) this.reconcileSessionRuns(projectId, sessionId);
     return sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs WHERE project_id = ? AND session_id = ? ORDER BY started_at DESC LIMIT ?`)
       .all(projectId, sessionId, limit)
       .map(rowToRun);

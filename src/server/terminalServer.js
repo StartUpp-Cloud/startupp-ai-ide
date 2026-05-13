@@ -21,6 +21,7 @@ import {
   RELIABILITY_SWEEP_INTERVAL_MS,
   STREAM_AUTO_RETRY_MAX_AGE_MS,
   STREAM_RECOVERY_STALE_MS,
+  VISIBLE_STREAM_RECOVERY_STALE_MS,
 } from './sessionRecovery.js';
 
 const ROLE_PROMPT_IDS = new Set([
@@ -601,75 +602,21 @@ class TerminalServer {
         const { chatSessionId, projectId } = payload;
         console.log(`[terminalServer] ▶ attach-chat-session received: project=${projectId}, session=${chatSessionId}`);
         if (chatSessionId) {
-          this.attachToChatSession(ws, chatSessionId);
-          this.send(ws, { type: 'chat-session-attached', chatSessionId, projectId });
-
-          // Check for incomplete streaming messages and send recovery info
-          const { chatStore } = await import('./chatStore.js');
-          const { jobManager } = await import('./jobManager.js');
-          const { agentOrchestrator } = await import('./agentOrchestrator.js');
-
-          const incomplete = chatStore.getIncompleteStreamingMessages(projectId, chatSessionId);
-          const resumableJobs = jobManager.getResumableJobs(projectId, chatSessionId, 60);
-          agentOrchestrator.reconcileSessionRuns(projectId, chatSessionId, (data) => this.send(ws, data));
-          const recentRuns = agentOrchestrator.getRecentSessionRuns(projectId, chatSessionId, 5);
-
-          if (recentRuns.length > 0) {
-            for (const run of recentRuns) {
-              this.send(ws, {
-                type: 'orchestrator-run',
-                projectId,
-                sessionId: chatSessionId,
-                run: { ...run, tasks: agentOrchestrator.getTasks(run.id) },
-              });
-            }
-          }
-
-          const recoveredMessages = incomplete.length > 0
-            ? await this._recoverIncompleteStreamingMessages({ projectId, chatSessionId, incomplete, chatStore, jobManager })
-            : [];
-
-          // Handle resumable jobs (server restarted while Claude was working)
-          if (resumableJobs.length > 0) {
-            const mostRecent = resumableJobs[0];
-            console.log(`[terminalServer] Found resumable job ${mostRecent.id} with CLI session ${mostRecent.cliSessionId}`);
-
-            // Notify client that we're attempting recovery
-            this.send(ws, {
-              type: 'chat-recovery-starting',
-              chatSessionId,
-              projectId,
-              jobId: mostRecent.id,
-              message: 'Attempting to recover interrupted conversation...',
-            });
-
-            // Auto-resume the conversation
-            this._autoResumeJob(ws, projectId, chatSessionId, mostRecent);
-          }
-
-          // Retry recovered no-output streams without asking the user to intervene.
-          const pendingRecovered = recoveredMessages.find(message => message?.metadata?.recoveryPending)
-            || this._findPendingRecoveredMessage(projectId, chatSessionId, chatStore);
-          if (pendingRecovered && resumableJobs.length === 0) {
-            this._autoRetryRecoveredSession(ws, projectId, chatSessionId, pendingRecovered).catch(err => {
-              console.warn('[terminalServer] Auto-retry recovered session failed:', err.message);
-            });
-          } else if (incomplete.length === 0 && resumableJobs.length === 0) {
-            // Check if last message looks incomplete (e.g., "Waiting on agent...")
-            // This handles cases where job completed but Claude was waiting for background agents.
-            const lastIncomplete = await this._checkForIncompleteResponse(projectId, chatSessionId, chatStore);
-            if (lastIncomplete) {
-              console.log(`[terminalServer] Last message looks incomplete, auto-resuming: "${lastIncomplete.snippet}"`);
-              this.send(ws, {
-                type: 'chat-recovery-starting',
-                chatSessionId,
-                projectId,
-                message: 'Checking on previous work...',
-              });
-              this._autoResumeIncomplete(ws, projectId, chatSessionId, lastIncomplete.cliSessionId);
-            }
-          }
+          await this._inspectChatSession(ws, { projectId, chatSessionId, acknowledgeAttach: true, reason: 'attach' });
         }
+        break;
+      }
+
+      case 'chat-session-health': {
+        const { chatSessionId, projectId, reason, recover } = payload;
+        if (chatSessionId && projectId) {
+          await this._inspectChatSession(ws, { projectId, chatSessionId, acknowledgeAttach: false, reason: reason || 'health', recover: recover === true });
+        }
+        break;
+      }
+
+      case 'chat-session-reconcile': {
+        await this._reconcileChatSession(ws, payload);
         break;
       }
 
@@ -2071,6 +2018,350 @@ class TerminalServer {
     this.send(ws, { type: 'kill-switch-activated', executionId });
   }
 
+  async _inspectChatSession(ws, { projectId, chatSessionId, acknowledgeAttach = false, reason = 'health', recover = true }) {
+    if (!projectId || !chatSessionId) return;
+
+    this.attachToChatSession(ws, chatSessionId);
+    if (acknowledgeAttach) this.send(ws, { type: 'chat-session-attached', chatSessionId, projectId });
+
+    const { chatStore } = await import('./chatStore.js');
+    const { jobManager } = await import('./jobManager.js');
+    const { agentGateway } = await import('./agentGateway.js');
+    const { agentOrchestrator } = await import('./agentOrchestrator.js');
+
+    if (recover) {
+      agentOrchestrator.recoverStaleActiveRuns({
+        staleMs: ACTIVE_RUN_STALE_MS,
+        broadcastFn: (data) => this.broadcastChatData(data),
+      });
+    }
+
+    const incomplete = chatStore.getIncompleteStreamingMessages(projectId, chatSessionId);
+    const visibleStaleIncomplete = incomplete.map(item => {
+      if (item.stale) return item;
+      const lastChunkAt = item.lastChunkAt || (item.chunks?.length > 0 ? item.chunks[item.chunks.length - 1].timestamp : null);
+      const streamStartedAt = item.streamStartedAt || item.message?.metadata?.streamStartedAt || item.message?.createdAt;
+      const lastActivityAt = lastChunkAt || streamStartedAt;
+      const stale = lastActivityAt
+        ? Date.now() - new Date(lastActivityAt).getTime() > VISIBLE_STREAM_RECOVERY_STALE_MS
+        : false;
+      return { ...item, stale };
+    });
+
+    const resumableJobs = recover ? jobManager.getResumableJobs(projectId, chatSessionId, 60) : [];
+    if (recover) agentOrchestrator.reconcileSessionRuns(projectId, chatSessionId, (data) => this.send(ws, data));
+    const recentRuns = agentOrchestrator.getRecentSessionRuns(projectId, chatSessionId, 5, { reconcile: false });
+    const runsWithTasks = recentRuns.map(run => ({ ...run, tasks: agentOrchestrator.getTasks(run.id) }));
+
+    for (const run of runsWithTasks) {
+      this.send(ws, {
+        type: 'orchestrator-run',
+        projectId,
+        sessionId: chatSessionId,
+        run,
+      });
+    }
+
+    const recoveredMessages = recover && visibleStaleIncomplete.length > 0
+      ? await this._recoverIncompleteStreamingMessages({ projectId, chatSessionId, incomplete: visibleStaleIncomplete, chatStore, jobManager })
+      : [];
+
+    if (recover && resumableJobs.length > 0) {
+      const mostRecent = resumableJobs[0];
+      console.log(`[terminalServer] Found resumable job ${mostRecent.id} with CLI session ${mostRecent.cliSessionId}`);
+      this.send(ws, {
+        type: 'chat-recovery-starting',
+        chatSessionId,
+        projectId,
+        jobId: mostRecent.id,
+        message: 'Attempting to recover interrupted conversation...',
+      });
+      this._autoResumeJob(ws, projectId, chatSessionId, mostRecent);
+    }
+
+    const pendingRecovered = recover
+      ? (recoveredMessages.find(message => message?.metadata?.recoveryPending)
+        || this._findPendingRecoveredMessage(projectId, chatSessionId, chatStore))
+      : null;
+    if (recover && pendingRecovered && resumableJobs.length === 0) {
+      this._autoRetryRecoveredSession(ws, projectId, chatSessionId, pendingRecovered).catch(err => {
+        console.warn('[terminalServer] Auto-retry recovered session failed:', err.message);
+      });
+    } else if (recover && visibleStaleIncomplete.length === 0 && resumableJobs.length === 0) {
+      const lastIncomplete = await this._checkForIncompleteResponse(projectId, chatSessionId, chatStore);
+      if (lastIncomplete) {
+        const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
+        const lastRecoveryAt = sessionMeta?.lastIncompleteRecoveryAt
+          ? new Date(sessionMeta.lastIncompleteRecoveryAt).getTime()
+          : 0;
+        const recentlyChecked = sessionMeta?.lastIncompleteRecoveryMessageId === lastIncomplete.messageId
+          && Date.now() - lastRecoveryAt < 10 * 60 * 1000;
+        if (!recentlyChecked) {
+          chatStore.updateSessionMeta(projectId, chatSessionId, {
+            lastIncompleteRecoveryMessageId: lastIncomplete.messageId,
+            lastIncompleteRecoveryAt: new Date().toISOString(),
+          });
+          console.log(`[terminalServer] Last message looks incomplete, auto-resuming: "${lastIncomplete.snippet}"`);
+          this.send(ws, {
+            type: 'chat-recovery-starting',
+            chatSessionId,
+            projectId,
+            message: 'Checking on previous work...',
+          });
+          this._autoResumeIncomplete(ws, projectId, chatSessionId, lastIncomplete.cliSessionId);
+        }
+      }
+    }
+
+    const activeJob = jobManager.getSessionJobs(projectId, chatSessionId, 5)
+      .find(job => (job.status === 'running' || job.status === 'pending') && jobManager.isJobActive(job.id));
+    const hasOpenStream = visibleStaleIncomplete.some(item => !item.stale);
+    const busy = agentGateway.isRunning(chatSessionId)
+      || agentOrchestrator.hasActiveSession(projectId, chatSessionId)
+      || Boolean(activeJob)
+      || hasOpenStream
+      || resumableJobs.length > 0
+      || Boolean(pendingRecovered);
+
+    const messages = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 30 });
+    this.send(ws, {
+      type: 'chat-session-health',
+      projectId,
+      chatSessionId,
+      sessionId: chatSessionId,
+      reason,
+      busy,
+      activeJobId: activeJob?.id || null,
+      messages,
+      runs: runsWithTasks,
+      checkedAt: new Date().toISOString(),
+    });
+    if (busy) this.send(ws, { type: 'agent-status', projectId, sessionId: chatSessionId, busy: true });
+  }
+
+  async _reconcileChatSession(ws, payload = {}) {
+    const projectId = payload.projectId;
+    const chatSessionId = payload.sessionId || payload.chatSessionId;
+    if (!projectId || !chatSessionId) {
+      this.sendError(ws, 'projectId and sessionId are required');
+      return;
+    }
+
+    const { chatStore } = await import('./chatStore.js');
+    const { jobManager } = await import('./jobManager.js');
+    const { agentGateway } = await import('./agentGateway.js');
+    const { agentOrchestrator } = await import('./agentOrchestrator.js');
+
+    chatStore.migrateIfNeeded(projectId);
+    this.attachToChatSession(ws, chatSessionId);
+
+    // The backend owns recovery decisions. First reconcile persisted work and
+    // stream state, then decide whether any retry is still necessary.
+    await this._inspectChatSession(ws, {
+      projectId,
+      chatSessionId,
+      acknowledgeAttach: false,
+      reason: payload.intent || 'reconcile',
+      recover: false,
+    });
+
+    const activeJob = jobManager.getSessionJobs(projectId, chatSessionId, 5)
+      .find(job => (job.status === 'running' || job.status === 'pending') && jobManager.isJobActive(job.id));
+    if (agentGateway.isRunning(chatSessionId) || agentOrchestrator.hasActiveSession(projectId, chatSessionId) || activeJob) {
+      this.send(ws, { type: 'chat-reconcile-result', projectId, sessionId: chatSessionId, action: 'already-running' });
+      return;
+    }
+
+    const incomplete = chatStore.getIncompleteStreamingMessages(projectId, chatSessionId).map(item => {
+      if (item.stale) return item;
+      const lastChunkAt = item.lastChunkAt || (item.chunks?.length > 0 ? item.chunks[item.chunks.length - 1].timestamp : null);
+      const streamStartedAt = item.streamStartedAt || item.message?.metadata?.streamStartedAt || item.message?.createdAt;
+      const lastActivityAt = lastChunkAt || streamStartedAt;
+      const stale = lastActivityAt
+        ? Date.now() - new Date(lastActivityAt).getTime() > VISIBLE_STREAM_RECOVERY_STALE_MS
+        : false;
+      return { ...item, stale };
+    });
+    const recoveredMessages = incomplete.length > 0
+      ? await this._recoverIncompleteStreamingMessages({ projectId, chatSessionId, incomplete, chatStore, jobManager })
+      : [];
+    const recoveredIds = new Set(recoveredMessages.map(message => message?.id).filter(Boolean));
+    const hasOpenStream = incomplete.some(item => !item.stale && !recoveredIds.has(item.message?.id));
+    if (hasOpenStream) {
+      this.send(ws, { type: 'chat-reconcile-result', projectId, sessionId: chatSessionId, action: 'already-running' });
+      await this._inspectChatSession(ws, { projectId, chatSessionId, acknowledgeAttach: false, reason: 'stream-active', recover: false });
+      return;
+    }
+    const recoveredPending = recoveredMessages.find(message => message?.metadata?.recoveryPending);
+    if (recoveredPending) {
+      await this._autoRetryRecoveredSession(ws, projectId, chatSessionId, recoveredPending);
+      return;
+    }
+
+    const messages = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 120 });
+    const sorted = [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const target = payload.targetMessageId
+      ? sorted.find(message => message.id === payload.targetMessageId)
+      : null;
+    const targetIndex = target ? sorted.findIndex(message => message.id === target.id) : sorted.length;
+    const laterFinal = target
+      ? sorted.slice(targetIndex + 1).find(message => this._isCompleteAgentMessage(message))
+      : null;
+
+    if (!target) {
+      const latestUserIndex = sorted.findLastIndex(message => message.role === 'user');
+      const visibleResponse = latestUserIndex >= 0
+        ? sorted.slice(latestUserIndex + 1).find(message => this._isUserVisibleTerminalMessage(message))
+        : null;
+      if (visibleResponse) {
+        this.send(ws, {
+          type: 'chat-reconcile-result',
+          projectId,
+          sessionId: chatSessionId,
+          action: 'already-complete',
+          messageId: visibleResponse.id,
+        });
+        await this._inspectChatSession(ws, { projectId, chatSessionId, acknowledgeAttach: false, reason: 'already-complete', recover: false });
+        return;
+      }
+    }
+
+    if (laterFinal) {
+      this.send(ws, {
+        type: 'chat-reconcile-result',
+        projectId,
+        sessionId: chatSessionId,
+        action: 'already-complete',
+        messageId: laterFinal.id,
+      });
+      await this._inspectChatSession(ws, { projectId, chatSessionId, acknowledgeAttach: false, reason: 'already-complete', recover: false });
+      return;
+    }
+
+    const retryTarget = target || [...sorted].reverse().find(message => (
+      message.role === 'error' || message.metadata?.recoveryPending || message.metadata?.interrupted
+    ));
+    const retryIndex = retryTarget ? sorted.findIndex(message => message.id === retryTarget.id) : sorted.length;
+    const priorUser = [...sorted.slice(0, Math.max(0, retryIndex))].reverse().find(message => message.role === 'user')
+      || [...sorted].reverse().find(message => message.role === 'user');
+
+    if (!priorUser?.content) {
+      this.send(ws, { type: 'chat-reconcile-result', projectId, sessionId: chatSessionId, action: 'no-user-message' });
+      return;
+    }
+
+    const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId) || {};
+    const actionKey = `${payload.intent || 'reconcile'}:${retryTarget?.id || target?.id || 'latest'}:${priorUser.id}`;
+    const lastActionAt = sessionMeta.lastReconcileActionAt ? new Date(sessionMeta.lastReconcileActionAt).getTime() : 0;
+    if (sessionMeta.lastReconcileActionKey === actionKey && Date.now() - lastActionAt < 60_000) {
+      this.send(ws, { type: 'chat-reconcile-result', projectId, sessionId: chatSessionId, action: 'duplicate-suppressed' });
+      await this._inspectChatSession(ws, { projectId, chatSessionId, acknowledgeAttach: false, reason: 'duplicate-suppressed', recover: false });
+      return;
+    }
+
+    if (retryTarget?.metadata?.recoveryPending || retryTarget?.metadata?.interrupted) {
+      await this._autoRetryRecoveredSession(ws, projectId, chatSessionId, retryTarget);
+      return;
+    }
+
+    let retryContent = priorUser.content.trim();
+    if (payload.executeReviewedPlan && payload.review?.docPath) {
+      retryContent += `\n\nApproved. Execute the plan from ${payload.review.docPath}. Start implementation now.`;
+    }
+
+    chatStore.updateSessionMeta(projectId, chatSessionId, {
+      lastReconcileActionKey: actionKey,
+      lastReconcileActionAt: new Date().toISOString(),
+    });
+
+    await this._startReconciledRetry(ws, {
+      projectId,
+      chatSessionId,
+      content: retryContent,
+      payload,
+      priorUserId: priorUser.id,
+      targetMessageId: retryTarget?.id || target?.id || null,
+    });
+  }
+
+  _isCompleteAgentMessage(message) {
+    if (!message || message.role !== 'agent') return false;
+    if (message.metadata?.streaming || message.metadata?.recoveryPending || message.metadata?.interrupted || message.metadata?.error) return false;
+    const content = String(message.content || '').trim();
+    if (!content) return false;
+    return !/interrupted before it could send a final response|previous .* stopped before it produced a final response/i.test(content);
+  }
+
+  _isUserVisibleTerminalMessage(message) {
+    if (!message) return false;
+    if (message.role === 'error') return true;
+    return this._isCompleteAgentMessage(message);
+  }
+
+  async _startReconciledRetry(ws, { projectId, chatSessionId, content, payload, priorUserId, targetMessageId }) {
+    const { chatStore } = await import('./chatStore.js');
+    const { agentGateway } = await import('./agentGateway.js');
+    const { agentOrchestrator } = await import('./agentOrchestrator.js');
+
+    const sessionMeta = chatStore.getSession(projectId, chatSessionId);
+    const assistantSettings = mergeSessionAssistantSettings(sessionMeta || {}, payload, {
+      tool: payload.tool || sessionMeta?.tool || 'claude',
+      model: payload.model ?? sessionMeta?.model,
+      effort: payload.effort ?? sessionMeta?.effort,
+    });
+    const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
+    const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
+    chatStore.updateSessionMeta(projectId, chatSessionId, { ...assistantSettings, activeRolePromptIds });
+
+    const marker = chatStore.addMessage({
+      projectId,
+      sessionId: chatSessionId,
+      role: 'system',
+      content: payload.executeReviewedPlan
+        ? '✅ Plan approved. Executing with latest backend state...'
+        : '🔁 Backend reconciled missing response. Retrying from the last user request...',
+      metadata: { reconcile: true, retry: true, priorUserId, targetMessageId, executeReviewedPlan: !!payload.executeReviewedPlan },
+    });
+    this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: marker });
+    this.broadcast({ type: 'chat-message', message: marker });
+
+    const sharedBroadcast = (data) => {
+      this.broadcastToChatSession(chatSessionId, data);
+      this.broadcast(data);
+    };
+    const mode = payload.mode || 'agent';
+    const agentContent = appendRolePromptInstructions(content, rolePromptInstructions);
+    const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({
+      mode,
+      content,
+      executeReviewedPlan: !!payload.executeReviewedPlan,
+    });
+    const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
+
+    runner({
+      projectId,
+      sessionId: chatSessionId,
+      content: agentContent,
+      attachments: [],
+      mode,
+      tool: assistantSettings.tool,
+      model: assistantSettings.model,
+      effort: assistantSettings.effort,
+      executeReviewedPlan: !!payload.executeReviewedPlan,
+      broadcastFn: sharedBroadcast,
+    }).catch(err => {
+      const errMsg = chatStore.addMessage({
+        projectId,
+        sessionId: chatSessionId,
+        role: 'error',
+        content: `Retry failed: ${err.message}`,
+        metadata: { reconcile: true, targetMessageId },
+      });
+      this.broadcastToChatSession(chatSessionId, { type: 'chat-message', message: errMsg });
+      this.broadcast({ type: 'chat-message', message: errMsg });
+    });
+  }
+
   /**
    * Check if the last assistant message looks incomplete (waiting on agents, etc.)
    * Returns { snippet, cliSessionId } if incomplete, null otherwise.
@@ -2264,7 +2555,7 @@ class TerminalServer {
     if (agentGateway.isRunning(chatSessionId) || agentOrchestrator.hasActiveSession(projectId, chatSessionId)) return;
 
     const activeJob = jobManager.getSessionJobs(projectId, chatSessionId, 5)
-      .find(job => job.status === 'running' || job.status === 'pending');
+      .find(job => (job.status === 'running' || job.status === 'pending') && jobManager.isJobActive(job.id));
     if (activeJob) return;
 
     const sessionMeta = chatStore.getSessionMeta(projectId, chatSessionId);
@@ -2273,9 +2564,20 @@ class TerminalServer {
     const messages = chatStore.getMessages(projectId, { sessionId: chatSessionId, limit: 50 });
     const lastUser = messages.find(message => message.role === 'user');
     if (!lastUser?.content) return;
+    if (sessionMeta?.lastAutoRecoveryUserMessageId === lastUser.id) return;
+
+    if (ws) {
+      this.send(ws, {
+        type: 'chat-recovery-starting',
+        chatSessionId,
+        projectId,
+        message: 'Retrying interrupted work automatically...',
+      });
+    }
 
     chatStore.updateSessionMeta(projectId, chatSessionId, {
       lastAutoRecoveryMessageId: recoveryMessage?.id || null,
+      lastAutoRecoveryUserMessageId: lastUser.id,
       lastAutoRecoveryAt: new Date().toISOString(),
     });
 
