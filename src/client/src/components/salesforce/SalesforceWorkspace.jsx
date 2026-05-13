@@ -1,8 +1,70 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Cloud, Database, GitPullRequestArrow, RefreshCw, Search, ShieldAlert, Sparkles, TerminalSquare } from 'lucide-react';
+import { AlertCircle, Cloud, Database, GitPullRequestArrow, RefreshCw, Search, ShieldAlert, Sparkles, TerminalSquare } from 'lucide-react';
 
-function envelopeError(data, fallback) {
-  return data?.error?.message || data?.error || fallback;
+function parseApiError(data, fallback, context = {}) {
+  const source = data?.error && typeof data.error === 'object' ? data.error : null;
+  return {
+    code: source?.code || null,
+    message: source?.message || (typeof data?.error === 'string' ? data.error : fallback),
+    details: source?.details || null,
+    ...context,
+  };
+}
+
+function friendlyError(error) {
+  if (!error) return null;
+  const operation = error.details?.operation || error.operation;
+  const base = error.message || 'Salesforce action failed';
+
+  if (error.code === 'COMMAND_FAILED' && operation === 'object.list') {
+    return {
+      title: 'Could not load Salesforce objects',
+      message: 'The Salesforce CLI could not list objects for the selected org from the project container.',
+      tips: [
+        'Refresh Status to confirm the container, Salesforce CLI, and org auth are still ready.',
+        'Check that the selected org is not expired, then reconnect it from the Status tab if needed.',
+        'If this is a large org or restricted profile, try a guided Schema Summary so the assistant can adjust read-only CLI checks.',
+      ],
+    };
+  }
+
+  if (error.code === 'COMMAND_FAILED') {
+    return {
+      title: 'Salesforce CLI command failed',
+      message: operation ? `The project container could not complete ${operation}.` : base,
+      tips: ['Refresh Status to re-check CLI and org auth.', 'Confirm the selected repo and org are correct before trying again.'],
+    };
+  }
+
+  if (error.code === 'CONTAINER_NOT_RUNNING') {
+    return {
+      title: 'Project container is not running',
+      message: 'Start the project container, then refresh Salesforce Status.',
+      tips: ['Salesforce commands run inside the project container, not on the host.'],
+    };
+  }
+
+  if (error.code === 'PROJECT_CONTAINER_REQUIRED') {
+    return {
+      title: 'Container required',
+      message: 'This project needs a container before Salesforce actions can run.',
+      tips: ['Create or start the project container, then return to this panel.'],
+    };
+  }
+
+  if (error.code === 'INVALID_CONTEXT') {
+    return {
+      title: 'Workspace context is missing',
+      message: base,
+      tips: ['Select a repo so Salesforce commands use an explicit working directory.'],
+    };
+  }
+
+  return {
+    title: 'Salesforce action failed',
+    message: base,
+    tips: ['Review the selected repo and org, then try again.'],
+  };
 }
 
 const GUIDED_ACTIONS = [
@@ -58,7 +120,8 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
   const [authAlias, setAuthAlias] = useState('default-org');
   const [setupMessage, setSetupMessage] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [loadingLabel, setLoadingLabel] = useState('');
+  const [error, setError] = useState(null);
 
   const isSalesforce = project?.stack === 'salesforce';
   const repos = useMemo(() => containerRepos.filter((repo) => repo.isGitRepo), [containerRepos]);
@@ -68,8 +131,10 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
   const safeAlias = authAlias.trim() || 'default-org';
   const hostLoginCommand = `sf org login web --alias ${safeAlias} --set-default`;
   const hostTokenCommand = `sf org display --target-org ${safeAlias} --verbose --json`;
-  const selectedOrgSummary = orgs.find((org) => org.username === selectedOrg);
+  const selectedOrgSummary = orgs.find((org) => org.targetOrg === selectedOrg || org.username === selectedOrg);
   const selectedRepo = repos.find((repo) => repo.path === repoPath);
+  const selectedOrgLabel = selectedOrgSummary?.alias || selectedOrgSummary?.usernameRedacted || (selectedOrg ? 'Selected org' : 'No org selected');
+  const selectedProjectLabel = project?.name || project?.id || 'Current project';
   const filteredObjects = objects.filter((name) => name.toLowerCase().includes(filter.toLowerCase())).slice(0, 200);
   const tabs = [
     { id: 'status', label: 'Status', icon: Cloud },
@@ -77,6 +142,21 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
     { id: 'soql', label: 'SOQL', icon: TerminalSquare },
     { id: 'flows', label: 'Flows', icon: GitPullRequestArrow },
   ];
+
+  function beginLoading(label) {
+    setLoading(true);
+    setLoadingLabel(label);
+    setError(null);
+  }
+
+  function finishLoading() {
+    setLoading(false);
+    setLoadingLabel('');
+  }
+
+  function assertOk(response, data, fallback, context) {
+    if (!response.ok || !data.ok) throw parseApiError(data, fallback, context);
+  }
 
   useEffect(() => {
     if (!repoPath && repos.length === 1) setRepoPath(repos[0].path);
@@ -88,13 +168,12 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
   }, [project?.id, isSalesforce, repoPath]);
 
   useEffect(() => {
-    const defaultOrg = status?.selectedOrg?.username || orgs.find((org) => org.isDefault)?.username || orgs[0]?.username || '';
+    const defaultOrg = status?.selectedOrg?.targetOrg || orgs.find((org) => org.isDefault)?.targetOrg || orgs[0]?.targetOrg || '';
     if (!selectedOrg && defaultOrg) setSelectedOrg(defaultOrg);
   }, [status, orgs, selectedOrg]);
 
   async function markSalesforce() {
-    setLoading(true);
-    setError('');
+    beginLoading('Enabling Salesforce mode...');
     try {
       const response = await fetch('/api/salesforce/project-settings', {
         method: 'PUT',
@@ -102,18 +181,17 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         body: JSON.stringify({ projectId: project.id, stack: 'salesforce' }),
       });
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Failed to update project stack'));
+      assertOk(response, data, 'Failed to update project stack', { action: 'Enable Salesforce mode' });
       onProjectUpdated?.(data.data.project);
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   async function detectAndApply() {
-    setLoading(true);
-    setError('');
+    beginLoading('Detecting Salesforce project metadata...');
     try {
       const response = await fetch('/api/salesforce/detect', {
         method: 'POST',
@@ -121,37 +199,35 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         body: JSON.stringify({ projectId: project.id, repoPath: repoPath || undefined, persist: true }),
       });
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Salesforce detection failed'));
+      assertOk(response, data, 'Salesforce detection failed', { action: 'Detect Salesforce project' });
       await loadStatus();
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   async function loadStatus() {
     if (!project?.id) return;
-    setLoading(true);
-    setError('');
+    beginLoading('Checking Salesforce status...');
     try {
       const params = new URLSearchParams({ projectId: project.id });
       if (repoPath) params.set('repoPath', repoPath);
       const response = await fetch(`/api/salesforce/status?${params}`);
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Salesforce status failed'));
+      assertOk(response, data, 'Salesforce status failed', { action: 'Refresh Status' });
       setStatus(data.data);
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   async function installCli() {
     if (!project?.id) return;
-    setLoading(true);
-    setError('');
+    beginLoading('Installing Salesforce CLI in the container...');
     setSetupMessage('');
     try {
       const response = await fetch('/api/salesforce/cli/install', {
@@ -160,20 +236,19 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         body: JSON.stringify({ projectId: project.id, repoPath: repoPath || undefined }),
       });
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Salesforce CLI install failed'));
+      assertOk(response, data, 'Salesforce CLI install failed', { action: 'Install Salesforce CLI' });
       setSetupMessage(`Salesforce CLI ready${data.data?.version ? `: ${data.data.version}` : ''}`);
       await loadStatus();
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   async function importAuthUrl() {
     if (!repoPath || !authUrl.trim()) return;
-    setLoading(true);
-    setError('');
+    beginLoading('Importing org auth into the container...');
     setSetupMessage('');
     try {
       const response = await fetch('/api/salesforce/auth/import', {
@@ -182,57 +257,54 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         body: JSON.stringify({ projectId: project.id, repoPath, authUrl, alias: safeAlias, setDefault: true }),
       });
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Salesforce auth import failed'));
+      assertOk(response, data, 'Salesforce auth import failed', { action: 'Import Salesforce auth' });
       setAuthUrl('');
       setSetupMessage('Salesforce org imported into the project container. Actions can now use the CLI safely.');
       await loadStatus();
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   async function loadObjects() {
     if (!repoPath || !selectedOrg) return;
-    setLoading(true);
-    setError('');
+    beginLoading('Loading Salesforce objects...');
     try {
       const params = new URLSearchParams({ projectId: project.id, repoPath, targetOrg: selectedOrg });
       const response = await fetch(`/api/salesforce/objects?${params}`);
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Object list failed'));
+      assertOk(response, data, 'Object list failed', { action: 'Load Objects', operation: 'object.list' });
       setObjects(data.data.objects || []);
       setDescribe(null);
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   async function loadDescribe(objectName) {
     if (!repoPath || !selectedOrg || !objectName) return;
     setSelectedObject(objectName);
-    setLoading(true);
-    setError('');
+    beginLoading(`Loading ${objectName} fields...`);
     try {
       const params = new URLSearchParams({ projectId: project.id, repoPath, targetOrg: selectedOrg });
       const response = await fetch(`/api/salesforce/objects/${encodeURIComponent(objectName)}?${params}`);
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Object describe failed'));
+      assertOk(response, data, 'Object describe failed', { action: 'Describe Object', operation: 'object.describe' });
       setDescribe(data.data.describe);
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   async function runSoql() {
     if (!repoPath || !selectedOrg || !soql.trim()) return;
-    setLoading(true);
-    setError('');
+    beginLoading('Running read-only SOQL query...');
     try {
       const response = await fetch('/api/salesforce/soql/query', {
         method: 'POST',
@@ -240,38 +312,37 @@ export default function SalesforceWorkspace({ project, containerRepos = [], onPr
         body: JSON.stringify({ projectId: project.id, repoPath, targetOrg: selectedOrg, query: soql }),
       });
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'SOQL query failed'));
+      assertOk(response, data, 'SOQL query failed', { action: 'Run SOQL', operation: 'soql.query' });
       setSoql(data.data.query);
       setQueryResult(data.data);
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   async function searchFlows() {
     if (!repoPath) return;
-    setLoading(true);
-    setError('');
+    beginLoading('Searching local Salesforce flows...');
     try {
       const params = new URLSearchParams({ projectId: project.id, repoPath });
       if (flowQuery.trim()) params.set('q', flowQuery.trim());
       const response = await fetch(`/api/salesforce/flows/search?${params}`);
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(envelopeError(data, 'Flow search failed'));
+      assertOk(response, data, 'Flow search failed', { action: 'Search Flows' });
       setFlowResults(data.data.results || []);
     } catch (err) {
-      setError(err.message);
+      setError(err);
     } finally {
-      setLoading(false);
+      finishLoading();
     }
   }
 
   function runGuidedAction(action) {
     if (!action || !repoPath || !selectedOrg || !onRunGuidedAction) return;
     const targetOrgLabel = selectedOrgSummary?.alias || selectedOrgSummary?.usernameRedacted || selectedOrg;
-    const targetOrgValue = selectedOrgSummary?.alias || selectedOrg;
+    const targetOrgValue = selectedOrgSummary?.targetOrg || selectedOrg;
     const prompt = `Salesforce guided action: ${action.title}
 
 IDE-selected workspace context:
@@ -320,7 +391,8 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
           <button onClick={markSalesforce} disabled={loading} className="btn-primary text-xs py-1.5 px-2">Enable</button>
           <button onClick={detectAndApply} disabled={loading} className="btn-secondary text-xs py-1.5 px-2">Detect</button>
         </div>
-        {error && <p className="text-danger-400">{error}</p>}
+        {loading && <LoadingState label={loadingLabel || 'Working...'} />}
+        {error && <SalesforceError error={error} projectName={selectedProjectLabel} repoPath={repoPath} orgLabel={selectedOrgLabel} />}
       </div>
     );
   }
@@ -341,6 +413,8 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
         <option value="">Select repo...</option>
         {repos.map((repo) => <option key={repo.path} value={repo.path}>{repo.name}</option>)}
       </select>
+
+      {loading && <LoadingState label={loadingLabel || 'Working...'} />}
 
       {selectedOrgSummary?.orgType && ['production', 'unknown'].includes(selectedOrgSummary.orgType) && (
         <div className="flex items-start gap-2 p-2 rounded border border-yellow-500/30 bg-yellow-500/10 text-yellow-300">
@@ -413,9 +487,12 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
               <p className="text-green-300">Salesforce CLI and org auth are ready. Pick a safe read-only action and the assistant will run the needed CLI checks through the existing orchestrator flow.</p>
             </SetupCard>
           )}
-          {setupMessage && <p className="text-green-300">{setupMessage}</p>}
+          {setupMessage && <p className="rounded border border-green-500/30 bg-green-500/10 p-2 text-green-300">{setupMessage}</p>}
           {status?.warnings?.map((warning) => <p key={warning} className="text-yellow-300">{warning}</p>)}
           {!repoPath && <p className="text-surface-500">Select a repo to keep Salesforce workspace context explicit.</p>}
+          {!status && !loading && (
+            <EmptyState title="Status has not loaded yet" message="Refresh Status to check the container, Salesforce CLI, and connected orgs." />
+          )}
         </section>
       )}
 
@@ -427,7 +504,7 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
           </div>
           <select value={selectedOrg} onChange={(e) => setSelectedOrg(e.target.value)} className="select text-xs" disabled={orgs.length === 0}>
             <option value="">Select org...</option>
-            {orgs.map((org) => <option key={org.username} value={org.username}>{org.alias || org.usernameRedacted} {org.isDefault ? '(default)' : ''}</option>)}
+            {orgs.map((org) => <option key={org.targetOrg} value={org.targetOrg}>{org.alias || org.usernameRedacted} {org.isDefault ? '(default)' : ''}</option>)}
           </select>
           <div className="space-y-2">
             {GUIDED_ACTIONS.map((action) => (
@@ -454,11 +531,14 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
         </div>
         <select value={selectedOrg} onChange={(e) => setSelectedOrg(e.target.value)} className="select text-xs" disabled={orgs.length === 0}>
           <option value="">Select org...</option>
-          {orgs.map((org) => <option key={org.username} value={org.username}>{org.alias || org.usernameRedacted} {org.isDefault ? '(default)' : ''}</option>)}
+          {orgs.map((org) => <option key={org.targetOrg} value={org.targetOrg}>{org.alias || org.usernameRedacted} {org.isDefault ? '(default)' : ''}</option>)}
         </select>
         <button onClick={loadObjects} disabled={!repoPath || !selectedOrg || loading} className="btn-secondary text-xs py-1.5 px-2 w-full">
-          Load Objects
+          {loading && loadingLabel.includes('objects') ? 'Loading Objects...' : 'Load Objects'}
         </button>
+        {(!repoPath || !selectedOrg) && (
+          <EmptyState title="Choose a repo and org" message="Object browsing needs explicit workspace and target org context before it can run a read-only CLI command." />
+        )}
         <div className="relative">
           <Search className="w-3 h-3 absolute left-2 top-2.5 text-surface-500" />
           <input value={filter} onChange={(e) => setFilter(e.target.value)} className="input text-xs pl-7" placeholder="Search objects" />
@@ -469,7 +549,8 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
               {name}
             </button>
           ))}
-          {objects.length === 0 && <div className="p-2 text-surface-500">No objects loaded.</div>}
+          {objects.length === 0 && !loading && <div className="p-2 text-surface-500">No objects loaded yet. Select an org, then Load Objects.</div>}
+          {objects.length > 0 && filteredObjects.length === 0 && <div className="p-2 text-surface-500">No objects match "{filter}".</div>}
         </div>
       </section>
       )}
@@ -500,8 +581,11 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
           placeholder="SELECT Id, Name FROM Account"
         />
         <button onClick={runSoql} disabled={!repoPath || !selectedOrg || loading} className="btn-primary text-xs py-1.5 px-2 w-full">
-          Run Read-Only Query
+          {loading && loadingLabel.includes('SOQL') ? 'Running Query...' : 'Run Read-Only Query'}
         </button>
+        {(!repoPath || !selectedOrg) && (
+          <EmptyState title="Select a repo and org first" message="SOQL queries are read-only, but they still need an explicit workspace and target org." />
+        )}
         {queryResult && (
           <div className="space-y-1">
             <div className="text-surface-500">{queryResult.totalSize} row(s)</div>
@@ -540,8 +624,9 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
           />
         </div>
         <button onClick={searchFlows} disabled={!repoPath || loading} className="btn-secondary text-xs py-1.5 px-2 w-full">
-          Search Local Flows
+          {loading && loadingLabel.includes('flows') ? 'Searching Flows...' : 'Search Local Flows'}
         </button>
+        {!repoPath && <EmptyState title="Select a repo first" message="Flow search reads local metadata from the selected project workspace." />}
         <div className="max-h-56 overflow-auto border border-surface-700 rounded">
           {flowResults.map((flow) => (
             <div key={`${flow.filePath}-${flow.fileHash}`} className="px-2 py-1.5 border-b border-surface-800 last:border-0">
@@ -555,12 +640,58 @@ Run one or more safe Salesforce CLI/read-only repo inspection commands until you
               ))}
             </div>
           ))}
-          {flowResults.length === 0 && <div className="p-2 text-surface-500">No flow results loaded.</div>}
+          {flowResults.length === 0 && !loading && <div className="p-2 text-surface-500">No flow results loaded. Search with a flow name, object, field, or leave blank to index local flows.</div>}
         </div>
       </section>
       )}
 
-      {error && <p className="text-danger-400">{error}</p>}
+      {error && <SalesforceError error={error} projectName={selectedProjectLabel} repoPath={repoPath} orgLabel={selectedOrgLabel} />}
+    </div>
+  );
+}
+
+function LoadingState({ label }) {
+  return (
+    <div className="flex items-center gap-2 rounded border border-sky-500/30 bg-sky-500/10 p-2 text-sky-200">
+      <RefreshCw className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function EmptyState({ title, message }) {
+  return (
+    <div className="rounded border border-surface-700 bg-surface-900/40 p-2 text-surface-400">
+      <div className="text-surface-200 font-medium">{title}</div>
+      <div className="mt-0.5 leading-relaxed">{message}</div>
+    </div>
+  );
+}
+
+function SalesforceError({ error, projectName, repoPath, orgLabel }) {
+  const friendly = friendlyError(error);
+  if (!friendly) return null;
+
+  return (
+    <div className="space-y-2 rounded border border-danger-500/30 bg-danger-500/10 p-2 text-danger-400">
+      <div className="flex items-start gap-2">
+        <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-danger-400" />
+        <div>
+          <div className="font-medium text-danger-400">{friendly.title}</div>
+          <div className="mt-0.5 leading-relaxed text-danger-400/90">{friendly.message}</div>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-1 rounded bg-surface-950/50 p-2 text-[11px] text-surface-400">
+        <div><span className="text-surface-500">Project:</span> {projectName}</div>
+        <div><span className="text-surface-500">Repo:</span> {repoPath || 'None selected'}</div>
+        <div><span className="text-surface-500">Org:</span> {orgLabel}</div>
+        {error.code && <div><span className="text-surface-500">Code:</span> {error.code}</div>}
+      </div>
+      {friendly.tips?.length > 0 && (
+        <div className="space-y-1 text-danger-400/90">
+          {friendly.tips.map((tip) => <div key={tip}>- {tip}</div>)}
+        </div>
+      )}
     </div>
   );
 }

@@ -33,7 +33,7 @@ export async function getSalesforceStatus(context) {
     cli,
     orgs,
     auth: { connected: orgs.some((org) => !org.isExpired) },
-    selectedOrg: orgs.find((org) => org.username === context.project.salesforce?.defaultOrgUsername) || orgs.find((org) => org.isDefault) || null,
+    selectedOrg: orgs.find((org) => org.username === context.project.salesforce?.defaultOrgUsername || org.targetOrg === context.project.salesforce?.defaultOrgUsername) || orgs.find((org) => org.isDefault) || null,
     packageDirectories: detection.packageDirectories || [],
     metadataRoots: detection.metadataRoots || [],
     warnings: [orgWarning].filter(Boolean),

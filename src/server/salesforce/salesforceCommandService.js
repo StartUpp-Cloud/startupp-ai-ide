@@ -14,12 +14,12 @@ const OPERATIONS = {
   'cli.version': { args: () => ['sf', '--version'], timeout: 10000, riskLevel: 'read_only' },
   'org.list': { args: () => ['sf', 'org', 'list', '--json'], timeout: 20000, riskLevel: 'org_read' },
   'object.list': ({ targetOrg }) => ({
-    args: ['sf', 'sobject', 'list', '--target-org', targetOrg, '--json'],
+    args: ['sf', 'sobject', 'list', '--sobject', 'all', '--target-org', targetOrg, '--json'],
     timeout: 30000,
     riskLevel: 'org_read',
   }),
   'object.describe': ({ targetOrg, objectName }) => ({
-    args: ['sf', 'sobject', 'describe', objectName, '--target-org', targetOrg, '--json'],
+    args: ['sf', 'sobject', 'describe', '--sobject', objectName, '--target-org', targetOrg, '--json'],
     timeout: 45000,
     riskLevel: 'org_read',
   }),
@@ -71,7 +71,11 @@ export async function runSalesforceOperation(context, operation, args = {}) {
       errorCode: 'COMMAND_FAILED',
       durationMs: Date.now() - startedAt,
     });
-    throw new SalesforceApiError('COMMAND_FAILED', `Salesforce CLI operation failed: ${operation}`, 502);
+    throw new SalesforceApiError('COMMAND_FAILED', `Salesforce CLI operation failed: ${operation}`, 502, {
+      operation,
+      cwd: context.cwd,
+      targetOrgRedacted: args.targetOrg ? redactUsername(args.targetOrg) : undefined,
+    });
   }
 
   if (Buffer.byteLength(output, 'utf8') > MAX_OUTPUT_BYTES) {
@@ -91,7 +95,8 @@ export async function runSalesforceOperation(context, operation, args = {}) {
 
   const redactedOutput = redactSalesforceText(output);
   try {
-    return { raw: redactedOutput, json: redactSalesforceObject(JSON.parse(output)), auditId: audit.id };
+    const json = JSON.parse(output);
+    return { raw: redactedOutput, json: redactSalesforceObject(json), privateJson: json, auditId: audit.id };
   } catch {
     return { raw: redactedOutput, json: null, auditId: audit.id };
   }
@@ -232,7 +237,8 @@ export async function importSalesforceAuthUrl(context, { authUrl, alias, setDefa
   });
 
   try {
-    return { raw: redactSalesforceText(output), json: redactSalesforceObject(JSON.parse(output)), auditId: audit.id };
+    const json = JSON.parse(output);
+    return { raw: redactSalesforceText(output), json: redactSalesforceObject(json), privateJson: json, auditId: audit.id };
   } catch {
     return { raw: redactSalesforceText(output), json: null, auditId: audit.id };
   }
