@@ -71,6 +71,17 @@ function toolName(tool) {
   return text;
 }
 
+function firstName(profile = null) {
+  const name = String(profile?.name || '').trim();
+  if (!name) return '';
+  return name.split(/\s+/)[0].replace(/[^a-zA-Z0-9._-]/g, '');
+}
+
+function withName(profile, message) {
+  const name = firstName(profile);
+  return name ? `${name}, ${message}` : message;
+}
+
 export function describeAgentFailure({ error = '', tool = null, model = null, retryable = null, errorType = null } = {}) {
   const raw = String(error || '');
   const detail = sanitizeAgentFailureDetail(raw);
@@ -147,11 +158,12 @@ export function buildRunFailureEventMessage({ status = 'failed', taskTitle = nul
   return `${prefix}${taskTitle ? ` at ${taskTitle}` : ''}: ${description.shortReason}`;
 }
 
-export function buildRunFailureResponse({ status = 'failed', taskTitle = null, error = '', tool = null, model = null, retryable = null, errorType = null } = {}) {
+export function buildRunFailureResponse({ status = 'failed', taskTitle = null, error = '', tool = null, model = null, retryable = null, errorType = null, profile = null } = {}) {
   const description = describeAgentFailure({ error, tool, model, retryable, errorType });
-  const heading = status === 'blocked'
+  const baseHeading = status === 'blocked'
     ? 'I paused this run before making more changes.'
     : 'I could not complete this run yet.';
+  const heading = withName(profile, baseHeading);
   const taskLine = taskTitle ? [`Current step: ${taskTitle}`, ''] : [];
   return [
     heading,
@@ -174,7 +186,7 @@ function oneLineSummary(value, maxLength = 180) {
   return text.length > maxLength ? `${text.slice(0, maxLength).trim()}...` : text;
 }
 
-export function buildThinFinalResponse({ completed = [] } = {}) {
+export function buildThinFinalResponse({ completed = [], profile = null } = {}) {
   const successful = completed.filter(item => item?.result?.success !== false);
   if (successful.length === 1) {
     const item = successful[0];
@@ -183,12 +195,12 @@ export function buildThinFinalResponse({ completed = [] } = {}) {
   }
 
   if (successful.length === 0) {
-    return 'The coding agent finished without returning a usable summary. Ask me to continue and I will inspect the current state.';
+    return withName(profile, 'the coding agent finished without returning a usable summary. Ask me to continue and I will inspect the current state.');
   }
 
   const lines = successful.map(({ task, result }) => {
     const summary = oneLineSummary(result?.content || task?.result || 'Completed.');
     return `- ${task?.title || 'Agent step'}: ${summary || 'Completed.'}`;
   });
-  return ['The coding agent completed the run.', '', ...lines].join('\n');
+  return [withName(profile, 'the coding agent completed the run.'), '', ...lines].join('\n');
 }

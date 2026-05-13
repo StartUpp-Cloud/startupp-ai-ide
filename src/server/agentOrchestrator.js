@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
+import { getDB } from './db.js';
 import { sqliteStore } from './sqliteStore.js';
 import { chatStore } from './chatStore.js';
 import { agentGateway } from './agentGateway.js';
@@ -167,11 +168,13 @@ class AgentOrchestrator extends EventEmitter {
           await this._event(run, null, 'run-cancelled', 'Autonomous run cancelled.', null, broadcastFn, 'warning');
         }
       } else {
+        const profile = this._getProfile();
         const userMessage = buildRunFailureResponse({
           status: run.status,
           error: err.message,
           tool,
           model,
+          profile,
         });
         const eventMessage = buildRunFailureEventMessage({
           status: run.status,
@@ -388,6 +391,7 @@ class AgentOrchestrator extends EventEmitter {
 
     const failed = completed.find(item => !item.result.success);
     if (failed) {
+      const profile = this._getProfile();
       run.status = failed.result.retryable ? 'failed' : 'blocked';
       run.phase = run.status;
       run.error = failed.result.error || `Task failed: ${failed.task.title}`;
@@ -402,6 +406,7 @@ class AgentOrchestrator extends EventEmitter {
         model,
         retryable: failed.result.retryable,
         errorType: failed.result.errorType,
+        profile,
       });
       const eventMessage = buildRunFailureEventMessage({
         status: run.status,
@@ -497,28 +502,72 @@ class AgentOrchestrator extends EventEmitter {
     };
   }
 
+  _xmlBlock(name, content) {
+    const text = String(content || '').trim();
+    if (!text) return `<${name}>(none)</${name}>`;
+    const safe = text.replace(new RegExp(`</${name}>`, 'gi'), `<\\/${name}>`);
+    return `<${name}>\n${safe}\n</${name}>`;
+  }
+
+  _getProfile() {
+    try {
+      const profile = getDB().data?.profile;
+      return profile?.setupComplete ? profile : null;
+    } catch {
+      return null;
+    }
+  }
+
+  _profileContext(profile = null) {
+    if (!profile) return '';
+    const parts = [];
+    if (profile.name) parts.push(`Name: ${profile.name}`);
+    if (profile.role) parts.push(`Role: ${profile.role}`);
+    if (profile.languages) parts.push(`Languages and frameworks: ${profile.languages}`);
+    if (profile.codeStyle) parts.push(`Code style: ${profile.codeStyle}`);
+    if (profile.tone) parts.push(`Preferred tone: ${profile.tone}`);
+    if (profile.preferences) parts.push(`Preferences: ${profile.preferences}`);
+    return parts.join('\n');
+  }
+
+  _responseGuidance(profile = null) {
+    const tone = String(profile?.tone || 'concise').toLowerCase();
+    const lines = [
+      'Speak as the IDE assistant working with the user, not as a separate hidden session.',
+      'If this is a new CLI session, continue naturally and do not mention that the session is new.',
+      'Use the user name naturally when it helps, but do not force it into every sentence.',
+      'Prefer a useful final answer with what changed, verification, and any blockers.',
+    ];
+    if (tone === 'concise') lines.push('Keep the final response concise and direct.');
+    else if (tone === 'detailed') lines.push('Include enough detail for the user to understand decisions and verification.');
+    else if (tone === 'casual') lines.push('Use a warm, natural tone while staying precise.');
+    else if (tone === 'formal') lines.push('Use a professional, structured tone.');
+    if (profile?.preferences) lines.push(`Respect user preferences: ${profile.preferences}`);
+    return lines.join('\n');
+  }
+
   _buildTaskPrompt(run, prompt, priorResults = []) {
     const memory = memoryStore.buildContextForLLM(run.projectId, { query: `${run.goal}\n${prompt}`, maxTokens: 1400 });
     const workContext = this._runWorkContext(run);
-    const workContextBlock = workContext
-      ? `\n\nIDE-selected workspace context:\n${workContext}`
-      : '';
+    const profile = this._getProfile();
+    const profileContext = this._profileContext(profile);
     const prior = priorResults.length
-      ? `\n\nPrior completed task results:\n${priorResults.map((r, i) => `${i + 1}. ${r.task.title}: ${String(r.result.content || '').slice(0, 1200)}`).join('\n')}`
+      ? priorResults.map((r, i) => `${i + 1}. ${r.task.title}: ${String(r.result.content || '').slice(0, 1200)}`).join('\n')
       : '';
-    return `You are the coding agent being driven by an IDE control loop. Do the repository reasoning, edits, commands, tests, and final reporting. The IDE orchestrator will only track progress, format the response, and decide whether another push is needed. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.
-
-Original user goal:
-${run.goal}
-${workContextBlock}
-
-Durable project memory:
-${memory || '(none)'}${prior}
-
-Assigned task:
-${prompt}
-
-Report clearly what you did, files changed, commands run, verification results, and blockers. Do not wait for user input unless truly blocked.`;
+    return [
+      '<ide_orchestrator_handoff version="1">',
+      this._xmlBlock('control_loop_role', 'You are the coding agent being driven by an IDE control loop. Do the repository reasoning, edits, commands, tests, and final reporting. The IDE orchestrator tracks progress, formats responses, and decides whether another push is needed.'),
+      this._xmlBlock('session_continuity', 'Treat this as the same user conversation even if the CLI session is fresh. Use the context below to continue naturally. Do not tell the user that a new agent session started unless it is relevant to a blocker.'),
+      this._xmlBlock('user_profile_and_preferences', profileContext),
+      this._xmlBlock('response_guidance', this._responseGuidance(profile)),
+      this._xmlBlock('original_user_goal', run.goal),
+      this._xmlBlock('ide_selected_workspace', workContext),
+      this._xmlBlock('durable_project_memory', memory || '(none)'),
+      this._xmlBlock('prior_completed_task_results', prior),
+      this._xmlBlock('assigned_task', prompt),
+      this._xmlBlock('execution_contract', 'Complete the assigned task end-to-end. Spin up focused sub-agents when useful. Do not wait for user input unless truly blocked. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
+      '</ide_orchestrator_handoff>',
+    ].join('\n\n');
   }
 
   _runWorkContext(run) {
@@ -805,7 +854,7 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
   }
 
   async _synthesizeFinal(run, completed) {
-    return buildThinFinalResponse({ run, completed });
+    return buildThinFinalResponse({ run, completed, profile: this._getProfile() });
   }
 
   _saveRun(run) {
