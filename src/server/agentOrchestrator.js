@@ -347,7 +347,7 @@ class AgentOrchestrator extends EventEmitter {
 
   async _executeRun(run, opts) {
     const active = this.activeRuns.get(run.id);
-    const { mode, tool, model, effort, broadcastFn, skipUnread } = opts;
+    const { attachments = [], mode, tool, model, effort, broadcastFn, skipUnread } = opts;
 
     const tasks = await this._planTasks(run, opts);
     for (const task of tasks) this._saveTask(task);
@@ -367,7 +367,7 @@ class AgentOrchestrator extends EventEmitter {
       if (batch.parallel) {
         // Run all parallelSafe tasks in the batch concurrently
         const promises = batch.tasks.map(task =>
-          this._runTaskWithRetries(run, task, { mode, tool, model, effort, broadcastFn, skipUnread })
+          this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread })
             .then(result => ({ task, result }))
         );
         const results = await Promise.all(promises);
@@ -382,7 +382,7 @@ class AgentOrchestrator extends EventEmitter {
       } else {
         // Serial task — single item batch
         const task = batch.tasks[0];
-        const result = await this._runTaskWithRetries(run, task, { mode, tool, model, effort, broadcastFn, skipUnread });
+        const result = await this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread });
         if (active?.aborted || result?.errorType === 'cancelled') throw new Error('Run cancelled');
         completed.push({ task, result });
         if (!result.success) break;
@@ -546,11 +546,40 @@ class AgentOrchestrator extends EventEmitter {
     return lines.join('\n');
   }
 
+  _attachmentContext(run) {
+    const attachments = Array.isArray(run.data?.attachments) ? run.data.attachments : [];
+    if (attachments.length === 0) return '';
+    return attachments.map((attachment, index) => {
+      const fields = [
+        `${index + 1}. ${attachment.name || attachment.path || attachment.id || 'attachment'}`,
+        attachment.type ? `type=${attachment.type}` : null,
+        Number.isFinite(attachment.size) ? `size=${attachment.size}` : null,
+        attachment.path ? `path=${attachment.path}` : null,
+      ].filter(Boolean);
+      return fields.join(' | ');
+    }).join('\n');
+  }
+
+  _recentConversationContext(run) {
+    try {
+      const messages = chatStore.getMessages(run.projectId, { sessionId: run.sessionId, limit: 8 }) || [];
+      return [...messages]
+        .filter(message => ['user', 'agent', 'error'].includes(message.role))
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+        .map(message => `${message.role}: ${String(message.content || '').replace(/\s+/g, ' ').slice(0, 600)}`)
+        .join('\n');
+    } catch {
+      return '';
+    }
+  }
+
   _buildTaskPrompt(run, prompt, priorResults = []) {
     const memory = memoryStore.buildContextForLLM(run.projectId, { query: `${run.goal}\n${prompt}`, maxTokens: 1400 });
     const workContext = this._runWorkContext(run);
     const profile = this._getProfile();
     const profileContext = this._profileContext(profile);
+    const attachments = this._attachmentContext(run);
+    const recentConversation = this._recentConversationContext(run);
     const prior = priorResults.length
       ? priorResults.map((r, i) => `${i + 1}. ${r.task.title}: ${String(r.result.content || '').slice(0, 1200)}`).join('\n')
       : '';
@@ -560,12 +589,14 @@ class AgentOrchestrator extends EventEmitter {
       this._xmlBlock('session_continuity', 'Treat this as the same user conversation even if the CLI session is fresh. Use the context below to continue naturally. Do not tell the user that a new agent session started unless it is relevant to a blocker.'),
       this._xmlBlock('user_profile_and_preferences', profileContext),
       this._xmlBlock('response_guidance', this._responseGuidance(profile)),
+      this._xmlBlock('recent_parent_conversation', recentConversation),
       this._xmlBlock('original_user_goal', run.goal),
       this._xmlBlock('ide_selected_workspace', workContext),
+      this._xmlBlock('attached_files', attachments),
       this._xmlBlock('durable_project_memory', memory || '(none)'),
       this._xmlBlock('prior_completed_task_results', prior),
       this._xmlBlock('assigned_task', prompt),
-      this._xmlBlock('execution_contract', 'Complete the assigned task end-to-end. Spin up focused sub-agents when useful. Do not wait for user input unless truly blocked. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
+      this._xmlBlock('execution_contract', 'Complete the assigned task end-to-end. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. Do not wait for user input unless truly blocked. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
       '</ide_orchestrator_handoff>',
     ].join('\n\n');
   }
@@ -628,7 +659,7 @@ class AgentOrchestrator extends EventEmitter {
         projectId: run.projectId,
         sessionId: agentSession.id,
         content: prompt,
-        attachments: [],
+        attachments: opts.attachments || [],
         tool: opts.tool,
         model: opts.model,
         effort: opts.effort,

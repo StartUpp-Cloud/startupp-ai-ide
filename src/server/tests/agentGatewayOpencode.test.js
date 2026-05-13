@@ -31,6 +31,25 @@ assert.equal(telemetryOnly.sessionId, 'ses_test');
 assert.equal(telemetryOnly.isError, false);
 assert.equal(telemetryOnly.text, 'I found the relevant code path.');
 
+const commentaryWithFinal = parseOpencodeJsonOutput(
+  [
+    '{"sessionID":"ses_test","type":"text","part":{"type":"text","text":"I am checking the CSV.","metadata":{"openai":{"phase":"commentary"}}}}',
+    '{"sessionID":"ses_test","type":"text","part":{"type":"text","text":"Imported 42 leads with Lead Source Gargle."}}',
+    '{"sessionID":"ses_test","type":"step-finish","reason":"stop"}',
+  ].join('\n'),
+  'opencode run test --format json',
+);
+assert.equal(commentaryWithFinal.text, 'Imported 42 leads with Lead Source Gargle.');
+
+const commentaryOnly = parseOpencodeJsonOutput(
+  [
+    '{"sessionID":"ses_test","type":"text","part":{"type":"text","text":"I found a likely CSV in the workspace.","metadata":{"openai":{"phase":"commentary"}}}}',
+    '{"sessionID":"ses_test","type":"step-finish","reason":"stop"}',
+  ].join('\n'),
+  'opencode run test --format json',
+);
+assert.match(commentaryOnly.text, /did not return a final summary/i);
+
 const contextLimit = parseOpencodeJsonOutput(
   '{"sessionID":"ses_test","type":"step-finish","reason":"length"}',
   'opencode run test --format json',

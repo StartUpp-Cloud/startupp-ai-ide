@@ -29,6 +29,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
     /agentShellPool\.write\(shellSessionId, 'n\\n'\)/,
     'Unresolved auto-confirm prompts should receive a safe decline fallback',
   );
+  assert.match(
+    agentGatewaySource,
+    /_resolveAttachmentPaths\(attachments, projectId\)/,
+    'All attachments, including large CSV/text files, should get container-readable paths',
+  );
+  assert.match(
+    agentGatewaySource,
+    /Content of \$\{att\.name\} \(\$\{resolved\}\)/,
+    'Inline text attachments should include the resolved container path for continuity',
+  );
 }
 
 {
@@ -48,6 +58,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
     agentOrchestratorSource,
     /active\.agentSessionIds\.add\(agentSession\.id\)/,
     'Orchestrator should track all active child agent sessions for cancellation',
+  );
+  assert.match(
+    agentOrchestratorSource,
+    /attachments: opts\.attachments \|\| \[\]/,
+    'Orchestrated child agent sessions should receive the user attachments',
+  );
+  assert.match(
+    agentOrchestratorSource,
+    /this\._xmlBlock\('attached_files'/,
+    'Orchestrator handoffs should explicitly list attached files',
+  );
+  assert.match(
+    agentOrchestratorSource,
+    /Treat attached files as authoritative/,
+    'Coding agents should not substitute similarly named workspace files for uploads',
   );
 }
 

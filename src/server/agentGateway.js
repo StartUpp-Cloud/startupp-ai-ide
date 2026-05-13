@@ -308,11 +308,10 @@ class AgentGateway extends EventEmitter {
       !imageAttachments.includes(a) && !textAttachments.includes(a) && !pdfAttachments.includes(a)
     );
 
-    // Resolve paths — for containerised projects copy files in and use container paths
-    const resolvePath = await this._resolveAttachmentPaths(
-      [...imageAttachments, ...pdfAttachments, ...otherAttachments],
-      projectId
-    );
+    // Resolve paths — for containerised projects copy files in and use container
+    // paths. Text/CSV attachments may be too large to inline, so they also need
+    // a container-readable path.
+    const resolvePath = await this._resolveAttachmentPaths(attachments, projectId);
 
     // Images: tell Claude to read them from their resolved path
     if (imageAttachments.length > 0) {
@@ -322,15 +321,16 @@ class AgentGateway extends EventEmitter {
 
     // Text files: read on the host (server always has access) and inline the content
     for (const att of textAttachments) {
+      const resolved = resolvePath.get(att.path) || att.path;
       if (att.size < 50000 && att.path) {
         try {
           const fileContent = fs.readFileSync(att.path, 'utf-8');
-          parts.push(`\n\n--- Content of ${att.name} ---\n${fileContent}\n--- End of ${att.name} ---`);
+          parts.push(`\n\n--- Content of ${att.name} (${resolved}) ---\n${fileContent}\n--- End of ${att.name} ---`);
         } catch {
-          parts.push(`\n\n[Attached file: ${att.path}]`);
+          parts.push(`\n\n[Attached file: ${resolved}]`);
         }
       } else {
-        parts.push(`\n\n[Attached file (large): ${att.path}]`);
+        parts.push(`\n\n[Attached file (large): ${resolved}]`);
       }
     }
 

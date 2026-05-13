@@ -65,6 +65,7 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
   let seenToolUse = false;
   let hasPostToolText = false;
   const textParts = [];
+  const commentaryParts = [];
 
   for (const line of cleanOutput.split('\n')) {
     const json = parseOpencodeJsonLine(line);
@@ -79,7 +80,22 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
       }
 
       if (type === 'text' && json.part?.text) {
-        textParts.push(json.part.text);
+        const phase = normalizeAgentEventType(json.part?.metadata?.openai?.phase || json.metadata?.openai?.phase || json.part?.metadata?.phase || json.metadata?.phase);
+        if (phase === 'commentary') {
+          commentaryParts.push(json.part.text);
+        } else {
+          textParts.push(json.part.text);
+          if (seenToolUse) hasPostToolText = true;
+        }
+      }
+
+      if (type === 'result' && typeof json.result === 'string' && json.result.trim()) {
+        textParts.push(json.result);
+        if (seenToolUse) hasPostToolText = true;
+      }
+
+      if (type === 'item_completed' && json.item?.type === 'agent_message' && typeof json.item?.text === 'string' && json.item.text.trim()) {
+        textParts.push(json.item.text);
         if (seenToolUse) hasPostToolText = true;
       }
 
@@ -117,7 +133,9 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
     textParts.push(`\n\n**Error:** OpenCode could not find this Ollama model in its provider config.${hint} Restart the project container to refresh the model list, then try again.`);
   }
 
-  text = textParts.join('');
+  text = textParts.join('').trim();
+  const commentaryOnly = !text && commentaryParts.length > 0;
+  if (commentaryOnly) text = commentaryParts.join('').trim();
 
   if (!text) {
     text = extractToolResponse(cleanOutput, cmd);
@@ -139,6 +157,8 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
         ? '⚠️ Response received but could not be parsed. OpenCode may still be processing.'
         : '⚠️ No response received from OpenCode. Please try again.';
     }
+  } else if (commentaryOnly && isCleanStop && !isError) {
+    text += '\n\nOpenCode did not return a final summary. I preserved its last progress update above; ask me to continue if you want me to verify the final state.';
   } else if (!isError && seenToolUse && !hasPostToolText && isCleanStop) {
     text += '\n\n✓ Task completed.';
   }
