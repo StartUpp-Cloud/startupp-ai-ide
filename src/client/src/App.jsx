@@ -14,6 +14,7 @@ import DebugElement from "./pages/DebugElement";
 import Onboarding from "./pages/Onboarding";
 import Skills from "./pages/Skills";
 import Connections from "./pages/Connections";
+import SalesforceWorkspace from "./pages/SalesforceWorkspace";
 import { ProjectProvider } from "./contexts/ProjectContext";
 import NotificationToast from "./components/NotificationToast";
 
@@ -92,6 +93,7 @@ function App() {
           <Route path="/profile" element={<Profile />} />
           <Route path="/skills" element={<Skills />} />
           <Route path="/connections" element={<Layout><Connections /></Layout>} />
+          <Route path="/salesforce" element={<SalesforceWorkspace />} />
         </Routes>
       </SetupGate>
       <NotificationToast />

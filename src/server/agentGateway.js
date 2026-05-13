@@ -159,6 +159,16 @@ class AgentGateway extends EventEmitter {
     if (project?.stack !== 'salesforce') return '';
 
     try {
+      // Include connection info from new auth model
+      let connInfo = '(not connected)';
+      try {
+        const { getProjectConnection } = await import('./salesforce/salesforceAuthService.js');
+        const conn = getProjectConnection(projectId);
+        if (conn) {
+          connInfo = `${conn.username || 'unknown'} @ ${conn.instanceUrl?.replace('https://', '') || 'unknown'} (API ${conn.apiVersion || 'unknown'})`;
+        }
+      } catch { /* ignore auth service errors */ }
+
       const context = await resolveSalesforceContext({
         projectId,
         repoPath: sessionMeta?.repoPath || null,
@@ -179,6 +189,7 @@ class AgentGateway extends EventEmitter {
         `- packageDirectories: ${(compact.packageDirectories || []).join(', ') || '(none detected)'}`,
         `- metadataRoots: ${(compact.metadataRoots || []).join(', ') || '(none detected)'}`,
         `- defaultOrg: ${org}`,
+        `- connectedOrg: ${connInfo}`,
         `- indexedMetadataSummary: Apex classes ${summary.apexClassCount || 0}, triggers ${summary.triggerCount || 0}, flows ${summary.flowCount || 0}, objects ${summary.objectMetadataCount || 0}`,
       ].join('\n');
     } catch (err) {

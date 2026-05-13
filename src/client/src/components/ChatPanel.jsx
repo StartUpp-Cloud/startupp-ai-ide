@@ -3,7 +3,6 @@ import ChatMessage from './ChatMessage';
 import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from './ChatInput';
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
-import SalesforceWorkspace from './salesforce/SalesforceWorkspace';
 import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud } from 'lucide-react';
 import {
   CLI_TOOLS,
@@ -444,17 +443,15 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
           Shell
         </button>
         {project && (
-          <button
-            onClick={() => onChannelChange?.('salesforce')}
-            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
-              channel === 'salesforce'
-                ? 'bg-sky-600 text-white'
-                : 'text-surface-400 hover:text-surface-200 hover:bg-surface-800'
-            }`}
+          <a
+            href={`/salesforce?projectId=${project.id}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors text-surface-400 hover:text-surface-200 hover:bg-surface-800"
           >
             <Cloud size={11} />
             Salesforce
-          </button>
+          </a>
         )}
       </div>
 
@@ -522,8 +519,6 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       <div className="ml-auto text-[10px] text-surface-500 truncate">
         {channel === 'shell'
           ? 'Interactive shell: full terminal PTY inside the project container'
-          : channel === 'salesforce'
-          ? 'Salesforce workspace tools: explicit repo context, read-only operations'
           : effectiveTool === 'ollama'
           ? 'IDE orchestrator enabled: workspace scan, retrieval, stack guidance, task planning'
           : getToolConfig(effectiveTool).context}
@@ -1588,16 +1583,6 @@ function ChatSessionContent({
           active={isVisible}
           queuedCommand={queuedShellCommand}
           onQueuedCommandHandled={() => setQueuedShellCommand(null)}
-        />
-      ) : chatChannel === 'salesforce' ? (
-        <SalesforceWorkspace
-          project={project}
-          containerRepos={containerRepos}
-          onProjectUpdated={onProjectUpdated}
-          onRunGuidedAction={(prompt) => {
-            setChatChannel('assistant');
-            handleSend(prompt, [], { channel: 'assistant' });
-          }}
         />
       ) : (
         <>

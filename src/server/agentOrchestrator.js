@@ -23,6 +23,8 @@ import {
 } from './orchestratorLiveness.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_MAX_RUN_RETRIES = 2; // Run-level auto-retries after all task attempts are exhausted
+const RUN_RETRY_DELAY_MS = 8000; // Delay between run-level retries
 const PROGRESS_DEDUP_WINDOW_MS = 5000; // Suppress identical progress within 5s
 const LIVENESS_INTERVAL_MS = 5000;
 const LIVENESS_STALE_MS = 4000;
@@ -348,138 +350,181 @@ class AgentOrchestrator extends EventEmitter {
   async _executeRun(run, opts) {
     const active = this.activeRuns.get(run.id);
     const { attachments = [], mode, tool, model, effort, broadcastFn, skipUnread } = opts;
+    const maxRunRetries = DEFAULT_MAX_RUN_RETRIES;
 
-    const tasks = await this._planTasks(run, opts);
-    for (const task of tasks) this._saveTask(task);
-
-    run.phase = 'executing';
-    run.updatedAt = nowIso();
-    run.data = { ...(run.data || {}), taskCount: tasks.length };
-    this._saveRun(run);
-    this._emitRun(run, broadcastFn);
-    await this._event(run, null, 'tasks-created', `Created ${tasks.length} agent task${tasks.length === 1 ? '' : 's'}.`, { tasks: tasks.map(t => ({ id: t.id, title: t.title, type: t.taskType })) }, broadcastFn);
-
-    const completed = [];
-    const batches = this._batchTasks(tasks);
-    for (const batch of batches) {
+    let lastFailedResult = null;
+    for (let runAttempt = 0; runAttempt <= maxRunRetries; runAttempt++) {
       if (active?.aborted) throw new Error('Run cancelled');
 
-      if (batch.parallel) {
-        // Run all parallelSafe tasks in the batch concurrently
-        const promises = batch.tasks.map(task =>
-          this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread })
-            .then(result => ({ task, result }))
-        );
-        const results = await Promise.all(promises);
+      // For run-level retries, build a retry-aware task prompt
+      const retryOpts = runAttempt > 0
+        ? { ...opts, runRetryContext: { attempt: runAttempt, maxRetries: maxRunRetries, previousError: lastFailedResult?.error } }
+        : opts;
 
-        if (active?.aborted) throw new Error('Run cancelled');
-        for (const item of results) {
-          completed.push(item);
-        }
-        // If any parallel task failed, stop execution
-        const failed = results.find(item => !item.result.success);
-        if (failed) break;
-      } else {
-        // Serial task — single item batch
-        const task = batch.tasks[0];
-        const result = await this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread });
-        if (active?.aborted || result?.errorType === 'cancelled') throw new Error('Run cancelled');
-        completed.push({ task, result });
-        if (!result.success) break;
-      }
-    }
+      const tasks = await this._planTasks(run, retryOpts);
+      for (const task of tasks) this._saveTask(task);
 
-    const failed = completed.find(item => !item.result.success);
-    if (failed) {
-      const profile = this._getProfile();
-      run.status = failed.result.retryable ? 'failed' : 'blocked';
-      run.phase = run.status;
-      run.error = failed.result.error || `Task failed: ${failed.task.title}`;
-      run.completedAt = nowIso();
-      run.updatedAt = run.completedAt;
+      run.phase = 'executing';
+      run.updatedAt = nowIso();
+      run.data = { ...(run.data || {}), taskCount: tasks.length, runAttempt };
       this._saveRun(run);
-      const userMessage = buildRunFailureResponse({
-        status: run.status,
-        taskTitle: failed.task.title,
-        error: run.error,
-        tool,
-        model,
-        retryable: failed.result.retryable,
-        errorType: failed.result.errorType,
-        profile,
-      });
-      const eventMessage = buildRunFailureEventMessage({
-        status: run.status,
-        taskTitle: failed.task.title,
-        error: run.error,
-        tool,
-        model,
-        retryable: failed.result.retryable,
-        errorType: failed.result.errorType,
-      });
-      await this._event(run, failed.task, run.status, eventMessage, { ...failed.result, rawError: run.error }, broadcastFn, 'error');
+      this._emitRun(run, broadcastFn);
+      if (runAttempt === 0) {
+        await this._event(run, null, 'tasks-created', `Created ${tasks.length} agent task${tasks.length === 1 ? '' : 's'}.`, { tasks: tasks.map(t => ({ id: t.id, title: t.title, type: t.taskType })) }, broadcastFn);
+      }
+
+      const completed = [];
+      const batches = this._batchTasks(tasks);
+      for (const batch of batches) {
+        if (active?.aborted) throw new Error('Run cancelled');
+
+        if (batch.parallel) {
+          const promises = batch.tasks.map(task =>
+            this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread })
+              .then(result => ({ task, result }))
+          );
+          const results = await Promise.all(promises);
+
+          if (active?.aborted) throw new Error('Run cancelled');
+          for (const item of results) {
+            completed.push(item);
+          }
+          const failed = results.find(item => !item.result.success);
+          if (failed) break;
+        } else {
+          const task = batch.tasks[0];
+          const result = await this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread });
+          if (active?.aborted || result?.errorType === 'cancelled') throw new Error('Run cancelled');
+          completed.push({ task, result });
+          if (!result.success) break;
+        }
+      }
+
+      const failed = completed.find(item => !item.result.success);
+      if (failed) {
+        // If retryable and we have run-level retries left, auto-retry instead of surfacing failure
+        if (failed.result.retryable && runAttempt < maxRunRetries && !active?.aborted) {
+          lastFailedResult = failed.result;
+          const nextAttempt = runAttempt + 2; // 1-indexed for display
+          const totalAttempts = maxRunRetries + 1;
+          await this._event(run, failed.task, 'run-auto-retry',
+            `Auto-retrying run (attempt ${nextAttempt}/${totalAttempts}). Previous: ${failed.result.errorType || 'transient failure'}.`,
+            { runAttempt: runAttempt + 1, maxRunRetries, errorType: failed.result.errorType, rawError: failed.result.error },
+            broadcastFn, 'warning');
+          await new Promise(resolve => setTimeout(resolve, RUN_RETRY_DELAY_MS));
+          continue;
+        }
+
+        const profile = this._getProfile();
+        run.status = failed.result.retryable ? 'failed' : 'blocked';
+        run.phase = run.status;
+        run.error = failed.result.error || `Task failed: ${failed.task.title}`;
+        run.completedAt = nowIso();
+        run.updatedAt = run.completedAt;
+        this._saveRun(run);
+        const userMessage = buildRunFailureResponse({
+          status: run.status,
+          taskTitle: failed.task.title,
+          error: run.error,
+          tool,
+          model,
+          retryable: failed.result.retryable,
+          errorType: failed.result.errorType,
+          profile,
+        });
+        const eventMessage = buildRunFailureEventMessage({
+          status: run.status,
+          taskTitle: failed.task.title,
+          error: run.error,
+          tool,
+          model,
+          retryable: failed.result.retryable,
+          errorType: failed.result.errorType,
+        });
+        await this._event(run, failed.task, run.status, eventMessage, { ...failed.result, rawError: run.error }, broadcastFn, 'error');
+        const msg = chatStore.addMessage({
+          projectId: run.projectId,
+          sessionId: run.sessionId,
+          role: 'agent',
+          content: userMessage,
+          metadata: {
+            orchestratorRunId: run.id,
+            orchestratorTaskId: failed.task.id,
+            orchestratorFailure: true,
+            rawError: run.error,
+            ...(failed.result.changedFiles?.length > 0 ? { changedFiles: failed.result.changedFiles } : {}),
+          },
+        });
+        broadcastFn({ type: 'chat-message', message: msg });
+        this._emitRun(run, broadcastFn);
+        this._deactivateRun(run.id);
+        return;
+      }
+
+      // Success — synthesize and return
+      run.phase = 'synthesizing';
+      run.updatedAt = nowIso();
+      this._saveRun(run);
+      this._emitRun(run, broadcastFn);
+      await this._event(run, null, 'synthesizing', 'Formatting the coding agent response.', null, broadcastFn);
+
+      const finalResponse = await this._synthesizeFinal(run, completed);
+      const changedFiles = this._mergeChangedFiles(completed.flatMap(({ result }) => result.changedFiles || []));
       const msg = chatStore.addMessage({
         projectId: run.projectId,
         sessionId: run.sessionId,
         role: 'agent',
-        content: userMessage,
+        content: finalResponse,
         metadata: {
           orchestratorRunId: run.id,
-          orchestratorTaskId: failed.task.id,
-          orchestratorFailure: true,
-          rawError: run.error,
-          ...(failed.result.changedFiles?.length > 0 ? { changedFiles: failed.result.changedFiles } : {}),
+          tool,
+          tasks: completed.map(({ task }) => ({ id: task.id, title: task.title, status: task.status })),
+          ...(changedFiles.length > 0 ? { changedFiles } : {}),
         },
       });
       broadcastFn({ type: 'chat-message', message: msg });
+      if (!skipUnread) {
+        const changed = chatStore.markSessionUnread(run.projectId, run.sessionId);
+        if (changed) broadcastFn({ type: 'session-unread', projectId: run.projectId, sessionId: run.sessionId, hasUnread: true });
+      }
+
+      run.status = 'completed';
+      run.phase = 'completed';
+      run.finalResponse = finalResponse;
+      run.completedAt = nowIso();
+      run.updatedAt = run.completedAt;
+      this._saveRun(run);
+      await this._event(run, null, 'run-completed', 'Autonomous run completed.', null, broadcastFn, 'success');
       this._emitRun(run, broadcastFn);
       this._deactivateRun(run.id);
       return;
-    }
-
-    run.phase = 'synthesizing';
-    run.updatedAt = nowIso();
-    this._saveRun(run);
-    this._emitRun(run, broadcastFn);
-    await this._event(run, null, 'synthesizing', 'Formatting the coding agent response.', null, broadcastFn);
-
-    const finalResponse = await this._synthesizeFinal(run, completed);
-    const changedFiles = this._mergeChangedFiles(completed.flatMap(({ result }) => result.changedFiles || []));
-    const msg = chatStore.addMessage({
-      projectId: run.projectId,
-      sessionId: run.sessionId,
-      role: 'agent',
-      content: finalResponse,
-      metadata: {
-        orchestratorRunId: run.id,
-        tool,
-        tasks: completed.map(({ task }) => ({ id: task.id, title: task.title, status: task.status })),
-        ...(changedFiles.length > 0 ? { changedFiles } : {}),
-      },
-    });
-    broadcastFn({ type: 'chat-message', message: msg });
-    if (!skipUnread) {
-      const changed = chatStore.markSessionUnread(run.projectId, run.sessionId);
-      if (changed) broadcastFn({ type: 'session-unread', projectId: run.projectId, sessionId: run.sessionId, hasUnread: true });
-    }
-
-    run.status = 'completed';
-    run.phase = 'completed';
-    run.finalResponse = finalResponse;
-    run.completedAt = nowIso();
-    run.updatedAt = run.completedAt;
-    this._saveRun(run);
-    await this._event(run, null, 'run-completed', 'Autonomous run completed.', null, broadcastFn, 'success');
-    this._emitRun(run, broadcastFn);
-    this._deactivateRun(run.id);
+    } // end run-level retry loop
   }
 
-  async _planTasks(run, { executeReviewedPlan } = {}) {
+  async _planTasks(run, { executeReviewedPlan, runRetryContext } = {}) {
+    const isRunRetry = runRetryContext?.attempt > 0;
+    const prompt = isRunRetry
+      ? this._buildRunRetryTaskPrompt(run, runRetryContext)
+      : this._buildTaskPrompt(run, run.goal, []);
     return [this._createTask(run, {
-      title: executeReviewedPlan ? 'Execute approved plan' : 'Complete user request',
-      prompt: this._buildTaskPrompt(run, run.goal, []),
+      title: executeReviewedPlan ? 'Execute approved plan' : isRunRetry ? `Retry user request (attempt ${runRetryContext.attempt + 1})` : 'Complete user request',
+      prompt,
       taskType: executeReviewedPlan ? 'implementation' : 'general',
     })];
+  }
+
+  _buildRunRetryTaskPrompt(run, retryContext) {
+    const errorSlice = String(retryContext.previousError || '').slice(0, 1500);
+    const retryGoal = `The previous attempt to complete this request failed after exhausting retries. This is an automatic run-level retry (attempt ${retryContext.attempt + 1}/${retryContext.maxRetries + 1}).
+
+Previous failure:
+${errorSlice}
+
+Inspect the current repository state, identify what was already done (if anything), and complete the remaining work. Adjust your approach to avoid the same failure.
+
+Original request:
+${run.goal}`;
+    return this._buildTaskPrompt(run, retryGoal, []);
   }
 
   _createTask(run, { title, prompt, taskType = 'general', parallelSafe = false }) {
