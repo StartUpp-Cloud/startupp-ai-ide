@@ -84,9 +84,21 @@ function withName(profile, message) {
 
 export function describeAgentFailure({ error = '', tool = null, model = null, retryable = null, errorType = null } = {}) {
   const raw = String(error || '');
-  const detail = sanitizeAgentFailureDetail(raw);
+  const detail = sanitizeAgentFailureDetail(raw, errorType === 'needs-user' ? 4000 : 700);
   const agent = toolName(tool);
   const selectedModel = extractSafeModelName(raw, model);
+
+  if (errorType === 'needs-user' || /coding agent needs your input|please answer these questions/i.test(raw)) {
+    return {
+      title: 'The coding agent needs your input.',
+      reason: detail || `${agent} needs a decision before it can safely continue.`,
+      nextSteps: [
+        'Reply with your choices or instructions for the questions above.',
+        'Then ask me to continue and I will push the coding agent from that decision.',
+      ],
+      shortReason: `${agent} needs your input before continuing.`,
+    };
+  }
 
   if (/ProviderModelNotFound|could not find this Ollama model|model .*not (?:found|registered)|not registered/i.test(raw)) {
     return {
@@ -165,12 +177,15 @@ export function buildRunFailureResponse({ status = 'failed', taskTitle = null, e
     : 'I could not complete this run yet.';
   const heading = withName(profile, baseHeading);
   const taskLine = taskTitle ? [`Current step: ${taskTitle}`, ''] : [];
+  const reasonLines = description.reason.includes('\n')
+    ? [description.reason]
+    : [`- ${description.reason}`];
   return [
     heading,
     '',
     ...taskLine,
     'What happened:',
-    `- ${description.reason}`,
+    ...reasonLines,
     '',
     'Next steps:',
     ...description.nextSteps.map(step => `- ${step}`),

@@ -66,10 +66,11 @@ class JobManager extends EventEmitter {
 
     // Configuration
     this.config = {
-      // Activity timeout: how long without output before considering stalled
-      activityTimeoutMs: 10 * 60 * 1000, // 10 minutes
-      // Hard timeout: maximum job duration
-      hardTimeoutMs: 60 * 60 * 1000, // 60 minutes
+      // Activity timeout: Claude/OpenCode can be quiet while sub-agents work.
+      // Treat silence as a stall only after hours, not minutes.
+      activityTimeoutMs: 6 * 60 * 60 * 1000, // 6 hours
+      // Hard timeout: null means no wall-clock cap for active assistant jobs.
+      hardTimeoutMs: null,
       // Progress summary interval
       progressSummaryIntervalMs: 30 * 1000, // 30 seconds
       // Output file rotation size
@@ -512,11 +513,11 @@ class JobManager extends EventEmitter {
     const lastActivity = new Date(job.lastActivityAt).getTime();
     const silenceMs = now - lastActivity;
 
-    // Check if we hit hard timeout
+    // Check if we hit hard timeout when one is configured.
     const startTime = new Date(job.startedAt).getTime();
     const totalMs = now - startTime;
 
-    if (totalMs > this.config.hardTimeoutMs) {
+    if (this.config.hardTimeoutMs && totalMs > this.config.hardTimeoutMs) {
       this.failJob(jobId, `Hard timeout: job ran for ${Math.round(totalMs / 60000)} minutes`);
       return;
     }

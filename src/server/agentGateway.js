@@ -38,10 +38,59 @@ import { shouldSuppressAgentProgress } from './orchestratorLiveness.js';
 import { isOpencodeQuietCompletion, parseOpencodeJsonOutput } from './opencodeOutput.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
-const CLI_NO_OUTPUT_RETRY_MS = 30000;
-const CLI_SILENCE_RETRY_MS = 2 * 60 * 1000;
-const ORCHESTRATED_SILENCE_RETRY_MS = 60 * 1000;
+export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
+const CLI_NO_OUTPUT_RETRY_MS = LONG_RUNNING_ASSISTANT_STALL_MS;
+const CLI_SILENCE_RETRY_MS = LONG_RUNNING_ASSISTANT_STALL_MS;
+const ORCHESTRATED_SILENCE_RETRY_MS = LONG_RUNNING_ASSISTANT_STALL_MS;
+const CLI_MAX_IDLE_ROUNDS = 12 * 60 * 60 / 2;
 const SESSION_CONTEXT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function extractAskUserQuestionsFromDenials(denials = []) {
+  const questions = [];
+  for (const denial of denials || []) {
+    const toolName = String(denial?.tool_name || denial?.toolName || '').toLowerCase();
+    if (toolName !== 'askuserquestion') continue;
+    const inputQuestions = Array.isArray(denial?.tool_input?.questions)
+      ? denial.tool_input.questions
+      : [];
+    for (const question of inputQuestions) {
+      if (question?.question) questions.push(question);
+    }
+  }
+  return questions;
+}
+
+function formatAskUserQuestions(questions = []) {
+  const unique = [];
+  const seen = new Set();
+  for (const question of questions) {
+    const key = `${question.header || ''}:${question.question || ''}`;
+    if (!question?.question || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(question);
+  }
+  if (unique.length === 0) return '';
+
+  const lines = [
+    'The coding agent needs your input before it can safely continue.',
+    '',
+    'Please answer these questions:',
+  ];
+  unique.forEach((question, index) => {
+    const header = question.header ? `${question.header}: ` : '';
+    lines.push('', `${index + 1}. ${header}${question.question}`);
+    if (question.multiSelect || question.multiple) lines.push('   Select one or more options.');
+    const options = Array.isArray(question.options) ? question.options : [];
+    for (const option of options) {
+      const label = String(option?.label || '').trim();
+      const description = String(option?.description || '').trim();
+      if (!label && !description) continue;
+      lines.push(`   - ${label || 'Option'}${description ? `: ${description}` : ''}`);
+    }
+  });
+  lines.push('', 'Reply with your choices or custom instructions, then ask me to continue.');
+  return lines.join('\n');
+}
 
 class AgentGateway extends EventEmitter {
   constructor() {
@@ -756,7 +805,7 @@ RULES:
   /**
    * Send to CLI tool with autonomous agent loop:
    * - Auto-retry on failure (up to 3 attempts with compaction)
-   * - Activity-based timeout (10 min silence, 60 min hard limit)
+   * - Activity-based stall recovery after hours of silence, with no hard wall-clock cap
    * - Event-driven completion from stream-json
    * - Live status reactions (thinking/reading/editing/running/done/error)
    * - Context recovery on "lost context" responses
@@ -974,11 +1023,14 @@ RULES:
 
         // ── Final failure: still finalize with whatever we got ──
         // Use the error message directly if it's already formatted (auth, rate limit, etc.)
-        const failureContent = result.error
-          ? (result.error.startsWith('🔐') || result.error.startsWith('⏳') || result.error.startsWith('🔄')
-              ? result.error
-              : `Error: ${result.error}`)
-          : result.displayOutput || `No response from ${tool}. Check Internal Console.`;
+        const requiresUserInput = result.requiresUserInput || result.retryType === 'needs-user' || result.errorType === 'needs-user';
+        const failureContent = requiresUserInput
+          ? (result.error || result.displayOutput || 'The coding agent needs your input before it can continue.')
+          : result.error
+            ? (result.error.startsWith('🔐') || result.error.startsWith('⏳') || result.error.startsWith('🔄')
+                ? result.error
+                : `Error: ${result.error}`)
+            : result.displayOutput || `No response from ${tool}. Check Internal Console.`;
         const changedFiles = fileTracker?.poll().files || [];
 
         // Fail the job
@@ -989,7 +1041,7 @@ RULES:
           sessionId: chatSessionId,
           messageId: streamingMsg.id,
           finalContent: failureContent,
-          metadata: { tool, jobId: job.id, error: true, attempts: attempt, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
+          metadata: { tool, jobId: job.id, error: !requiresUserInput, requiresUserInput, attempts: attempt, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
         });
 
         broadcastFn({
@@ -1001,7 +1053,7 @@ RULES:
           message: {
             ...streamingMsg,
             content: failureContent,
-            metadata: { tool, jobId: job.id, error: true, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
+            metadata: { tool, jobId: job.id, error: !requiresUserInput, requiresUserInput, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
           },
         });
 
@@ -1017,7 +1069,19 @@ RULES:
             });
           }
         }
-        return { success: false, error: failureContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, retryType: result.retryType || 'failed', changedFiles };
+        return {
+          success: false,
+          error: failureContent,
+          tool,
+          jobId: job.id,
+          messageId: streamingMsg.id,
+          attempts: attempt,
+          retryType: result.retryType || 'failed',
+          errorType: requiresUserInput ? 'needs-user' : result.errorType,
+          retryable: requiresUserInput ? false : result.retryable,
+          requiresUserInput,
+          changedFiles,
+        };
       }
     } finally {
       // Clean up event handler
@@ -1066,7 +1130,8 @@ RULES:
     agentShellPool.write(shellSessionId, cmd + '\n');
 
     // ── Collect output with activity-based timeout ──
-    // JobManager handles timeout detection (10 min silence, 60 min hard limit)
+    // Claude/OpenCode can legitimately run for hours; only retry after a
+    // multi-hour stall, not normal long-running implementation work.
     // We just need to detect completion via result event or shell prompt
     let totalOutput = '';
     let idleRounds = 0;
@@ -1101,9 +1166,9 @@ RULES:
     let lastResultText = null; // Store intermediate result text
     let allTasksCompleted = false;
 
-    // Support operations up to 60 minutes (1800 rounds × 2s = 60 min)
-    // Actual timeout is managed by JobManager based on activity
-    const MAX_IDLE = 1800;
+    // Support operations up to 12 hours (2s polling rounds). The practical
+    // stall window is controlled by CLI_*_RETRY_MS and JobManager activity.
+    const MAX_IDLE = CLI_MAX_IDLE_ROUNDS;
     const PROGRESS_INTERVAL_MS = 30000; // Show progress every 30s
 
     while (!ctx.aborted && idleRounds < MAX_IDLE) {
@@ -1322,6 +1387,19 @@ RULES:
         const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
         this._setCliState(chatSessionId, tool, newState);
         this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId);
+      }
+      if (parsed.requiresUserInput) {
+        return {
+          success: false,
+          retry: false,
+          retryReason: 'Coding agent needs user input',
+          retryType: 'needs-user',
+          errorType: 'needs-user',
+          requiresUserInput: true,
+          displayOutput,
+          error: displayOutput,
+          cleanOutput,
+        };
       }
       // Check for error in the result
       if (parsed.isError) {
@@ -2850,6 +2928,7 @@ NEEDS_USER`,
     let jsonErrorText = '';
     let hasJsonError = false;
     let hasResultText = false;
+    const userQuestions = [];
 
     // Strategy 1a: Claude format — {"type":"result", "session_id":"...", "result":"..."}
     const jsonMatch = cleanOutput.match(/\{"type"\s*:\s*"result"[^]*?"session_id"\s*:\s*"([^"]+)"[^]*?"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
@@ -2893,6 +2972,9 @@ NEEDS_USER`,
                 .filter(Boolean)
                 .join('\n');
             }
+            if (Array.isArray(json.permission_denials)) {
+              userQuestions.push(...extractAskUserQuestionsFromDenials(json.permission_denials));
+            }
             // Copilot format: sessionId (camelCase) in result events
             if (json.type === 'result' && json.sessionId) sessionId = json.sessionId;
             // Copilot format: response text in assistant.message events (data.content)
@@ -2910,6 +2992,24 @@ NEEDS_USER`,
       if (!text && jsonErrorText) {
         text = jsonErrorText;
       }
+    }
+    if (userQuestions.length === 0 && cleanOutput.includes('permission_denials')) {
+      for (const line of cleanOutput.split('\n')) {
+        const idx = line.indexOf('{');
+        if (idx < 0) continue;
+        try {
+          const json = JSON.parse(line.slice(idx));
+          if (Array.isArray(json.permission_denials)) {
+            userQuestions.push(...extractAskUserQuestionsFromDenials(json.permission_denials));
+          }
+        } catch {}
+      }
+    }
+    const userQuestionText = formatAskUserQuestions(userQuestions);
+    if (userQuestionText) {
+      const genericWaiting = /waiting for your answers?|need(?:s)? your (?:answers?|input)|before proceeding/i.test(text || '')
+        && !/\?/.test(text || '');
+      text = !text || genericWaiting ? userQuestionText : `${text.trim()}\n\n${userQuestionText}`;
     }
     if (!text) {
       text = this._extractToolResponse(cleanOutput, cmd);
@@ -3005,7 +3105,7 @@ NEEDS_USER`,
       }
     }
 
-    return { text, sessionId, isError, errorType };
+    return { text, sessionId, isError, errorType, requiresUserInput: !!userQuestionText };
   }
 
   /**

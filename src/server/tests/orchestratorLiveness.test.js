@@ -8,6 +8,7 @@ import {
   shouldSuppressAgentProgress,
 } from '../orchestratorLiveness.js';
 import {
+  ACTIVE_RUN_STALE_MS,
   buildStreamingRecoveryContent,
   shouldRecoverStreamingMessage,
   streamingSilenceMs,
@@ -113,6 +114,11 @@ assert.match(
   buildStreamingRecoveryContent({ tool: 'claude', retrying: true }),
   /retrying the request automatically/i,
   'streaming recovery response should tell the session that the backend is retrying',
+);
+
+assert.ok(
+  ACTIVE_RUN_STALE_MS >= 6 * 60 * 60 * 1000,
+  'active orchestrator runs should not be auto-aborted during multi-hour assistant work',
 );
 
 console.log('orchestratorLiveness tests passed');

@@ -2,7 +2,7 @@ export const STREAM_RECOVERY_STALE_MS = 5 * 60 * 1000;
 export const VISIBLE_STREAM_RECOVERY_STALE_MS = 45 * 1000;
 export const STREAM_AUTO_RETRY_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 export const RELIABILITY_SWEEP_INTERVAL_MS = 5000;
-export const ACTIVE_RUN_STALE_MS = 90 * 1000;
+export const ACTIVE_RUN_STALE_MS = 6 * 60 * 60 * 1000;
 export const LLM_STEP_TIMEOUT_MS = 30 * 1000;
 
 export function streamingSilenceMs({ now = Date.now(), streamStartedAt = null, lastChunkAt = null }) {

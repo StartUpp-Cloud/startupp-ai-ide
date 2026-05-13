@@ -30,6 +30,7 @@ const LIVENESS_INTERVAL_MS = 5000;
 const LIVENESS_STALE_MS = 4000;
 const ACTIVE_RUN_STATUSES = ['running'];
 const ACTIVE_RUN_STATUS_SQL = ACTIVE_RUN_STATUSES.map(() => '?').join(', ');
+const RECOVERABLE_RUN_STATUSES = ['failed', 'blocked'];
 
 const NON_RETRYABLE_PATTERNS = [
   /not configured|missing configuration|configuration required/i,
@@ -63,6 +64,60 @@ function safeJson(value) {
 function parseJson(value, fallback = null) {
   if (!value) return fallback;
   try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function trimPromptContext(value, maxLength = 2000) {
+  const text = String(value || '').trim().replace(/\n{3,}/g, '\n\n');
+  if (!text) return '';
+  return text.length > maxLength ? `${text.slice(0, maxLength).trim()}\n...[truncated]` : text;
+}
+
+function extractXmlBlock(value, blockName, maxLength = 2000) {
+  const source = String(value || '');
+  const match = source.match(new RegExp(`<${blockName}>\\s*([\\s\\S]*?)\\s*</${blockName}>`, 'i'));
+  return trimPromptContext(match?.[1] || '', maxLength);
+}
+
+export function isContinuationRequest(content = '') {
+  const text = String(content || '').toLowerCase();
+  if (!text.trim()) return false;
+  return /\b(?:continue|resume|retry|try again|keep going|proceed)\b/.test(text)
+    || /\bpush(?:ing)?\s+(?:the\s+)?(?:coding\s+)?agent\b/.test(text)
+    || /\bfrom\s+(?:the\s+)?(?:latest|current)\s+state\b/.test(text)
+    || /\buntil\s+(?:it(?:'s| is)?\s+)?(?:done|complete|completed)\b/.test(text);
+}
+
+export function buildRecoveredRunContextForPrompt({ currentRequest = '', previousRun = null, previousTask = null, events = [] } = {}) {
+  if (!previousRun) return '';
+
+  const parentConversation = extractXmlBlock(previousTask?.prompt, 'recent_parent_conversation', 2600);
+  const assignedTask = extractXmlBlock(previousTask?.prompt, 'assigned_task', 1800);
+  const progressLines = [];
+  const seenProgress = new Set();
+  for (const event of events || []) {
+    if (!['agent-progress', 'task-stalled-retry', 'task-retrying', 'task-failed', 'failed'].includes(event?.eventType)) continue;
+    const message = trimPromptContext(event.message, 300).replace(/\s+/g, ' ');
+    if (!message || seenProgress.has(message)) continue;
+    seenProgress.add(message);
+    progressLines.push(`${event.createdAt || 'unknown time'} - ${message}`);
+  }
+
+  return [
+    'The current user request asks to continue after a previous IDE coding-agent run did not finish. Resume the prior implementation objective; do not reduce this to a repository-cleanliness check unless the prior objective is verified complete.',
+    `Current user request:\n${trimPromptContext(currentRequest, 1000) || '(none)'}`,
+    [
+      'Previous run:',
+      `- id: ${previousRun.id || '(unknown)'}`,
+      `- status: ${previousRun.status || '(unknown)'}`,
+      `- previous task: ${previousTask?.title || '(unknown)'}`,
+      `- error: ${trimPromptContext(previousRun.error, 500) || trimPromptContext(previousTask?.error, 500) || '(none recorded)'}`,
+    ].join('\n'),
+    `Previous original goal:\n${trimPromptContext(previousRun.goal, 2200) || '(none recorded)'}`,
+    parentConversation ? `Relevant parent conversation from the previous handoff:\n${parentConversation}` : '',
+    assignedTask ? `Previous assigned task:\n${assignedTask}` : '',
+    progressLines.length > 0 ? `Previous progress and failure events:\n${progressLines.slice(-12).join('\n')}` : '',
+    'Continuation instructions:\nInspect the current workspace, determine what the previous run already completed, finish the remaining implementation, then verify, push, and deploy if the original task requires it. If everything is already complete, prove that against the prior objective and the checks performed.',
+  ].filter(Boolean).join('\n\n');
 }
 
 function rowToRun(row) {
@@ -134,6 +189,7 @@ class AgentOrchestrator extends EventEmitter {
   }
 
   async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, broadcastFn, skipUnread = false, executeReviewedPlan = false }) {
+    const recoveredContinuation = this._findRecoverableContinuationContext(projectId, sessionId, content);
     const run = {
       id: uuidv4(),
       projectId,
@@ -147,7 +203,16 @@ class AgentOrchestrator extends EventEmitter {
       maxAttempts: DEFAULT_MAX_ATTEMPTS,
       startedAt: nowIso(),
       updatedAt: nowIso(),
-      data: { attachments, mode, executeReviewedPlan },
+      data: {
+        attachments,
+        mode,
+        executeReviewedPlan,
+        ...(recoveredContinuation ? {
+          continuationContext: recoveredContinuation.context,
+          continuationFromRunId: recoveredContinuation.runId,
+          continuationFromTaskId: recoveredContinuation.taskId,
+        } : {}),
+      },
     };
 
     this._saveRun(run);
@@ -345,6 +410,29 @@ class AgentOrchestrator extends EventEmitter {
         metadata: parseJson(row.metadata, null),
         createdAt: row.created_at,
       }));
+  }
+
+  _findRecoverableContinuationContext(projectId, sessionId, content) {
+    if (!isContinuationRequest(content)) return null;
+    const latest = sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs
+      WHERE project_id = ? AND session_id = ?
+      ORDER BY started_at DESC LIMIT 1`).get(projectId, sessionId);
+    const previousRun = rowToRun(latest);
+    if (!previousRun || !RECOVERABLE_RUN_STATUSES.includes(previousRun.status)) return null;
+
+    const previousTasks = this.getTasks(previousRun.id);
+    const previousTask = [...previousTasks].reverse()
+      .find(task => ['failed', 'blocked', 'retrying', 'running'].includes(task.status))
+      || [...previousTasks].reverse()[0]
+      || null;
+    const context = buildRecoveredRunContextForPrompt({
+      currentRequest: content,
+      previousRun,
+      previousTask,
+      events: this.getEvents(previousRun.id, 120),
+    });
+    if (!context) return null;
+    return { context, runId: previousRun.id, taskId: previousTask?.id || null };
   }
 
   async _executeRun(run, opts) {
@@ -607,10 +695,11 @@ ${run.goal}`;
 
   _recentConversationContext(run) {
     try {
-      const messages = chatStore.getMessages(run.projectId, { sessionId: run.sessionId, limit: 8 }) || [];
+      const messages = chatStore.getMessages(run.projectId, { sessionId: run.sessionId, limit: 40 }) || [];
       return [...messages]
         .filter(message => ['user', 'agent', 'error'].includes(message.role))
         .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+        .slice(-8)
         .map(message => `${message.role}: ${String(message.content || '').replace(/\s+/g, ' ').slice(0, 600)}`)
         .join('\n');
     } catch {
@@ -625,6 +714,7 @@ ${run.goal}`;
     const profileContext = this._profileContext(profile);
     const attachments = this._attachmentContext(run);
     const recentConversation = this._recentConversationContext(run);
+    const recoveredContinuation = run.data?.continuationContext || '';
     const prior = priorResults.length
       ? priorResults.map((r, i) => `${i + 1}. ${r.task.title}: ${String(r.result.content || '').slice(0, 1200)}`).join('\n')
       : '';
@@ -634,6 +724,7 @@ ${run.goal}`;
       this._xmlBlock('session_continuity', 'Treat this as the same user conversation even if the CLI session is fresh. Use the context below to continue naturally. Do not tell the user that a new agent session started unless it is relevant to a blocker.'),
       this._xmlBlock('user_profile_and_preferences', profileContext),
       this._xmlBlock('response_guidance', this._responseGuidance(profile)),
+      this._xmlBlock('recovered_previous_run_context', recoveredContinuation),
       this._xmlBlock('recent_parent_conversation', recentConversation),
       this._xmlBlock('original_user_goal', run.goal),
       this._xmlBlock('ide_selected_workspace', workContext),
@@ -641,7 +732,7 @@ ${run.goal}`;
       this._xmlBlock('durable_project_memory', memory || '(none)'),
       this._xmlBlock('prior_completed_task_results', prior),
       this._xmlBlock('assigned_task', prompt),
-      this._xmlBlock('execution_contract', 'Complete the assigned task end-to-end. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. Do not wait for user input unless truly blocked. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
+      this._xmlBlock('execution_contract', 'Complete the assigned task end-to-end. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. Do not wait for user input unless truly blocked. If you need user input, include the exact questions, options, and recommended safe default in your final answer. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
       '</ide_orchestrator_handoff>',
     ].join('\n\n');
   }
@@ -883,6 +974,9 @@ ${run.goal}`;
   _classifyResult(result) {
     if (result?.success) return { success: true, retryable: false, errorType: null };
     const error = String(result?.error || result?.content || 'Unknown agent failure');
+    if (result?.requiresUserInput || result?.errorType === 'needs-user' || result?.retryType === 'needs-user') {
+      return { success: false, retryable: false, errorType: 'needs-user', error };
+    }
     if (CONTEXT_LIMIT_PATTERNS.some(pattern => pattern.test(error))) {
       return { success: false, retryable: true, errorType: 'context-limit', error };
     }
