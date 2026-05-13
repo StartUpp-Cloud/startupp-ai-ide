@@ -1,7 +1,12 @@
 export const INTERRUPTED_RUN_ERROR = 'Autonomous run was interrupted before it could send a final response. Review the persisted events or retry the request.';
 
 export function shouldSuppressAgentProgress(content) {
-  return /^Working: coding assistant is using a tool/i.test(String(content || ''));
+  const text = String(content || '').trim();
+  return [
+    /^Working: coding assistant is using a tool/i,
+    /^⏳\s*\w+\s+is still working\.\.\./i,
+    /^\w+\s+is still working\.\.\./i,
+  ].some(pattern => pattern.test(text));
 }
 
 export function shouldEmitLivenessHeartbeat({ now, lastActivityAt, staleMs }) {

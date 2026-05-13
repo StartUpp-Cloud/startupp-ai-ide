@@ -21,36 +21,20 @@ const NOT_BUSY_CLEAR_GRACE_MS = 12000;
  * Format job progress for display
  */
 function formatJobProgress(progress) {
-  if (!progress) return 'Working...';
+  if (!progress) return null;
 
-  const statusEmoji = {
-    starting: '🚀',
-    thinking: '🤔',
-    reading: '📖',
-    writing: '✍️',
-    running: '⚡',
-    searching: '🔍',
-    responding: '💬',
-    working: '⚙️',
-    done: '✅',
-    error: '❌',
-  };
+  if (progress.summary) {
+    return progress.summary;
+  }
 
-  const emoji = statusEmoji[progress.status] || '⏳';
-  let text = `${emoji} ${progress.status.charAt(0).toUpperCase() + progress.status.slice(1)}`;
-
-  if (progress.detail) {
+  if (progress.status === 'error' && progress.detail) {
     const detail = progress.detail.length > 60
       ? progress.detail.slice(0, 60) + '...'
       : progress.detail;
-    text += `: ${detail}`;
+    return `Progress error: ${detail}`;
   }
 
-  if (progress.summary) {
-    text = progress.summary;
-  }
-
-  return text;
+  return null;
 }
 
 function formatProgressLineTime(value) {
@@ -1076,11 +1060,14 @@ function ChatSessionContent({
             if (Array.isArray(msg.progress.changedFiles)) {
               setLiveChangedFiles(prev => mergeChangedFiles(prev, msg.progress.changedFiles));
             }
-            appendLiveProgressEntry({
-              id: `job-${msg.progress.jobId || msg.progress.id || ''}-${msg.progress.status || ''}-${msg.progress.updatedAt || Date.now()}`,
-              content: formatJobProgress(msg.progress),
-              createdAt: msg.progress.updatedAt || msg.progress.timestamp || new Date().toISOString(),
-            });
+            const content = formatJobProgress(msg.progress);
+            if (content) {
+              appendLiveProgressEntry({
+                id: `job-${msg.progress.jobId || msg.progress.id || ''}-${msg.progress.status || ''}-${msg.progress.updatedAt || Date.now()}`,
+                content,
+                createdAt: msg.progress.updatedAt || msg.progress.timestamp || new Date().toISOString(),
+              });
+            }
           }
           break;
 

@@ -34,6 +34,8 @@ import path from 'path';
 import { execSync } from 'child_process';
 import { resolveSalesforceContext } from './salesforce/salesforceContextResolver.js';
 import { buildCompactSalesforceContext } from './salesforce/salesforceContextService.js';
+import { shouldSuppressAgentProgress } from './orchestratorLiveness.js';
+import { isOpencodeQuietCompletion, parseOpencodeJsonOutput } from './opencodeOutput.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 const CLI_NO_OUTPUT_RETRY_MS = 30000;
@@ -1125,7 +1127,7 @@ RULES:
         }
 
         const runCtx = this._running.get(chatSessionId);
-        const silenceRetryMs = runCtx?.orchestrated ? ORCHESTRATED_SILENCE_RETRY_MS : CLI_SILENCE_RETRY_MS;
+        const silenceRetryMs = this._silenceRetryMs(tool, runCtx);
         const noOutputStalled = totalOutput.length === 0 && silenceMs >= CLI_NO_OUTPUT_RETRY_MS;
         const outputStalled = totalOutput.length > 0 && silenceMs >= silenceRetryMs;
         if (noOutputStalled || outputStalled) {
@@ -1155,15 +1157,13 @@ RULES:
             this._addProgressMessage(projectId, chatSessionId,
               `⏳ Waiting for ${pendingBackgroundTasks.size} agent(s): ${taskNames} (${duration})`,
               broadcastFn);
-          } else {
-            this._addProgressMessage(projectId, chatSessionId, `⏳ ${tool} is still working... (${duration} since last activity)`, broadcastFn);
           }
         }
 
         // Check for completion via shell prompt or result event
         if (idleRounds >= 2 && totalOutput.length > 0) {
           const clean = this._stripAnsi(totalOutput);
-          if (resultEventSeen || this._shellPromptReturned(clean)) break;
+          if (resultEventSeen || this._shellPromptReturned(clean) || (tool === 'opencode' && isOpencodeQuietCompletion(clean))) break;
         }
 
         // Check if job was failed by JobManager (activity timeout)
@@ -2563,6 +2563,11 @@ Reply with exactly one word: YES or NO.`,
     });
   }
 
+  _silenceRetryMs(tool, runCtx) {
+    if (tool === 'opencode') return CLI_SILENCE_RETRY_MS;
+    return runCtx?.orchestrated ? ORCHESTRATED_SILENCE_RETRY_MS : CLI_SILENCE_RETRY_MS;
+  }
+
   _shellPromptReturned(cleanText) {
     const lines = cleanText.split('\n').filter(l => l.trim());
     if (lines.length === 0) return false;
@@ -3018,95 +3023,7 @@ NEEDS_USER`,
   }
 
   _parseOpencodeJsonOutput(cleanOutput, cmd) {
-    let text = '';
-    let sessionId = null;
-    let isError = false;
-    let isPermanentError = false;
-    let lastFinishReason = null;
-    let seenToolUse = false;
-    let hasPostToolText = false;
-    const textParts = [];
-
-    for (const line of cleanOutput.split('\n')) {
-      const idx = line.indexOf('{');
-      if (idx < 0) continue;
-      try {
-        const json = JSON.parse(line.slice(idx));
-        if (json.sessionID && !sessionId) sessionId = json.sessionID;
-
-        // Track tool usage to detect planning-only responses
-        if (json.type === 'tool_call' || json.type === 'tool_use' || json.part?.type === 'tool-call' || json.part?.type === 'tool-result') {
-          seenToolUse = true;
-        }
-
-        if (json.type === 'text' && json.part?.text) {
-          textParts.push(json.part.text);
-          if (seenToolUse) hasPostToolText = true;
-        }
-
-        // Track finish reason from step_finish events
-        if (json.type === 'step_finish' || json.part?.type === 'step_finish') {
-          const reason = json.finishReason || json.part?.finishReason || json.reason || json.part?.reason;
-          if (reason) lastFinishReason = reason;
-        }
-
-        if (json.type === 'error' || json.part?.type === 'error') {
-          isError = true;
-          const errMsg = json.error?.data?.message
-            || json.error?.message
-            || (typeof json.error === 'string' ? json.error : '')
-            || json.part?.message
-            || json.message
-            || '';
-          if (errMsg) textParts.push(`\n\n**Error:** ${errMsg}`);
-          if (/model.*not found|provider.*not found|ProviderModelNotFound/i.test(errMsg)) {
-            isPermanentError = true;
-          }
-        }
-      } catch {}
-    }
-
-    // Detect ProviderModelNotFoundError in raw stderr (appears before the JSON line)
-    if (/ProviderModelNotFoundError|Model not found:/i.test(cleanOutput) && !textParts.some(p => p.includes('Error:'))) {
-      isError = true;
-      isPermanentError = true;
-      const modelMatch = cleanOutput.match(/modelID:\s*["']?([^\s"',}\n]+)/);
-      const hint = modelMatch ? ` Model "${modelMatch[1].trim()}" is not registered.` : '';
-      textParts.push(`\n\n**Error:** OpenCode could not find this Ollama model in its provider config.${hint} Restart the project container to refresh the model list, then try again.`);
-    }
-
-    text = textParts.join('');
-
-    if (!text) {
-      text = this._extractToolResponse(cleanOutput, cmd);
-    }
-
-    const isCleanStop = lastFinishReason === 'stop' || lastFinishReason === 'end-turn';
-    const isContextLimit = lastFinishReason === 'length' || lastFinishReason === 'max_tokens';
-
-    if (isContextLimit) {
-      const warning = '⚠️ Context limit reached — implementation may be incomplete. Send a follow-up to continue.';
-      text = text.trim() ? `${text}\n\n${warning}` : warning;
-      isError = true;
-      isPermanentError = true;
-    } else if (!text.trim()) {
-      // No text at all — derive a fallback from completion state
-      if (isCleanStop && sessionId && !isError) {
-        text = '✓ Done.';
-      } else {
-        text = sessionId
-          ? '⚠️ Response received but could not be parsed. OpenCode may still be processing.'
-          : '⚠️ No response received from OpenCode. Please try again.';
-      }
-    } else if (!isError) {
-      // We have text — append a status suffix when the AI didn't write a completion summary
-      if (seenToolUse && !hasPostToolText && isCleanStop) {
-        // Planning text only: AI described what it would do, ran tools, stopped without a summary
-        text += '\n\n✓ Task completed.';
-      }
-    }
-
-    return { text, sessionId, isError, isPermanentError, finishReason: lastFinishReason };
+    return parseOpencodeJsonOutput(cleanOutput, cmd, this._extractToolResponse.bind(this));
   }
 
   /**
@@ -3302,6 +3219,7 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
 
   _addProgressMessage(projectId, sessionId, content, broadcastFn, tasks = null, { transient = false } = {}) {
     // sessionId is now passed explicitly to avoid concurrency issues
+    if (shouldSuppressAgentProgress(content)) return;
 
     // Dedup: suppress identical content for the same session within 5s
     const now = Date.now();

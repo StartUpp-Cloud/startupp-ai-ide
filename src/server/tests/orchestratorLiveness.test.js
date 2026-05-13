@@ -86,6 +86,12 @@ assert.equal(
 );
 
 assert.equal(
+  shouldSuppressAgentProgress('⏳ claude is still working... (42s since last activity)'),
+  true,
+  'generic still-working progress should be suppressed when no friendly detail exists',
+);
+
+assert.equal(
   shouldSuppressAgentProgress('Reading src/server/agentOrchestrator.js'),
   false,
   'specific progress details should still be emitted',
