@@ -3,11 +3,15 @@ import { v4 as uuidv4 } from 'uuid';
 import { sqliteStore } from './sqliteStore.js';
 import { chatStore } from './chatStore.js';
 import { agentGateway } from './agentGateway.js';
-import { llmProvider } from './llmProvider.js';
 import { memoryStore } from './memoryStore.js';
 import { shouldOrchestrateRequest } from './orchestratorRouting.js';
 import { batchTasks } from './orchestratorBatching.js';
-import { ACTIVE_RUN_STALE_MS, LLM_STEP_TIMEOUT_MS } from './sessionRecovery.js';
+import { ACTIVE_RUN_STALE_MS } from './sessionRecovery.js';
+import {
+  buildRunFailureEventMessage,
+  buildRunFailureResponse,
+  buildThinFinalResponse,
+} from './orchestratorMessages.js';
 import {
   INTERRUPTED_RUN_ERROR,
   buildLivenessHeartbeatMessage,
@@ -18,7 +22,6 @@ import {
 } from './orchestratorLiveness.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
-const DEFAULT_MAX_TASKS = 6;
 const PROGRESS_DEDUP_WINDOW_MS = 5000; // Suppress identical progress within 5s
 const LIVENESS_INTERVAL_MS = 5000;
 const LIVENESS_STALE_MS = 4000;
@@ -30,7 +33,7 @@ const NON_RETRYABLE_PATTERNS = [
   /api key.*(missing|not configured|invalid)|token.*(missing|not configured|invalid)/i,
   /authentication failed|unauthorized|forbidden|login required|not logged in/i,
   /command not found|not installed|executable file not found/i,
-  /model .*not found|provider.*not found|no such model/i,
+  /model .*not found|model .*not registered|could not find.*model|provider.*not found|no such model|not registered/i,
   /container .*not found|no such container|docker.*not running/i,
   /repo(?:sitory)? .*not found|not a git repository/i,
   /rate limit|quota|too many requests|billing|insufficient credits/i,
@@ -164,13 +167,25 @@ class AgentOrchestrator extends EventEmitter {
           await this._event(run, null, 'run-cancelled', 'Autonomous run cancelled.', null, broadcastFn, 'warning');
         }
       } else {
-        await this._event(run, null, 'run-failed', `Autonomous run failed: ${err.message}`, null, broadcastFn, 'error');
+        const userMessage = buildRunFailureResponse({
+          status: run.status,
+          error: err.message,
+          tool,
+          model,
+        });
+        const eventMessage = buildRunFailureEventMessage({
+          status: run.status,
+          error: err.message,
+          tool,
+          model,
+        });
+        await this._event(run, null, 'run-failed', eventMessage, { rawError: err.message }, broadcastFn, 'error');
         const msg = chatStore.addMessage({
           projectId: run.projectId,
           sessionId: run.sessionId,
-          role: 'error',
-          content: `Autonomous run failed: ${err.message}`,
-          metadata: { orchestratorRunId: run.id },
+          role: 'agent',
+          content: userMessage,
+          metadata: { orchestratorRunId: run.id, orchestratorFailure: true, rawError: err.message },
         });
         broadcastFn({ type: 'chat-message', message: msg });
       }
@@ -379,15 +394,35 @@ class AgentOrchestrator extends EventEmitter {
       run.completedAt = nowIso();
       run.updatedAt = run.completedAt;
       this._saveRun(run);
-      await this._event(run, failed.task, run.status, `${run.status === 'blocked' ? 'Blocked' : 'Failed'}: ${run.error}`, failed.result, broadcastFn, 'error');
+      const userMessage = buildRunFailureResponse({
+        status: run.status,
+        taskTitle: failed.task.title,
+        error: run.error,
+        tool,
+        model,
+        retryable: failed.result.retryable,
+        errorType: failed.result.errorType,
+      });
+      const eventMessage = buildRunFailureEventMessage({
+        status: run.status,
+        taskTitle: failed.task.title,
+        error: run.error,
+        tool,
+        model,
+        retryable: failed.result.retryable,
+        errorType: failed.result.errorType,
+      });
+      await this._event(run, failed.task, run.status, eventMessage, { ...failed.result, rawError: run.error }, broadcastFn, 'error');
       const msg = chatStore.addMessage({
         projectId: run.projectId,
         sessionId: run.sessionId,
-        role: 'error',
-        content: `${run.status === 'blocked' ? 'Autonomous run blocked' : 'Autonomous run failed'}: ${run.error}`,
+        role: 'agent',
+        content: userMessage,
         metadata: {
           orchestratorRunId: run.id,
           orchestratorTaskId: failed.task.id,
+          orchestratorFailure: true,
+          rawError: run.error,
           ...(failed.result.changedFiles?.length > 0 ? { changedFiles: failed.result.changedFiles } : {}),
         },
       });
@@ -401,7 +436,7 @@ class AgentOrchestrator extends EventEmitter {
     run.updatedAt = nowIso();
     this._saveRun(run);
     this._emitRun(run, broadcastFn);
-    await this._event(run, null, 'synthesizing', 'Synthesizing final response from agent task results.', null, broadcastFn);
+    await this._event(run, null, 'synthesizing', 'Formatting the coding agent response.', null, broadcastFn);
 
     const finalResponse = await this._synthesizeFinal(run, completed);
     const changedFiles = this._mergeChangedFiles(completed.flatMap(({ result }) => result.changedFiles || []));
@@ -434,58 +469,12 @@ class AgentOrchestrator extends EventEmitter {
     this._deactivateRun(run.id);
   }
 
-  async _planTasks(run, { tool, model, effort, mode, executeReviewedPlan }) {
-    const fallback = [this._createTask(run, {
+  async _planTasks(run, { executeReviewedPlan } = {}) {
+    return [this._createTask(run, {
       title: executeReviewedPlan ? 'Execute approved plan' : 'Complete user request',
       prompt: this._buildTaskPrompt(run, run.goal, []),
       taskType: executeReviewedPlan ? 'implementation' : 'general',
     })];
-
-    const settings = llmProvider.getSettings();
-    if (!settings.enabled || !llmProvider.available) return fallback;
-
-    try {
-      const memory = memoryStore.buildContextForLLM(run.projectId, { query: run.goal, maxTokens: 1200 });
-      const result = await this._withTimeout(llmProvider.generateResponse(
-        `Create a safe task breakdown for an autonomous coding-agent orchestrator.
-
-The orchestrator will assign tasks to ${tool}. The orchestrator itself will not edit files.
-
-Rules:
-- Return JSON only.
-- Use 1 task for simple focused requests.
-- Use 2-6 tasks for complex requests.
-- Prefer serial implementation tasks unless tasks are clearly research-only.
-- Every task prompt must include enough context to stand alone.
-- Include a final verification task when implementation is requested.
-
-Project memory:
-${memory || '(none)'}
-
-User request:
-${run.goal.slice(0, 5000)}
-
-Return this exact shape:
-{"tasks":[{"title":"short title","type":"research|implementation|verification|review|general","prompt":"standalone prompt for coding agent","parallelSafe":false}]}`,
-        { maxTokens: 2400, temperature: 0.1, model, effort }
-      ), LLM_STEP_TIMEOUT_MS, 'Task planning timed out');
-      const match = result.response.match(/\{[\s\S]*\}/);
-      if (!match) return fallback;
-      const parsed = JSON.parse(match[0]);
-      const tasks = Array.isArray(parsed.tasks) ? parsed.tasks.slice(0, DEFAULT_MAX_TASKS) : [];
-      const normalized = tasks
-        .filter(t => t?.title && t?.prompt)
-        .map(t => this._createTask(run, {
-          title: String(t.title).slice(0, 120),
-          prompt: this._buildTaskPrompt(run, String(t.prompt), []),
-          taskType: ['research', 'implementation', 'verification', 'review', 'general'].includes(t.type) ? t.type : 'general',
-          parallelSafe: !!t.parallelSafe,
-        }));
-      return normalized.length > 0 ? normalized : fallback;
-    } catch (err) {
-      console.warn('[agentOrchestrator] Task planning failed, using fallback:', err.message);
-      return fallback;
-    }
   }
 
   _createTask(run, { title, prompt, taskType = 'general', parallelSafe = false }) {
@@ -517,7 +506,7 @@ Return this exact shape:
     const prior = priorResults.length
       ? `\n\nPrior completed task results:\n${priorResults.map((r, i) => `${i + 1}. ${r.task.title}: ${String(r.result.content || '').slice(0, 1200)}`).join('\n')}`
       : '';
-    return `You are a coding agent working under an IDE orchestrator. Complete ONLY the task below. The orchestrator will coordinate other tasks and final synthesis. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.
+    return `You are the coding agent being driven by an IDE control loop. Do the repository reasoning, edits, commands, tests, and final reporting. The IDE orchestrator will only track progress, format the response, and decide whether another push is needed. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.
 
 Original user goal:
 ${run.goal}
@@ -633,14 +622,30 @@ Report clearly what you did, files changed, commands run, verification results, 
         task.status = 'blocked';
         task.completedAt = nowIso();
         this._saveTask(task);
-        await this._event(run, task, 'task-blocked', `Blocked: ${task.error}`, lastResult, opts.broadcastFn, 'error');
+        await this._event(run, task, 'task-blocked', buildRunFailureEventMessage({
+          status: 'blocked',
+          taskTitle: task.title,
+          error: task.error,
+          tool: opts.tool,
+          model: opts.model,
+          retryable: false,
+          errorType: lastResult.errorType,
+        }), { ...lastResult, rawError: task.error }, opts.broadcastFn, 'error');
         return lastResult;
       }
 
       if (attempt < task.maxAttempts) {
         task.status = 'retrying';
         this._saveTask(task);
-        await this._event(run, task, 'task-retrying', `Retrying ${task.title}: ${task.error}`, { attempt, maxAttempts: task.maxAttempts, reason: lastResult.errorType }, opts.broadcastFn, 'warning');
+        await this._event(run, task, 'task-retrying', buildRunFailureEventMessage({
+          status: 'retrying',
+          taskTitle: task.title,
+          error: task.error,
+          tool: opts.tool,
+          model: opts.model,
+          retryable: true,
+          errorType: lastResult.errorType,
+        }), { attempt, maxAttempts: task.maxAttempts, reason: lastResult.errorType, rawError: task.error }, opts.broadcastFn, 'warning');
         await new Promise(resolve => setTimeout(resolve, this._retryDelayMs(attempt, lastResult)));
       }
     }
@@ -649,7 +654,15 @@ Report clearly what you did, files changed, commands run, verification results, 
     task.completedAt = nowIso();
     task.updatedAt = task.completedAt;
     this._saveTask(task);
-    await this._event(run, task, 'task-failed', `Failed after ${task.maxAttempts} attempts: ${task.error}`, lastResult, opts.broadcastFn, 'error');
+    await this._event(run, task, 'task-failed', buildRunFailureEventMessage({
+      status: 'failed',
+      taskTitle: task.title,
+      error: task.error,
+      tool: opts.tool,
+      model: opts.model,
+      retryable: true,
+      errorType: lastResult?.errorType,
+    }), { ...(lastResult || {}), rawError: task.error }, opts.broadcastFn, 'error');
     return { ...(lastResult || {}), success: false, retryable: true, error: task.error };
   }
 
@@ -792,46 +805,7 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
   }
 
   async _synthesizeFinal(run, completed) {
-    const summary = completed.map(({ task, result }, i) => (
-      `Task ${i + 1}: ${task.title}\nStatus: ${task.status}\nResult:\n${String(result.content || task.result || '').slice(0, 2500)}`
-    )).join('\n\n---\n\n');
-
-    const settings = llmProvider.getSettings();
-    if (!settings.enabled || !llmProvider.available) {
-      return `Autonomous run completed.\n\n${completed.map(({ task }) => `- ${task.title}: ${task.status}`).join('\n')}`;
-    }
-
-    try {
-      const result = await this._withTimeout(llmProvider.generateResponse(
-        `Write the final user-facing response for this autonomous coding run.
-
-Original user goal:
-${run.goal}
-
-Task results:
-${summary}
-
-Instructions:
-- Be concise but complete.
-- Explain what was done, verification performed, and any remaining blockers/risks.
-- Do not mention internal orchestration mechanics unless relevant.`,
-        { maxTokens: 1600, temperature: 0.1 }
-      ), LLM_STEP_TIMEOUT_MS, 'Final synthesis timed out');
-      return result.response?.trim() || `Autonomous run completed.\n\n${summary}`;
-    } catch {
-      return `Autonomous run completed.\n\n${summary}`;
-    }
-  }
-
-  _withTimeout(promise, ms, label) {
-    let timeout;
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(label)), ms);
-        timeout.unref?.();
-      }),
-    ]).finally(() => clearTimeout(timeout));
+    return buildThinFinalResponse({ run, completed });
   }
 
   _saveRun(run) {
@@ -939,7 +913,7 @@ Instructions:
       const msg = chatStore.addMessage({
         projectId: run.projectId,
         sessionId: run.sessionId,
-        role: 'error',
+        role: 'agent',
         content: error,
         metadata: { orchestratorRunId: run.id, interrupted: true, recoveryPending: true },
       });

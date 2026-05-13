@@ -12,6 +12,27 @@ function parseOpencodeJsonLine(line) {
   }
 }
 
+function safeModelName(value) {
+  const text = String(value || '').trim().replace(/^['"]|['"]$/g, '');
+  if (!text) return null;
+  if (/[\\[\]{}()*+?^$|\s]/.test(text)) return null;
+  if (!/^[A-Za-z0-9._:/-]+$/.test(text)) return null;
+  return text;
+}
+
+function extractProviderModel(cleanOutput) {
+  const raw = String(cleanOutput || '');
+  const matches = [
+    raw.match(/modelID:\s*["']([^"'\n]+)["']/i),
+    raw.match(/Model\s+["']([^"'\n]+)["']\s+(?:is\s+)?(?:not found|not registered)/i),
+  ].filter(Boolean);
+  for (const match of matches) {
+    const model = safeModelName(match[1]);
+    if (model) return model;
+  }
+  return null;
+}
+
 export function isOpencodeQuietCompletion(cleanOutput) {
   let lastEvent = null;
   let seenStepFinish = false;
@@ -91,8 +112,8 @@ export function parseOpencodeJsonOutput(cleanOutput, cmd, extractToolResponse = 
   if (/ProviderModelNotFoundError|Model not found:/i.test(cleanOutput) && !textParts.some(p => p.includes('Error:'))) {
     isError = true;
     isPermanentError = true;
-    const modelMatch = cleanOutput.match(/modelID:\s*["']?([^\s"',}\n]+)/);
-    const hint = modelMatch ? ` Model "${modelMatch[1].trim()}" is not registered.` : '';
+    const model = extractProviderModel(cleanOutput);
+    const hint = model ? ` Model "${model}" is not registered.` : '';
     textParts.push(`\n\n**Error:** OpenCode could not find this Ollama model in its provider config.${hint} Restart the project container to refresh the model list, then try again.`);
   }
 

@@ -35,7 +35,21 @@ function uniqueModels(models) {
   });
 }
 
-export default function LLMSettingsPanel({ isOpen, onClose }) {
+function normalizeOpenCodeModels(models = []) {
+  return uniqueModels(models.map((model) => {
+    const id = model.id || model.name;
+    return {
+      ...model,
+      id,
+      name: id,
+      provider: model.provider || id?.split('/')[0] || '',
+    };
+  }).filter(model => model.id));
+}
+
+export default function LLMSettingsPanel({ isOpen, onClose, project = null, projectId = null }) {
+  const effectiveProjectId = project?.id || projectId || null;
+  const projectName = project?.name || '';
   const [settings, setSettings] = useState(null);
   const [health, setHealth] = useState(null);
   const [models, setModels] = useState([]);
@@ -56,7 +70,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
       loadOllamaModels();
       loadOpenCodeModels();
     }
-  }, [isOpen]);
+  }, [isOpen, effectiveProjectId]);
 
   const loadSettings = async () => {
     try {
@@ -93,9 +107,12 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
 
   const loadOpenCodeModels = async () => {
     try {
-      const res = await fetch(`${API_BASE}/llm/opencode/models?refresh=true&fallback=false`);
+      const url = effectiveProjectId
+        ? `${API_BASE}/projects/${effectiveProjectId}/opencode-models`
+        : `${API_BASE}/llm/opencode/models?refresh=true&fallback=false`;
+      const res = await fetch(url);
       const data = await res.json();
-      setOpencodeModels(uniqueModels(data.models || []));
+      setOpencodeModels(normalizeOpenCodeModels(data.models || []));
     } catch (error) {
       console.error('Failed to load OpenCode models:', error);
       setOpencodeModels([]);
@@ -422,7 +439,11 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                       </button>
 
                       <button
-                        onClick={() => saveSettings({ provider: 'opencode' })}
+                        onClick={() => {
+                          saveSettings({ provider: 'opencode' });
+                          setActiveTab('opencode');
+                          loadOpenCodeModels();
+                        }}
                         className={`p-4 rounded-lg border text-left transition-all ${
                           settings.provider === 'opencode'
                             ? 'border-violet-500 bg-violet-500/10'
@@ -938,6 +959,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                     <h3 className="text-sm font-semibold text-violet-300 mb-1">Use OpenCode as orchestrator</h3>
                     <p className="text-[12px] text-surface-400">
                       The IDE calls your authenticated OpenCode CLI headlessly, so users can reuse providers and subscriptions already connected in OpenCode.
+                      {projectName ? ` Models are loaded from the ${projectName} project container first, then host OpenCode.` : ''}
                     </p>
                   </div>
 
@@ -954,7 +976,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                         <option value="">OpenCode default</option>
                         {opencodeModels.map((model) => (
                           <option key={model.id || model.name} value={model.id || model.name}>
-                            {model.id || model.name}
+                            {model.id || model.name}{model.source ? ` (${model.source})` : ''}
                           </option>
                         ))}
                         {settings.opencode?.model && !opencodeModels.some(m => (m.id || m.name) === settings.opencode.model) && (
@@ -971,7 +993,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                       </button>
                     </div>
                     <p className="text-xs text-surface-500 mt-1">
-                      Loaded dynamically from <code className="text-surface-400">opencode models</code>. Configure providers with <code className="text-surface-400">opencode providers</code> in a terminal.
+                      Loaded dynamically from <code className="text-surface-400">opencode models</code>{projectName ? ` in ${projectName}'s container, with host fallback` : ''}. Configure providers with <code className="text-surface-400">opencode providers</code> in a terminal.
                     </p>
                   </div>
 
@@ -996,7 +1018,7 @@ export default function LLMSettingsPanel({ isOpen, onClose }) {
                               )}
                             </div>
                             <span className="text-xs text-surface-500 ml-3">
-                              {model.provider || id?.split('/')[0]}
+                              {model.source || model.provider || id?.split('/')[0]}
                             </span>
                           </div>
                         );

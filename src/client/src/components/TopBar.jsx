@@ -217,7 +217,7 @@ export default function TopBar({
       </div>
 
       {/* Modals */}
-      <LLMSettingsPanel isOpen={showLLMSettings} onClose={() => setShowLLMSettings(false)} />
+      <LLMSettingsPanel isOpen={showLLMSettings} onClose={() => setShowLLMSettings(false)} project={selectedProject} />
       <WelcomeGuide isOpen={showGuide} onClose={() => setShowGuide(false)} />
       <SlackSetupPanel isOpen={showSlack} onClose={() => setShowSlack(false)} projects={projects || []} />
     </div>

@@ -48,6 +48,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
   // Error auto-capture state
   const [capturedError, setCapturedError] = useState(null); // { text, timestamp }
   const [terminalOutputBuffer, setTerminalOutputBuffer] = useState(''); // Recent output for context capture
+  const selectedProject = projects.find((project) => project.id === projectId) || null;
 
   // Settings panel state
   const [showLLMSettings, setShowLLMSettings] = useState(false);
@@ -1046,6 +1047,8 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         <LLMSettingsPanel
           isOpen={showLLMSettings}
           onClose={() => setShowLLMSettings(false)}
+          project={selectedProject}
+          projectId={projectId}
         />
       )}
     </div>

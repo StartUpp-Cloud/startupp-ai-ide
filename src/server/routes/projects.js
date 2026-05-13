@@ -11,8 +11,8 @@ function parseOpenCodeModels(raw, source) {
   if (!raw) return [];
   return raw
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^[a-z0-9][a-z0-9._-]*\/[\S]+$/i.test(line))
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter((name) => /^[a-z0-9][a-z0-9._-]*\/[a-zA-Z0-9][a-zA-Z0-9._:-]*$/i.test(name))
     .map((name) => ({ name, source }));
 }
 

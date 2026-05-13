@@ -50,6 +50,15 @@ const nonzeroExit = parseOpencodeJsonOutput(
 );
 assert.equal(nonzeroExit.isError, true);
 
+const missingModel = parseOpencodeJsonOutput(
+  'ProviderModelNotFoundError: Model not found: {"modelID":"\\\\s*["}',
+  'opencode run test --format json',
+);
+assert.equal(missingModel.isError, true);
+assert.equal(missingModel.isPermanentError, true);
+assert.match(missingModel.text, /could not find this Ollama model/i);
+assert.doesNotMatch(missingModel.text, /\\s\*\[/);
+
 assert.equal(isOpencodeQuietCompletion('{"type":"step-start","part":{"type":"step-start"}}'), false);
 assert.equal(isOpencodeQuietCompletion('{"type":"text","part":{"type":"text","text":"still streaming"}}'), false);
 
