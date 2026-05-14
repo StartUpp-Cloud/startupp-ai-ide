@@ -3,6 +3,7 @@ import ChatMessage from './ChatMessage';
 import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from './ChatInput';
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
+import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
 import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud } from 'lucide-react';
 import {
   CLI_TOOLS,
@@ -443,15 +444,17 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
           Shell
         </button>
         {project && (
-          <a
-            href={`/salesforce?projectId=${project.id}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors text-surface-400 hover:text-surface-200 hover:bg-surface-800"
+          <button
+            onClick={() => onChannelChange?.('salesforce')}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
+              channel === 'salesforce'
+                ? 'bg-sky-600 text-white'
+                : 'text-surface-400 hover:text-surface-200 hover:bg-surface-800'
+            }`}
           >
             <Cloud size={11} />
             Salesforce
-          </a>
+          </button>
         )}
       </div>
 
@@ -517,7 +520,9 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       )}
 
       <div className="ml-auto text-[10px] text-surface-500 truncate">
-        {channel === 'shell'
+        {channel === 'salesforce'
+          ? 'Salesforce workbench: schema, SOQL, flows, debug, REST, data'
+          : channel === 'shell'
           ? 'Interactive shell: full terminal PTY inside the project container'
           : effectiveTool === 'ollama'
           ? 'IDE orchestrator enabled: workspace scan, retrieval, stack guidance, task planning'
@@ -1584,6 +1589,8 @@ function ChatSessionContent({
           queuedCommand={queuedShellCommand}
           onQueuedCommandHandled={() => setQueuedShellCommand(null)}
         />
+      ) : chatChannel === 'salesforce' ? (
+        <SalesforceInlineWorkspace projectId={projectId} />
       ) : (
         <>
       <OrchestratorRunIndicator run={orchestratorRun} />

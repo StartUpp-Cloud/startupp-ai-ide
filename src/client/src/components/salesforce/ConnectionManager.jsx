@@ -1,333 +1,342 @@
-import { useState, useEffect } from 'react';
-import { Plug, RefreshCw, Loader, CheckCircle, XCircle, AlertTriangle, Copy, Terminal, Unplug } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Plug, RefreshCw, Loader, CheckCircle, XCircle, AlertTriangle, Copy, Unplug, Cloud, Server, Monitor } from 'lucide-react';
 
-export default function ConnectionManager({ projectId, connection, onConnectionChange }) {
-  const [tab, setTab] = useState('cli'); // 'cli' | 'token'
-  const [cliInfo, setCliInfo] = useState(null);
-  const [loading, setLoading] = useState(false);
+function StatusBadge({ ok, label, detail }) {
+  return (
+    <div className={`flex items-center gap-2 p-2.5 rounded-lg text-sm ${ok ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>
+      {ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
+      <span className="font-medium">{label}</span>
+      {detail && <span className="text-xs opacity-70 ml-auto">{detail}</span>}
+    </div>
+  );
+}
+
+function EnvironmentCard({ envType, envLabel, status, hostOrgs, onConnect, onDisconnect, onRefresh, loading, loadingEnv }) {
+  const [selectedOrg, setSelectedOrg] = useState('');
+  const isLoading = loading && loadingEnv === envType;
+
+  const isConnected = status?.connected === true;
+  const isExpired = status?.tokenExpired === true;
+
+  return (
+    <div className="bg-surface-800/60 border border-surface-700/50 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Cloud size={16} className={envType === 'sandbox' ? 'text-amber-400' : 'text-sky-400'} />
+          <h3 className="text-sm font-semibold">{envLabel}</h3>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-700 text-surface-400 font-mono">
+            {envType === 'sandbox' ? 'my-sandbox' : 'production'}
+          </span>
+        </div>
+        {isConnected && (
+          <span className="flex items-center gap-1.5 text-[11px] text-emerald-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            Connected
+          </span>
+        )}
+        {isExpired && (
+          <span className="flex items-center gap-1.5 text-[11px] text-amber-400">
+            <AlertTriangle size={11} />
+            Expired
+          </span>
+        )}
+      </div>
+
+      {isConnected ? (
+        <div>
+          <div className="grid grid-cols-2 gap-1.5 text-[12px] text-surface-300 mb-3">
+            <div><span className="text-surface-500">User:</span> {status.username}</div>
+            <div><span className="text-surface-500">Instance:</span> {status.instanceUrl?.replace('https://', '')}</div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => onRefresh(envType)}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-surface-700 hover:bg-surface-600 rounded text-xs transition-colors disabled:opacity-50"
+            >
+              {isLoading ? <Loader size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+              Refresh
+            </button>
+            <button
+              onClick={() => onDisconnect(envType)}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-300 rounded text-xs transition-colors disabled:opacity-50"
+            >
+              <Unplug size={12} /> Disconnect
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          {isExpired && (
+            <div className="mb-3 flex items-center gap-2 p-2 rounded bg-amber-500/10 text-amber-300 text-xs">
+              <AlertTriangle size={12} />
+              <span>Token expired for {status.username}.</span>
+              <button
+                onClick={() => onRefresh(envType)}
+                disabled={loading}
+                className="ml-auto underline hover:no-underline"
+              >
+                Refresh
+              </button>
+            </div>
+          )}
+          <p className="text-xs text-surface-400 mb-2">
+            Select the host org to connect as <span className="font-mono text-sky-300">{envType === 'sandbox' ? 'my-sandbox' : 'production'}</span> in the container:
+          </p>
+          <div className="flex gap-2">
+            <select
+              value={selectedOrg}
+              onChange={(e) => setSelectedOrg(e.target.value)}
+              className="flex-1 bg-surface-900 border border-surface-600 rounded px-2.5 py-1.5 text-xs text-surface-200"
+            >
+              <option value="">Select an org...</option>
+              {hostOrgs.map((org) => (
+                <option key={org.username} value={org.username}>
+                  {org.alias ? `${org.alias} (${org.username})` : org.username} -- {org.orgType}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => { onConnect(envType, selectedOrg); setSelectedOrg(''); }}
+              disabled={!selectedOrg || loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 disabled:bg-surface-700 disabled:text-surface-500 text-white rounded text-xs font-medium transition-colors"
+            >
+              {isLoading ? <Loader size={12} className="animate-spin" /> : <Plug size={12} />}
+              Connect
+            </button>
+          </div>
+          {hostOrgs.length === 0 && (
+            <p className="text-[11px] text-surface-500 mt-2">No orgs found on host. Authenticate first (see above), then refresh.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function ConnectionManager({ projectId, onConnectionChange }) {
+  const [setup, setSetup] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [loadingEnv, setLoadingEnv] = useState(null);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  // Token form
-  const [accessToken, setAccessToken] = useState('');
-  const [instanceUrl, setInstanceUrl] = useState('');
-  const [apiVersion, setApiVersion] = useState('v62.0');
-
-  // CLI form
-  const [selectedOrg, setSelectedOrg] = useState('');
-
-  useEffect(() => {
-    checkCli();
-  }, []);
-
-  const checkCli = async () => {
+  const fetchSetupStatus = useCallback(async () => {
+    if (!projectId) return;
     try {
-      const res = await fetch('/api/salesforce/connection/cli-check');
+      const res = await fetch(`/api/salesforce/connection/setup-status?projectId=${projectId}`);
       const data = await res.json();
-      if (data.ok) setCliInfo(data.data);
+      if (data.ok) setSetup(data.data);
     } catch { /* ignore */ }
-  };
-
-  const connectWithCli = async () => {
-    if (!selectedOrg) return;
-    setLoading(true);
-    setError(null);
-    setSuccess(null);
-    try {
-      const res = await fetch('/api/salesforce/connection/cli', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId, usernameOrAlias: selectedOrg }),
-      });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error?.message || 'Connection failed');
-      setSuccess(`Connected as ${data.data.username}`);
-      onConnectionChange?.();
-    } catch (err) {
-      setError(err.message);
-    }
     setLoading(false);
-  };
+  }, [projectId]);
 
-  const connectWithToken = async () => {
-    if (!accessToken || !instanceUrl) return;
-    setLoading(true);
-    setError(null);
-    setSuccess(null);
-    try {
-      const res = await fetch('/api/salesforce/connection/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId, accessToken, instanceUrl, apiVersion }),
-      });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error?.message || 'Connection failed');
-      setSuccess(`Connected as ${data.data.username}`);
-      setAccessToken('');
-      onConnectionChange?.();
-    } catch (err) {
-      setError(err.message);
-    }
-    setLoading(false);
-  };
-
-  const refreshConnection = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/salesforce/connection/refresh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId }),
-      });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error?.message || 'Refresh failed');
-      setSuccess('Connection refreshed');
-      onConnectionChange?.();
-    } catch (err) {
-      setError(err.message);
-    }
-    setLoading(false);
-  };
-
-  const disconnect = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/salesforce/connection/disconnect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId }),
-      });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error?.message || 'Disconnect failed');
-      setSuccess('Disconnected');
-      onConnectionChange?.();
-    } catch (err) {
-      setError(err.message);
-    }
-    setLoading(false);
-  };
+  useEffect(() => { fetchSetupStatus(); }, [fetchSetupStatus]);
 
   const copyCommand = (cmd) => {
     navigator.clipboard.writeText(cmd);
   };
 
-  const isConnected = connection?.connected === true;
+  const connectEnv = async (envType, hostUsernameOrAlias) => {
+    if (!hostUsernameOrAlias) return;
+    setActionLoading(true);
+    setLoadingEnv(envType);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch('/api/salesforce/connection/connect-env', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId, envType, hostUsernameOrAlias }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error?.message || 'Connection failed');
+      setSuccess(`${envType === 'sandbox' ? 'Sandbox' : 'Production'} connected as ${data.data.username}`);
+      await fetchSetupStatus();
+      onConnectionChange?.();
+    } catch (err) {
+      setError(err.message);
+    }
+    setActionLoading(false);
+    setLoadingEnv(null);
+  };
+
+  const disconnectEnv = async (envType) => {
+    setActionLoading(true);
+    setLoadingEnv(envType);
+    setError(null);
+    try {
+      const res = await fetch('/api/salesforce/connection/disconnect-env', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId, envType }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error?.message || 'Disconnect failed');
+      setSuccess(`${envType === 'sandbox' ? 'Sandbox' : 'Production'} disconnected`);
+      await fetchSetupStatus();
+      onConnectionChange?.();
+    } catch (err) {
+      setError(err.message);
+    }
+    setActionLoading(false);
+    setLoadingEnv(null);
+  };
+
+  const refreshEnv = async (envType) => {
+    setActionLoading(true);
+    setLoadingEnv(envType);
+    setError(null);
+    try {
+      const res = await fetch('/api/salesforce/connection/refresh-env', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId, envType }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error?.message || 'Refresh failed');
+      setSuccess(`${envType === 'sandbox' ? 'Sandbox' : 'Production'} token refreshed`);
+      await fetchSetupStatus();
+      onConnectionChange?.();
+    } catch (err) {
+      setError(err.message);
+    }
+    setActionLoading(false);
+    setLoadingEnv(null);
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader size={20} className="animate-spin text-surface-500" />
+      </div>
+    );
+  }
+
+  const hostCliOk = setup?.hostCli?.available === true;
+  const containerCliOk = setup?.containerCli?.available === true;
+  const hasContainer = setup?.hasContainer === true;
 
   return (
-    <div className="p-6 max-w-3xl mx-auto">
-      <div className="flex items-center gap-3 mb-6">
-        <Plug size={24} className="text-sky-400" />
-        <h2 className="text-xl font-semibold">Connection Manager</h2>
+    <div className="p-4 max-w-2xl mx-auto space-y-5">
+      {/* Header */}
+      <div className="flex items-center gap-2">
+        <Plug size={18} className="text-sky-400" />
+        <h2 className="text-base font-semibold">Salesforce Setup</h2>
+        <button
+          onClick={() => { setLoading(true); fetchSetupStatus(); }}
+          className="ml-auto flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300"
+        >
+          <RefreshCw size={11} /> Refresh
+        </button>
       </div>
 
-      {/* Current connection status */}
-      {isConnected && (
-        <div className="mb-6 bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <CheckCircle size={16} className="text-emerald-400" />
-            <span className="font-medium text-emerald-300">Connected</span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-sm text-surface-300 mb-3">
-            <div><span className="text-surface-500">Username:</span> {connection.connection?.username}</div>
-            <div><span className="text-surface-500">Instance:</span> {connection.connection?.instanceUrl?.replace('https://', '')}</div>
-            <div><span className="text-surface-500">API Version:</span> {connection.connection?.apiVersion}</div>
-            <div><span className="text-surface-500">Connected:</span> {connection.connection?.connectedAt ? new Date(connection.connection.connectedAt).toLocaleDateString() : 'N/A'}</div>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={refreshConnection} disabled={loading} className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-700 hover:bg-surface-600 rounded text-sm transition-colors">
-              <RefreshCw size={14} /> Refresh Token
-            </button>
-            <button onClick={disconnect} disabled={loading} className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded text-sm transition-colors">
-              <Unplug size={14} /> Disconnect
-            </button>
-          </div>
-        </div>
-      )}
-
-      {connection?.tokenExpired && (
-        <div className="mb-6 bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <AlertTriangle size={16} className="text-amber-400" />
-            <span className="font-medium text-amber-300">Token Expired</span>
-          </div>
-          <p className="text-sm text-surface-400 mb-3">Your session has expired. Refresh the token using the CLI or enter a new token.</p>
-          <button onClick={refreshConnection} disabled={loading} className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded text-sm">
-            <RefreshCw size={14} /> Refresh from CLI
-          </button>
-        </div>
-      )}
-
-      {/* Connection methods */}
-      {!isConnected && (
-        <>
-          <div className="flex gap-1 mb-4 bg-surface-800 rounded-lg p-1">
-            <button
-              onClick={() => setTab('cli')}
-              className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${tab === 'cli' ? 'bg-sky-500/20 text-sky-300' : 'text-surface-400 hover:text-surface-200'}`}
-            >
-              Connect via CLI
-            </button>
-            <button
-              onClick={() => setTab('token')}
-              className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${tab === 'token' ? 'bg-sky-500/20 text-sky-300' : 'text-surface-400 hover:text-surface-200'}`}
-            >
-              Paste Token
-            </button>
-          </div>
-
-          {tab === 'cli' && (
-            <div className="space-y-4">
-              {/* CLI status */}
-              <div className={`flex items-center gap-2 p-3 rounded-lg text-sm ${cliInfo?.cli?.available ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>
-                {cliInfo?.cli?.available ? <CheckCircle size={14} /> : <XCircle size={14} />}
-                {cliInfo?.cli?.available ? `Salesforce CLI found: ${cliInfo.cli.version}` : 'Salesforce CLI not found on host'}
-              </div>
-
-              {!cliInfo?.cli?.available && (
-                <div className="bg-surface-800 rounded-lg p-4 space-y-3">
-                  <h3 className="text-sm font-medium text-surface-200">Install Salesforce CLI</h3>
-                  <p className="text-sm text-surface-400">Run this command on your machine (not in the container):</p>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 bg-surface-900 px-3 py-2 rounded text-sm text-sky-300 font-mono">npm install -g @salesforce/cli</code>
-                    <button onClick={() => copyCommand('npm install -g @salesforce/cli')} className="p-2 hover:bg-surface-700 rounded" title="Copy">
-                      <Copy size={14} className="text-surface-400" />
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {cliInfo?.cli?.available && (
-                <>
-                  {/* Step 1: Authenticate */}
-                  <div className="bg-surface-800 rounded-lg p-4 space-y-3">
-                    <h3 className="text-sm font-medium text-surface-200">Step 1: Authenticate an org</h3>
-                    <p className="text-sm text-surface-400">Run this on your machine to open the Salesforce login page:</p>
-                    <div className="flex items-center gap-2">
-                      <code className="flex-1 bg-surface-900 px-3 py-2 rounded text-sm text-sky-300 font-mono">sf org login web --alias myorg</code>
-                      <button onClick={() => copyCommand('sf org login web --alias myorg')} className="p-2 hover:bg-surface-700 rounded">
-                        <Copy size={14} className="text-surface-400" />
-                      </button>
-                    </div>
-                    <p className="text-xs text-surface-500">For sandbox: add --instance-url https://test.salesforce.com</p>
-                  </div>
-
-                  {/* Step 2: Select org */}
-                  <div className="bg-surface-800 rounded-lg p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-sm font-medium text-surface-200">Step 2: Select authenticated org</h3>
-                      <button onClick={checkCli} className="text-xs text-sky-400 hover:text-sky-300 flex items-center gap-1">
-                        <RefreshCw size={12} /> Refresh
-                      </button>
-                    </div>
-
-                    {cliInfo?.orgs?.length > 0 ? (
-                      <>
-                        <select
-                          value={selectedOrg}
-                          onChange={(e) => setSelectedOrg(e.target.value)}
-                          className="w-full bg-surface-900 border border-surface-600 rounded-lg px-3 py-2 text-sm text-surface-200"
-                        >
-                          <option value="">Select an org...</option>
-                          {cliInfo.orgs.map((org) => (
-                            <option key={org.username} value={org.username}>
-                              {org.alias ? `${org.alias} (${org.username})` : org.username} — {org.orgType}
-                              {org.isDefault ? ' [default]' : ''}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          onClick={connectWithCli}
-                          disabled={!selectedOrg || loading}
-                          className="w-full py-2 bg-sky-600 hover:bg-sky-500 disabled:bg-surface-700 disabled:text-surface-500 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
-                        >
-                          {loading ? <Loader size={14} className="animate-spin" /> : <Plug size={14} />}
-                          Connect
-                        </button>
-                      </>
-                    ) : (
-                      <p className="text-sm text-surface-500">No authenticated orgs found. Complete Step 1 first, then click Refresh.</p>
-                    )}
-                  </div>
-                </>
-              )}
+      {/* Prerequisites checklist */}
+      <div className="space-y-2">
+        <h3 className="text-xs font-medium text-surface-400 uppercase tracking-wide">Prerequisites</h3>
+        <StatusBadge
+          ok={hostCliOk}
+          label="Salesforce CLI on host"
+          detail={hostCliOk ? setup.hostCli.version?.split('\n')[0] : null}
+        />
+        {!hostCliOk && (
+          <div className="ml-6 bg-surface-800 rounded-lg p-3 space-y-2">
+            <p className="text-xs text-surface-400">Install on your machine (not in the container):</p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 bg-surface-900 px-2.5 py-1.5 rounded text-xs text-sky-300 font-mono">npm install -g @salesforce/cli</code>
+              <button onClick={() => copyCommand('npm install -g @salesforce/cli')} className="p-1.5 hover:bg-surface-700 rounded" title="Copy">
+                <Copy size={12} className="text-surface-400" />
+              </button>
             </div>
-          )}
+          </div>
+        )}
 
-          {tab === 'token' && (
-            <div className="space-y-4">
-              <div className="bg-surface-800 rounded-lg p-4 space-y-3">
-                <h3 className="text-sm font-medium text-surface-200">Manual Token Connection</h3>
-                <p className="text-sm text-surface-400">
-                  Get your access token from Salesforce Setup &gt; Session Settings, or from your Connected App.
-                </p>
+        <StatusBadge ok={hasContainer} label="Project container" detail={hasContainer ? 'Running' : 'No container'} />
+      </div>
 
-                <div>
-                  <label className="block text-xs text-surface-400 mb-1">Instance URL</label>
-                  <input
-                    type="url"
-                    value={instanceUrl}
-                    onChange={(e) => setInstanceUrl(e.target.value)}
-                    placeholder="https://myorg.my.salesforce.com"
-                    className="w-full bg-surface-900 border border-surface-600 rounded-lg px-3 py-2 text-sm text-surface-200 placeholder-surface-600"
-                  />
+      {/* Auth instructions */}
+      {hostCliOk && (
+        <div className="space-y-2">
+          <h3 className="text-xs font-medium text-surface-400 uppercase tracking-wide">Authenticate Orgs on Host</h3>
+          <div className="bg-surface-800 rounded-lg p-3 space-y-2.5">
+            <p className="text-xs text-surface-400">
+              Run these on your machine to authenticate. The connection will be transferred to the container automatically.
+            </p>
+            <div className="space-y-2">
+              <div>
+                <label className="text-[10px] text-surface-500 uppercase tracking-wide">Production</label>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <code className="flex-1 bg-surface-900 px-2.5 py-1.5 rounded text-xs text-sky-300 font-mono">sf org login web</code>
+                  <button onClick={() => copyCommand('sf org login web')} className="p-1.5 hover:bg-surface-700 rounded">
+                    <Copy size={12} className="text-surface-400" />
+                  </button>
                 </div>
-
-                <div>
-                  <label className="block text-xs text-surface-400 mb-1">Access Token</label>
-                  <input
-                    type="password"
-                    value={accessToken}
-                    onChange={(e) => setAccessToken(e.target.value)}
-                    placeholder="00D..."
-                    className="w-full bg-surface-900 border border-surface-600 rounded-lg px-3 py-2 text-sm text-surface-200 placeholder-surface-600"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs text-surface-400 mb-1">API Version</label>
-                  <input
-                    type="text"
-                    value={apiVersion}
-                    onChange={(e) => setApiVersion(e.target.value)}
-                    placeholder="v62.0"
-                    className="w-full bg-surface-900 border border-surface-600 rounded-lg px-3 py-2 text-sm text-surface-200 placeholder-surface-600"
-                  />
-                </div>
-
-                <button
-                  onClick={connectWithToken}
-                  disabled={!accessToken || !instanceUrl || loading}
-                  className="w-full py-2 bg-sky-600 hover:bg-sky-500 disabled:bg-surface-700 disabled:text-surface-500 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
-                >
-                  {loading ? <Loader size={14} className="animate-spin" /> : <Plug size={14} />}
-                  Connect
-                </button>
               </div>
-
-              <div className="bg-surface-800/50 rounded-lg p-4">
-                <h4 className="text-xs font-medium text-surface-400 mb-2 flex items-center gap-1"><Terminal size={12} /> Quick way to get a token</h4>
-                <div className="space-y-2 text-xs text-surface-500">
-                  <p>1. Authenticate via CLI: <code className="text-sky-400">sf org login web</code></p>
-                  <p>2. Get the token: <code className="text-sky-400">sf org display --json</code></p>
-                  <p>3. Copy <code className="text-sky-400">accessToken</code> and <code className="text-sky-400">instanceUrl</code> from the output</p>
+              <div>
+                <label className="text-[10px] text-surface-500 uppercase tracking-wide">Sandbox</label>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <code className="flex-1 bg-surface-900 px-2.5 py-1.5 rounded text-xs text-sky-300 font-mono">sf org login web --instance-url https://test.salesforce.com</code>
+                  <button onClick={() => copyCommand('sf org login web --instance-url https://test.salesforce.com')} className="p-1.5 hover:bg-surface-700 rounded">
+                    <Copy size={12} className="text-surface-400" />
+                  </button>
                 </div>
               </div>
             </div>
+            <p className="text-[10px] text-surface-500">
+              After authenticating, click Refresh above to see your orgs.
+            </p>
+          </div>
+
+          {/* Host orgs summary */}
+          {setup?.hostOrgs?.length > 0 && (
+            <div className="flex items-center gap-2 p-2 rounded-lg bg-surface-800/50 text-xs text-surface-400">
+              <Monitor size={12} />
+              <span>{setup.hostOrgs.length} org{setup.hostOrgs.length !== 1 ? 's' : ''} authenticated on host</span>
+            </div>
           )}
-        </>
+        </div>
+      )}
+
+      {/* Environment connections */}
+      {hostCliOk && hasContainer && (
+        <div className="space-y-2">
+          <h3 className="text-xs font-medium text-surface-400 uppercase tracking-wide">Environments</h3>
+          <EnvironmentCard
+            envType="sandbox"
+            envLabel="Sandbox"
+            status={setup?.environments?.sandbox}
+            hostOrgs={setup?.hostOrgs || []}
+            onConnect={connectEnv}
+            onDisconnect={disconnectEnv}
+            onRefresh={refreshEnv}
+            loading={actionLoading}
+            loadingEnv={loadingEnv}
+          />
+          <EnvironmentCard
+            envType="production"
+            envLabel="Production"
+            status={setup?.environments?.production}
+            hostOrgs={setup?.hostOrgs || []}
+            onConnect={connectEnv}
+            onDisconnect={disconnectEnv}
+            onRefresh={refreshEnv}
+            loading={actionLoading}
+            loadingEnv={loadingEnv}
+          />
+        </div>
       )}
 
       {/* Messages */}
       {error && (
-        <div className="mt-4 bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-center gap-2 text-sm text-red-300">
-          <XCircle size={14} /> {error}
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-2.5 flex items-center gap-2 text-xs text-red-300">
+          <XCircle size={13} /> {error}
         </div>
       )}
       {success && (
-        <div className="mt-4 bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-center gap-2 text-sm text-emerald-300">
-          <CheckCircle size={14} /> {success}
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-2.5 flex items-center gap-2 text-xs text-emerald-300">
+          <CheckCircle size={13} /> {success}
         </div>
       )}
     </div>

@@ -18,6 +18,10 @@ import {
   getProjectConnection,
   checkHostCli,
   listHostOrgs,
+  getSetupStatus,
+  connectEnvironment,
+  disconnectEnvironment,
+  refreshEnvironment,
 } from '../salesforce/salesforceAuthService.js';
 import {
   listSObjects,
@@ -130,6 +134,57 @@ router.get('/connection/cli-check', async (req, res) => {
     const cli = checkHostCli();
     const orgs = cli.available ? listHostOrgs() : [];
     res.json({ ok: true, data: { cli, orgs } });
+  } catch (error) {
+    salesforceErrorResponse(res, error);
+  }
+});
+
+// ─── Environment-based Connection (host → container flow) ───────────────────
+
+router.get('/connection/setup-status', async (req, res) => {
+  try {
+    const projectId = requireProjectId(req);
+    const status = await getSetupStatus(projectId);
+    res.json({ ok: true, data: status });
+  } catch (error) {
+    salesforceErrorResponse(res, error);
+  }
+});
+
+router.post('/connection/connect-env', async (req, res) => {
+  try {
+    const { projectId, envType, hostUsernameOrAlias } = req.body;
+    if (!projectId || !envType || !hostUsernameOrAlias) {
+      return res.status(400).json({ ok: false, error: { code: 'MISSING_PARAMS', message: 'projectId, envType, and hostUsernameOrAlias are required' } });
+    }
+    const result = await connectEnvironment(projectId, envType, hostUsernameOrAlias);
+    res.json({ ok: true, data: result });
+  } catch (error) {
+    salesforceErrorResponse(res, error);
+  }
+});
+
+router.post('/connection/disconnect-env', async (req, res) => {
+  try {
+    const { projectId, envType } = req.body;
+    if (!projectId || !envType) {
+      return res.status(400).json({ ok: false, error: { code: 'MISSING_PARAMS', message: 'projectId and envType are required' } });
+    }
+    const result = await disconnectEnvironment(projectId, envType);
+    res.json({ ok: true, data: result });
+  } catch (error) {
+    salesforceErrorResponse(res, error);
+  }
+});
+
+router.post('/connection/refresh-env', async (req, res) => {
+  try {
+    const { projectId, envType } = req.body;
+    if (!projectId || !envType) {
+      return res.status(400).json({ ok: false, error: { code: 'MISSING_PARAMS', message: 'projectId and envType are required' } });
+    }
+    const result = await refreshEnvironment(projectId, envType);
+    res.json({ ok: true, data: result });
   } catch (error) {
     salesforceErrorResponse(res, error);
   }

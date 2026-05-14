@@ -174,6 +174,235 @@ export async function disconnectProject(projectId) {
   return { disconnected: true };
 }
 
+/**
+ * Get the SFDX auth URL from a host-authenticated org.
+ * Runs: sf org display --target-org <usernameOrAlias> --verbose --json
+ * The --verbose flag includes sfdxAuthUrl in the output.
+ */
+export function getOrgSfdxAuthUrl(usernameOrAlias) {
+  const output = runHostCommand(
+    `sf org display --target-org ${JSON.stringify(usernameOrAlias)} --verbose --json 2>/dev/null`,
+    { timeout: 20000 }
+  );
+  if (!output) throw new SalesforceApiError('CLI_ORG_DISPLAY_FAILED', 'Could not retrieve org details from CLI. Ensure the org is authenticated on the host.', 502);
+
+  try {
+    const parsed = JSON.parse(output);
+    const result = parsed?.result || parsed;
+    if (!result.sfdxAuthUrl) {
+      throw new SalesforceApiError('AUTH_URL_MISSING', 'CLI returned org info but no sfdxAuthUrl. Re-authenticate with: sf org login web', 401);
+    }
+    return {
+      sfdxAuthUrl: result.sfdxAuthUrl,
+      accessToken: result.accessToken,
+      instanceUrl: result.instanceUrl?.replace(/\/+$/, ''),
+      username: result.username,
+      orgId: result.id || result.orgId,
+      alias: result.alias || null,
+      apiVersion: result.apiVersion || null,
+    };
+  } catch (error) {
+    if (error instanceof SalesforceApiError) throw error;
+    throw new SalesforceApiError('CLI_PARSE_ERROR', 'Failed to parse CLI output', 502);
+  }
+}
+
+/**
+ * Connect a Salesforce environment for a project.
+ * 1. Gets SFDX auth URL from host CLI
+ * 2. Imports it into the project container with the appropriate alias
+ * 3. Stores connection metadata in the project model
+ *
+ * @param {string} projectId
+ * @param {string} envType - 'sandbox' or 'production'
+ * @param {string} hostUsernameOrAlias - the org username/alias on the host CLI
+ */
+export async function connectEnvironment(projectId, envType, hostUsernameOrAlias) {
+  if (!['sandbox', 'production'].includes(envType)) {
+    throw new SalesforceApiError('INVALID_ENV_TYPE', 'envType must be "sandbox" or "production"', 400);
+  }
+
+  const containerAlias = envType === 'sandbox' ? 'my-sandbox' : 'production';
+
+  // 1. Get auth URL and token from host
+  const orgInfo = getOrgSfdxAuthUrl(hostUsernameOrAlias);
+
+  // 2. Validate the token with a REST API call
+  const resolvedApiVersion = orgInfo.apiVersion ? `v${orgInfo.apiVersion}` : 'v62.0';
+  await testConnection(orgInfo.instanceUrl, orgInfo.accessToken, resolvedApiVersion);
+
+  // 3. Import auth URL into container
+  const project = Project.findById(projectId);
+  if (!project) throw new SalesforceApiError('PROJECT_NOT_FOUND', 'Project not found', 404);
+  if (!project.containerName) throw new SalesforceApiError('NO_CONTAINER', 'Project has no container', 400);
+
+  // Use importSalesforceAuthUrl from command service
+  const { importSalesforceAuthUrl } = await import('./salesforceCommandService.js');
+  const { resolveSalesforceContext } = await import('./salesforceContextResolver.js');
+
+  const context = await resolveSalesforceContext({ projectId });
+  await importSalesforceAuthUrl(context, {
+    authUrl: orgInfo.sfdxAuthUrl,
+    alias: containerAlias,
+    setDefault: envType === 'production',
+  });
+
+  // 4. Store connection metadata in project model
+  const existingEnvs = project.salesforce?.environments || {};
+  const envData = {
+    connected: true,
+    username: orgInfo.username,
+    instanceUrl: orgInfo.instanceUrl,
+    orgId: orgInfo.orgId,
+    apiVersion: resolvedApiVersion,
+    connectedAt: new Date().toISOString(),
+    alias: containerAlias,
+    accessToken: encrypt(orgInfo.accessToken),
+  };
+
+  await Project.update(projectId, {
+    stack: 'salesforce',
+    salesforce: {
+      ...(project.salesforce || {}),
+      environments: {
+        ...existingEnvs,
+        [envType]: envData,
+      },
+      // Keep legacy connection field pointing to the most recently connected env
+      connection: {
+        accessToken: encrypt(orgInfo.accessToken),
+        instanceUrl: orgInfo.instanceUrl,
+        apiVersion: resolvedApiVersion,
+        username: orgInfo.username,
+        orgId: orgInfo.orgId,
+        connectedAt: new Date().toISOString(),
+      },
+    },
+  });
+
+  logSalesforceAudit({
+    projectId,
+    operation: `auth.connect.${envType}`,
+    riskLevel: 'auth_write',
+    status: 'succeeded',
+  });
+
+  return {
+    envType,
+    alias: containerAlias,
+    username: orgInfo.username,
+    instanceUrl: orgInfo.instanceUrl,
+    orgId: orgInfo.orgId,
+    apiVersion: resolvedApiVersion,
+  };
+}
+
+/**
+ * Get comprehensive setup status for a project's Salesforce environments.
+ */
+export async function getSetupStatus(projectId) {
+  const hostCli = checkHostCli();
+  const hostOrgs = hostCli.available ? listHostOrgs() : [];
+
+  const project = Project.findById(projectId);
+  if (!project) throw new SalesforceApiError('PROJECT_NOT_FOUND', 'Project not found', 404);
+
+  const environments = project.salesforce?.environments || {};
+
+  // Check container CLI if container exists and is running
+  let containerCli = { available: false, version: null };
+  if (project.containerName) {
+    try {
+      const { resolveSalesforceContext } = await import('./salesforceContextResolver.js');
+      const { checkSalesforceCli } = await import('./salesforceCommandService.js');
+      const context = await resolveSalesforceContext({ projectId });
+      containerCli = await checkSalesforceCli(context);
+    } catch {
+      // Container not running or not found
+    }
+  }
+
+  // For each environment, check if token is still valid
+  const envStatus = {};
+  for (const envType of ['sandbox', 'production']) {
+    const env = environments[envType];
+    if (!env?.connected || !env?.accessToken) {
+      envStatus[envType] = { connected: false };
+      continue;
+    }
+
+    try {
+      const token = decrypt(env.accessToken);
+      await testConnection(env.instanceUrl, token, env.apiVersion || 'v62.0');
+      envStatus[envType] = {
+        connected: true,
+        username: env.username,
+        instanceUrl: env.instanceUrl,
+        orgId: env.orgId,
+        apiVersion: env.apiVersion,
+        connectedAt: env.connectedAt,
+        alias: env.alias,
+      };
+    } catch {
+      envStatus[envType] = {
+        connected: false,
+        tokenExpired: true,
+        username: env.username,
+        instanceUrl: env.instanceUrl,
+      };
+    }
+  }
+
+  return {
+    hostCli,
+    hostOrgs,
+    containerCli,
+    hasContainer: !!project.containerName,
+    environments: envStatus,
+  };
+}
+
+export async function disconnectEnvironment(projectId, envType) {
+  if (!['sandbox', 'production'].includes(envType)) {
+    throw new SalesforceApiError('INVALID_ENV_TYPE', 'envType must be "sandbox" or "production"', 400);
+  }
+
+  const project = Project.findById(projectId);
+  if (!project) throw new SalesforceApiError('PROJECT_NOT_FOUND', 'Project not found', 404);
+
+  const existingEnvs = project.salesforce?.environments || {};
+  existingEnvs[envType] = { connected: false };
+
+  await Project.update(projectId, {
+    salesforce: {
+      ...(project.salesforce || {}),
+      environments: existingEnvs,
+    },
+  });
+
+  logSalesforceAudit({
+    projectId,
+    operation: `auth.disconnect.${envType}`,
+    riskLevel: 'auth_write',
+    status: 'succeeded',
+  });
+
+  return { disconnected: true, envType };
+}
+
+export async function refreshEnvironment(projectId, envType) {
+  const project = Project.findById(projectId);
+  if (!project) throw new SalesforceApiError('PROJECT_NOT_FOUND', 'Project not found', 404);
+
+  const env = project.salesforce?.environments?.[envType];
+  if (!env?.username) {
+    throw new SalesforceApiError('NO_CONNECTION', `No ${envType} connection found. Connect first.`, 400);
+  }
+
+  // Re-run the full connect flow using the stored username
+  return connectEnvironment(projectId, envType, env.username);
+}
+
 export async function getConnectionStatus(projectId) {
   const cli = checkHostCli();
   const conn = getProjectConnection(projectId);
