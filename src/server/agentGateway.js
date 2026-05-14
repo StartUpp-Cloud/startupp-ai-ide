@@ -1388,6 +1388,9 @@ RULES:
         this._setCliState(chatSessionId, tool, newState);
         this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId);
       }
+      if (parsed.isIncomplete) {
+        return { success: false, retry: true, retryReason: 'Claude stopped before a final answer', retryType: 'incomplete-output', displayOutput, cleanOutput };
+      }
       if (parsed.requiresUserInput) {
         return {
           success: false,
@@ -2929,6 +2932,7 @@ NEEDS_USER`,
     let hasJsonError = false;
     let hasResultText = false;
     const userQuestions = [];
+    let stopReason = null;
 
     // Strategy 1a: Claude format — {"type":"result", "session_id":"...", "result":"..."}
     const jsonMatch = cleanOutput.match(/\{"type"\s*:\s*"result"[^]*?"session_id"\s*:\s*"([^"]+)"[^]*?"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
@@ -2957,6 +2961,7 @@ NEEDS_USER`,
             const json = JSON.parse(line.slice(idx));
             // Claude format: session_id / result fields at top level
             if (json.session_id) sessionId = json.session_id;
+            if (json.type === 'result' && json.stop_reason) stopReason = json.stop_reason;
             if (json.result) {
               text = json.result;
               hasResultText = true;
@@ -3010,6 +3015,10 @@ NEEDS_USER`,
       const genericWaiting = /waiting for your answers?|need(?:s)? your (?:answers?|input)|before proceeding/i.test(text || '')
         && !/\?/.test(text || '');
       text = !text || genericWaiting ? userQuestionText : `${text.trim()}\n\n${userQuestionText}`;
+    }
+    const incompleteToolUseResult = stopReason === 'tool_use' && !text;
+    if (incompleteToolUseResult) {
+      text = 'Claude stopped at a tool-use turn before returning a final answer. Retrying with the preserved Claude session.';
     }
     if (!text) {
       text = this._extractToolResponse(cleanOutput, cmd);
@@ -3105,7 +3114,7 @@ NEEDS_USER`,
       }
     }
 
-    return { text, sessionId, isError, errorType, requiresUserInput: !!userQuestionText };
+    return { text, sessionId, isError, errorType, requiresUserInput: !!userQuestionText, isIncomplete: incompleteToolUseResult };
   }
 
   /**

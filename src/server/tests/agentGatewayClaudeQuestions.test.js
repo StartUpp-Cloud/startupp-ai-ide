@@ -45,4 +45,14 @@ assert.match(parsed.text, /Root docs\/.*cross-project docs/);
 assert.match(parsed.text, /Confirm these folders should be deleted/);
 assert.doesNotMatch(parsed.text, /^Waiting for your answers/i);
 
+const toolUseOnly = agentGateway._parseJsonToolOutput([
+  JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-session-2' }),
+  JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'I need to inspect files.' }] }, session_id: 'claude-session-2' }),
+  JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '', stop_reason: 'tool_use', session_id: 'claude-session-2' }),
+].join('\n'), 'claude -p test');
+
+assert.equal(toolUseOnly.sessionId, 'claude-session-2');
+assert.equal(toolUseOnly.isIncomplete, true);
+assert.match(toolUseOnly.text, /tool-use turn before returning a final answer/i);
+
 console.log('agentGatewayClaudeQuestions tests passed');
