@@ -1,12 +1,17 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 import { v4 as uuidv4 } from "uuid";
 import db, { getDB } from "./db.js";
 import { findProjectById, updateProject } from "./models/Project.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/** Path to folder-based skills data directory */
+const SKILLS_DATA_DIR = path.join(__dirname, "../../data/skills");
 
 /**
  * Convert a GitHub blob/tree URL to raw.githubusercontent.com URL
@@ -163,6 +168,7 @@ const VALID_CATEGORIES = [
   "security",
   "devops",
   "general",
+  "frontend",
 ];
 
 /**
@@ -247,14 +253,35 @@ function validateSkill(data) {
   return errors;
 }
 
+/**
+ * Recursively collect all .md files from a directory.
+ */
+function collectMdFiles(dir) {
+  const results = [];
+  if (!fs.existsSync(dir)) return results;
+
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...collectMdFiles(fullPath));
+    } else if (entry.isFile() && entry.name.endsWith(".md")) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
 class SkillManager {
   constructor() {
-    this.builtInSkills = new Map(); // id -> skill
-    this.installedSkills = new Map(); // id -> skill
+    this.builtInSkills = new Map(); // id -> skill (legacy JSON built-ins)
+    this.installedSkills = new Map(); // id -> skill (legacy JSON installed)
+    this.folderSkills = new Map(); // id -> skill (folder-based skills)
   }
 
   /**
-   * Initialize -- load built-in skills from disk and installed skills from DB.
+   * Initialize -- load built-in skills from disk, installed skills from DB,
+   * and folder-based skills from data/skills/.
    */
   async init() {
     // Load .json files from src/server/skills/
@@ -280,17 +307,117 @@ class SkillManager {
     const database = getDB();
     if (!database.data.skills) database.data.skills = [];
     for (const skill of database.data.skills) {
-      this.installedSkills.set(skill.id, { ...skill, builtIn: false });
+      if (skill.format === "folder") {
+        // Folder-based skills stored in DB -- load from disk
+        const skillDir = skill.skillPath || path.join(SKILLS_DATA_DIR, skill.id);
+        try {
+          const loaded = this.loadFolderSkill(skillDir);
+          if (loaded) {
+            // Preserve DB-only fields like deployedContainers
+            loaded.deployedContainers = skill.deployedContainers || [];
+            this.folderSkills.set(loaded.id, loaded);
+          }
+        } catch (e) {
+          console.warn(`Failed to load folder skill ${skill.id}:`, e.message);
+        }
+      } else {
+        this.installedSkills.set(skill.id, { ...skill, builtIn: false });
+      }
+    }
+
+    // Scan data/skills/ for any folder skills not yet in DB
+    if (!fs.existsSync(SKILLS_DATA_DIR)) {
+      fs.mkdirSync(SKILLS_DATA_DIR, { recursive: true });
+    }
+
+    const skillDirs = fs.readdirSync(SKILLS_DATA_DIR, { withFileTypes: true });
+    for (const entry of skillDirs) {
+      if (!entry.isDirectory()) continue;
+      const skillDir = path.join(SKILLS_DATA_DIR, entry.name);
+      const manifestPath = path.join(skillDir, "manifest.json");
+      if (!fs.existsSync(manifestPath)) continue;
+
+      try {
+        const loaded = this.loadFolderSkill(skillDir);
+        if (loaded && !this.folderSkills.has(loaded.id)) {
+          this.folderSkills.set(loaded.id, loaded);
+          // Persist to DB so it shows up on next restart
+          database.data.skills.push({
+            id: loaded.id,
+            format: "folder",
+            skillPath: skillDir,
+            installedAt: new Date().toISOString(),
+            deployedContainers: [],
+          });
+        }
+      } catch (e) {
+        console.warn(`Failed to load folder skill from ${skillDir}:`, e.message);
+      }
+    }
+
+    if (this.folderSkills.size > 0) {
+      await database.write();
     }
 
     console.log(
-      `Skills loaded: ${this.builtInSkills.size} built-in, ${this.installedSkills.size} installed`,
+      `Skills loaded: ${this.builtInSkills.size} built-in, ${this.installedSkills.size} installed, ${this.folderSkills.size} folder-based`,
     );
   }
 
   /**
-   * Get all available skills (built-in + installed), merged into a single array.
-   * Installed skills with the same ID as a built-in skill override the built-in.
+   * Load a folder-based skill from its directory.
+   * Reads manifest.json, validates required fields, and returns the skill object.
+   */
+  loadFolderSkill(skillDir) {
+    const manifestPath = path.join(skillDir, "manifest.json");
+    if (!fs.existsSync(manifestPath)) {
+      throw new Error(`No manifest.json found in ${skillDir}`);
+    }
+
+    const raw = fs.readFileSync(manifestPath, "utf-8");
+    const manifest = JSON.parse(raw);
+
+    // Validate required fields
+    if (!manifest.id || typeof manifest.id !== "string") {
+      throw new Error(`Folder skill manifest missing 'id' in ${skillDir}`);
+    }
+    if (!manifest.name || typeof manifest.name !== "string") {
+      throw new Error(`Folder skill manifest missing 'name' in ${skillDir}`);
+    }
+    if (!manifest.description || typeof manifest.description !== "string") {
+      throw new Error(`Folder skill manifest missing 'description' in ${skillDir}`);
+    }
+    if (!manifest.version || typeof manifest.version !== "string") {
+      throw new Error(`Folder skill manifest missing 'version' in ${skillDir}`);
+    }
+
+    const skill = {
+      id: manifest.id,
+      name: manifest.name,
+      description: manifest.description,
+      version: manifest.version,
+      author: manifest.author || "Unknown",
+      category: manifest.category || "general",
+      icon: manifest.icon || "puzzle",
+      tags: Array.isArray(manifest.tags) ? manifest.tags : [],
+      always: Array.isArray(manifest.always) ? manifest.always : [],
+      reference: Array.isArray(manifest.reference) ? manifest.reference : [],
+      triggers: Array.isArray(manifest.triggers) ? manifest.triggers : [],
+      promptTemplates: Array.isArray(manifest.promptTemplates) ? manifest.promptTemplates : [],
+      quickCommands: Array.isArray(manifest.quickCommands) ? manifest.quickCommands : [],
+      source: manifest.source || null,
+      format: "folder",
+      skillPath: skillDir,
+      builtIn: false,
+      deployedContainers: [],
+    };
+
+    return skill;
+  }
+
+  /**
+   * Get all available skills (built-in + installed + folder-based), merged into a single array.
+   * Installed/folder skills with the same ID as a built-in skill override the built-in.
    */
   getAll() {
     const merged = new Map();
@@ -301,15 +428,23 @@ class SkillManager {
     for (const [id, skill] of this.installedSkills) {
       merged.set(id, skill);
     }
+    for (const [id, skill] of this.folderSkills) {
+      merged.set(id, skill);
+    }
 
     return Array.from(merged.values());
   }
 
   /**
-   * Get a single skill by ID. Installed skills take priority over built-in.
+   * Get a single skill by ID. Folder skills take priority, then installed, then built-in.
    */
   get(skillId) {
-    return this.installedSkills.get(skillId) || this.builtInSkills.get(skillId) || null;
+    return (
+      this.folderSkills.get(skillId) ||
+      this.installedSkills.get(skillId) ||
+      this.builtInSkills.get(skillId) ||
+      null
+    );
   }
 
   /**
@@ -365,9 +500,13 @@ class SkillManager {
 
   /**
    * Uninstall a user-installed skill. Cannot uninstall built-in skills.
+   * For folder-based skills, also removes the skill directory from disk.
    */
   async uninstall(skillId) {
-    if (!this.installedSkills.has(skillId)) {
+    const isFolderSkill = this.folderSkills.has(skillId);
+    const isInstalledSkill = this.installedSkills.has(skillId);
+
+    if (!isFolderSkill && !isInstalledSkill) {
       if (this.builtInSkills.has(skillId)) {
         throw new Error("Cannot uninstall built-in skills");
       }
@@ -381,8 +520,21 @@ class SkillManager {
     );
     await database.write();
 
-    // Remove from in-memory map
-    this.installedSkills.delete(skillId);
+    // For folder skills, remove the directory from disk
+    if (isFolderSkill) {
+      const skill = this.folderSkills.get(skillId);
+      const skillDir = skill.skillPath || path.join(SKILLS_DATA_DIR, skillId);
+      try {
+        if (fs.existsSync(skillDir)) {
+          fs.rmSync(skillDir, { recursive: true, force: true });
+        }
+      } catch (e) {
+        console.warn(`Failed to remove skill directory ${skillDir}:`, e.message);
+      }
+      this.folderSkills.delete(skillId);
+    } else {
+      this.installedSkills.delete(skillId);
+    }
 
     // Remove from all projects' activeSkills
     for (const project of database.data.projects) {
@@ -465,6 +617,267 @@ class SkillManager {
   }
 
   /**
+   * Install a folder-based skill from a git repository URL.
+   * Clones the repo (shallow), reads manifest.json, copies to data/skills/{id}/.
+   *
+   * @param {string} repoUrl - Git repository URL (github.com/user/repo, etc.)
+   * @param {object} options - Optional settings (e.g. { ref: 'main' })
+   * @returns {object} The installed skill object
+   */
+  async installFromRepo(repoUrl, options = {}) {
+    if (!repoUrl || typeof repoUrl !== "string") {
+      throw new Error("A valid git repository URL is required");
+    }
+
+    // Normalize the URL: add https:// if missing, add .git if needed
+    let gitUrl = repoUrl.trim();
+    if (!gitUrl.match(/^https?:\/\//) && !gitUrl.match(/^git@/)) {
+      gitUrl = `https://${gitUrl}`;
+    }
+
+    // Create a temporary directory for cloning
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "skill-clone-"));
+
+    try {
+      // Shallow clone the repository
+      const ref = options.ref || "main";
+      try {
+        execSync(
+          `git clone --depth 1 --branch ${ref} ${gitUrl} ${tmpDir}/repo`,
+          { stdio: "pipe", timeout: 60000 },
+        );
+      } catch (cloneErr) {
+        // If the specified ref fails, try without --branch (uses default branch)
+        try {
+          execSync(
+            `git clone --depth 1 ${gitUrl} ${tmpDir}/repo`,
+            { stdio: "pipe", timeout: 60000 },
+          );
+        } catch (fallbackErr) {
+          throw new Error(
+            `Failed to clone repository: ${fallbackErr.message}`,
+          );
+        }
+      }
+
+      const repoDir = path.join(tmpDir, "repo");
+
+      // Read manifest.json from the repo root
+      const manifestPath = path.join(repoDir, "manifest.json");
+      if (!fs.existsSync(manifestPath)) {
+        throw new Error(
+          "Repository does not contain a manifest.json at the root",
+        );
+      }
+
+      const raw = fs.readFileSync(manifestPath, "utf-8");
+      const manifest = JSON.parse(raw);
+
+      // Validate required fields
+      if (!manifest.id) throw new Error("manifest.json is missing 'id'");
+      if (!manifest.name) throw new Error("manifest.json is missing 'name'");
+      if (!manifest.description) throw new Error("manifest.json is missing 'description'");
+      if (!manifest.version) throw new Error("manifest.json is missing 'version'");
+
+      // Ensure data/skills directory exists
+      if (!fs.existsSync(SKILLS_DATA_DIR)) {
+        fs.mkdirSync(SKILLS_DATA_DIR, { recursive: true });
+      }
+
+      // Copy repo contents to data/skills/{manifest.id}/
+      const destDir = path.join(SKILLS_DATA_DIR, manifest.id);
+      if (fs.existsSync(destDir)) {
+        fs.rmSync(destDir, { recursive: true, force: true });
+      }
+      fs.cpSync(repoDir, destDir, { recursive: true });
+
+      // Remove .git directory from the installed copy
+      const dotGitDir = path.join(destDir, ".git");
+      if (fs.existsSync(dotGitDir)) {
+        fs.rmSync(dotGitDir, { recursive: true, force: true });
+      }
+
+      // Load the skill from its new location
+      const skill = this.loadFolderSkill(destDir);
+      skill.source = {
+        type: "git",
+        url: repoUrl,
+        ref: options.ref || "main",
+      };
+
+      // Register in the DB
+      const database = getDB();
+      if (!database.data.skills) database.data.skills = [];
+
+      const dbEntry = {
+        id: skill.id,
+        format: "folder",
+        skillPath: destDir,
+        installedAt: new Date().toISOString(),
+        deployedContainers: [],
+        source: skill.source,
+      };
+
+      const existingIndex = database.data.skills.findIndex(
+        (s) => s.id === skill.id,
+      );
+      if (existingIndex !== -1) {
+        database.data.skills[existingIndex] = dbEntry;
+      } else {
+        database.data.skills.push(dbEntry);
+      }
+      await database.write();
+
+      // Update in-memory map
+      this.folderSkills.set(skill.id, skill);
+
+      return skill;
+    } finally {
+      // Clean up temp directory
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  }
+
+  /**
+   * Deploy a folder-based skill to a Docker container.
+   * Copies the skill folder to /workspace/.skills/{id}/ in the container
+   * and fixes ownership.
+   *
+   * @param {string} skillId - The skill ID
+   * @param {string} containerName - Docker container name
+   * @returns {object} Deployment status
+   */
+  async deployToContainer(skillId, containerName) {
+    const skill = this.folderSkills.get(skillId);
+    if (!skill) {
+      throw new Error(
+        `Skill "${skillId}" is not a folder-based skill or does not exist`,
+      );
+    }
+
+    const skillDir = skill.skillPath || path.join(SKILLS_DATA_DIR, skillId);
+    if (!fs.existsSync(skillDir)) {
+      throw new Error(`Skill directory not found: ${skillDir}`);
+    }
+
+    try {
+      // Ensure .skills directory exists in the container
+      execSync(
+        `docker exec ${containerName} mkdir -p /workspace/.skills`,
+        { stdio: "pipe", timeout: 15000 },
+      );
+
+      // Copy skill folder to container
+      execSync(
+        `docker cp ${skillDir} ${containerName}:/workspace/.skills/${skillId}`,
+        { stdio: "pipe", timeout: 30000 },
+      );
+
+      // Fix permissions
+      execSync(
+        `docker exec ${containerName} chown -R dev:dev /workspace/.skills/${skillId}`,
+        { stdio: "pipe", timeout: 15000 },
+      );
+    } catch (e) {
+      throw new Error(
+        `Failed to deploy skill to container "${containerName}": ${e.message}`,
+      );
+    }
+
+    // Track deployment in DB
+    const database = getDB();
+    const dbSkill = (database.data.skills || []).find((s) => s.id === skillId);
+    if (dbSkill) {
+      if (!Array.isArray(dbSkill.deployedContainers)) {
+        dbSkill.deployedContainers = [];
+      }
+      if (!dbSkill.deployedContainers.includes(containerName)) {
+        dbSkill.deployedContainers.push(containerName);
+      }
+      await database.write();
+    }
+
+    // Update in-memory
+    if (!Array.isArray(skill.deployedContainers)) {
+      skill.deployedContainers = [];
+    }
+    if (!skill.deployedContainers.includes(containerName)) {
+      skill.deployedContainers.push(containerName);
+    }
+
+    return {
+      success: true,
+      skillId,
+      containerName,
+      path: `/workspace/.skills/${skillId}`,
+    };
+  }
+
+  /**
+   * Undeploy a folder-based skill from a Docker container.
+   * Removes the skill folder from /workspace/.skills/{id}/ in the container.
+   *
+   * @param {string} skillId - The skill ID
+   * @param {string} containerName - Docker container name
+   * @returns {object} Status
+   */
+  async undeployFromContainer(skillId, containerName) {
+    try {
+      execSync(
+        `docker exec ${containerName} rm -rf /workspace/.skills/${skillId}`,
+        { stdio: "pipe", timeout: 15000 },
+      );
+    } catch (e) {
+      throw new Error(
+        `Failed to undeploy skill from container "${containerName}": ${e.message}`,
+      );
+    }
+
+    // Update DB
+    const database = getDB();
+    const dbSkill = (database.data.skills || []).find((s) => s.id === skillId);
+    if (dbSkill && Array.isArray(dbSkill.deployedContainers)) {
+      dbSkill.deployedContainers = dbSkill.deployedContainers.filter(
+        (c) => c !== containerName,
+      );
+      await database.write();
+    }
+
+    // Update in-memory
+    const skill = this.folderSkills.get(skillId);
+    if (skill && Array.isArray(skill.deployedContainers)) {
+      skill.deployedContainers = skill.deployedContainers.filter(
+        (c) => c !== containerName,
+      );
+    }
+
+    return { success: true, skillId, containerName };
+  }
+
+  /**
+   * Check if a skill folder exists in a container.
+   *
+   * @param {string} skillId - The skill ID
+   * @param {string} containerName - Docker container name
+   * @returns {boolean} Whether the skill is deployed in the container
+   */
+  getDeploymentStatus(skillId, containerName) {
+    try {
+      execSync(
+        `docker exec ${containerName} test -d /workspace/.skills/${skillId}`,
+        { stdio: "pipe", timeout: 10000 },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Get the list of active skill objects for a project.
    */
   getActiveSkills(projectId) {
@@ -517,8 +930,54 @@ class SkillManager {
   }
 
   /**
+   * Read the contents of "always" .md files for a folder-based skill.
+   * Returns an array of { filename, content } objects.
+   */
+  _readAlwaysFiles(skill) {
+    const results = [];
+    if (skill.format !== "folder" || !skill.skillPath) return results;
+
+    const alwaysDir = path.join(skill.skillPath, "always");
+    const mdFiles = collectMdFiles(alwaysDir);
+    for (const filePath of mdFiles) {
+      try {
+        const content = fs.readFileSync(filePath, "utf-8");
+        const filename = path.relative(skill.skillPath, filePath);
+        results.push({ filename, content });
+      } catch {
+        // Skip unreadable files
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Read the contents of "reference" .md files for a folder-based skill.
+   * Returns an array of { filename, content } objects.
+   */
+  _readReferenceFiles(skill) {
+    const results = [];
+    if (skill.format !== "folder" || !skill.skillPath) return results;
+
+    const referenceDir = path.join(skill.skillPath, "reference");
+    const mdFiles = collectMdFiles(referenceDir);
+    for (const filePath of mdFiles) {
+      try {
+        const content = fs.readFileSync(filePath, "utf-8");
+        const filename = path.relative(skill.skillPath, filePath);
+        results.push({ filename, content });
+      } catch {
+        // Skip unreadable files
+      }
+    }
+    return results;
+  }
+
+  /**
    * Build the LLM context string from all active skills for a project.
-   * Returns a formatted markdown string with rules, conventions, etc.
+   * For legacy skills: uses rules[], conventions fields.
+   * For folder skills: reads the "always" .md files and includes their contents.
+   * Returns a formatted markdown string.
    */
   buildSkillContext(projectId) {
     const activeSkills = this.getActiveSkills(projectId);
@@ -535,20 +994,145 @@ class SkillManager {
         parts.push(`_${skill.description}_\n`);
       }
 
-      // Rules
-      if (Array.isArray(skill.rules) && skill.rules.length > 0) {
-        parts.push("**Rules:**");
-        skill.rules.forEach((rule, i) => {
-          parts.push(`${i + 1}. ${rule}`);
-        });
-        parts.push("");
+      if (skill.format === "folder") {
+        // Folder-based skill: read "always" files
+        const alwaysFiles = this._readAlwaysFiles(skill);
+        if (alwaysFiles.length > 0) {
+          for (const file of alwaysFiles) {
+            parts.push(`**${file.filename}:**`);
+            parts.push(file.content.trim());
+            parts.push("");
+          }
+        }
+      } else {
+        // Legacy skill: use rules and conventions
+        if (Array.isArray(skill.rules) && skill.rules.length > 0) {
+          parts.push("**Rules:**");
+          skill.rules.forEach((rule, i) => {
+            parts.push(`${i + 1}. ${rule}`);
+          });
+          parts.push("");
+        }
+
+        if (skill.conventions && skill.conventions.trim()) {
+          parts.push("**Conventions:**");
+          parts.push(skill.conventions.trim());
+          parts.push("");
+        }
       }
 
-      // Conventions
-      if (skill.conventions && skill.conventions.trim()) {
-        parts.push("**Conventions:**");
-        parts.push(skill.conventions.trim());
-        parts.push("");
+      sections.push(parts.join("\n"));
+    }
+
+    return sections.join("\n");
+  }
+
+  /**
+   * Build skill context for a specific task, including selective "reference" files.
+   * Includes everything from buildSkillContext plus reference files that match
+   * the given task tags or file path triggers.
+   *
+   * @param {string} projectId - The project ID
+   * @param {object} options - { taskTags: string[], filePaths: string[] }
+   * @returns {string} Formatted markdown context string
+   */
+  buildSkillContextForTask(projectId, { taskTags = [], filePaths = [] } = {}) {
+    const activeSkills = this.getActiveSkills(projectId);
+    if (activeSkills.length === 0) return "";
+
+    const sections = [];
+    sections.push("## Active Skills\n");
+
+    for (const skill of activeSkills) {
+      const parts = [];
+      parts.push(`### ${skill.name}`);
+
+      if (skill.description) {
+        parts.push(`_${skill.description}_\n`);
+      }
+
+      if (skill.format === "folder") {
+        // Always-included files
+        const alwaysFiles = this._readAlwaysFiles(skill);
+        if (alwaysFiles.length > 0) {
+          for (const file of alwaysFiles) {
+            parts.push(`**${file.filename}:**`);
+            parts.push(file.content.trim());
+            parts.push("");
+          }
+        }
+
+        // Determine if reference files should be included
+        let includeReference = false;
+        const specificReferenceFiles = new Set();
+
+        // Check tag matching: if the skill has tags that overlap with taskTags
+        if (Array.isArray(skill.tags) && skill.tags.length > 0 && taskTags.length > 0) {
+          const normalizedTaskTags = taskTags.map((t) => t.toLowerCase());
+          for (const tag of skill.tags) {
+            if (normalizedTaskTags.includes(tag.toLowerCase())) {
+              includeReference = true;
+              break;
+            }
+          }
+        }
+
+        // Check trigger filePattern matching against filePaths
+        if (Array.isArray(skill.triggers) && filePaths.length > 0) {
+          for (const trigger of skill.triggers) {
+            if (!trigger.filePattern) continue;
+            try {
+              const regex = globToRegex(trigger.filePattern);
+              for (const fp of filePaths) {
+                if (regex.test(fp)) {
+                  // If trigger specifies specific include files, track them
+                  if (Array.isArray(trigger.include)) {
+                    for (const inc of trigger.include) {
+                      specificReferenceFiles.add(inc);
+                    }
+                  } else {
+                    includeReference = true;
+                  }
+                  break;
+                }
+              }
+            } catch {
+              // Skip invalid patterns
+            }
+          }
+        }
+
+        // Include reference files based on matching
+        if (includeReference || specificReferenceFiles.size > 0) {
+          const referenceFiles = this._readReferenceFiles(skill);
+          for (const file of referenceFiles) {
+            // If we have specific files requested, only include those
+            if (specificReferenceFiles.size > 0 && !includeReference) {
+              const matches = Array.from(specificReferenceFiles).some(
+                (pattern) => file.filename === pattern || file.filename.endsWith(pattern),
+              );
+              if (!matches) continue;
+            }
+            parts.push(`**${file.filename}:**`);
+            parts.push(file.content.trim());
+            parts.push("");
+          }
+        }
+      } else {
+        // Legacy skill: same as buildSkillContext
+        if (Array.isArray(skill.rules) && skill.rules.length > 0) {
+          parts.push("**Rules:**");
+          skill.rules.forEach((rule, i) => {
+            parts.push(`${i + 1}. ${rule}`);
+          });
+          parts.push("");
+        }
+
+        if (skill.conventions && skill.conventions.trim()) {
+          parts.push("**Conventions:**");
+          parts.push(skill.conventions.trim());
+          parts.push("");
+        }
       }
 
       sections.push(parts.join("\n"));

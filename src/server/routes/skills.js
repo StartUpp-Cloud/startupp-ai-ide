@@ -121,6 +121,24 @@ router.get("/project/:projectId/commands", async (req, res) => {
   }
 });
 
+// GET /api/skills/project/:projectId/context-for-task -- Build skill context with task-specific filtering
+router.get("/project/:projectId/context-for-task", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { tags, filePaths } = req.query;
+    const context = skillManager.buildSkillContextForTask(projectId, {
+      taskTags: tags ? tags.split(",") : [],
+      filePaths: filePaths ? filePaths.split(",") : [],
+    });
+    res.json({ context });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to build skill context for task",
+      message: error.message,
+    });
+  }
+});
+
 // POST /api/skills/install -- Install a skill from JSON body
 router.post("/install", async (req, res) => {
   try {
@@ -154,6 +172,72 @@ router.post("/install-url", async (req, res) => {
   } catch (error) {
     res.status(400).json({
       error: "Failed to install skill from URL",
+      message: error.message,
+    });
+  }
+});
+
+// POST /api/skills/install-repo -- Install a skill from a git repository URL
+router.post("/install-repo", async (req, res) => {
+  try {
+    const { url, ref } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: "url is required in request body" });
+    }
+
+    const skill = await skillManager.installFromRepo(url, { ref });
+    res.status(201).json(skill);
+  } catch (error) {
+    res.status(400).json({
+      error: "Failed to install skill from repository",
+      message: error.message,
+    });
+  }
+});
+
+// POST /api/skills/:id/deploy/:containerName -- Deploy a skill to a container
+router.post("/:id/deploy/:containerName", async (req, res) => {
+  try {
+    const { id, containerName } = req.params;
+    const result = await skillManager.deployToContainer(id, containerName);
+    res.json(result);
+  } catch (error) {
+    if (error.message.includes("not found")) {
+      return res.status(404).json({ error: error.message });
+    }
+    res.status(500).json({
+      error: "Failed to deploy skill",
+      message: error.message,
+    });
+  }
+});
+
+// DELETE /api/skills/:id/deploy/:containerName -- Undeploy a skill from a container
+router.delete("/:id/deploy/:containerName", async (req, res) => {
+  try {
+    const { id, containerName } = req.params;
+    const result = await skillManager.undeployFromContainer(id, containerName);
+    res.json(result);
+  } catch (error) {
+    if (error.message.includes("not found")) {
+      return res.status(404).json({ error: error.message });
+    }
+    res.status(500).json({
+      error: "Failed to undeploy skill",
+      message: error.message,
+    });
+  }
+});
+
+// GET /api/skills/:id/deploy/:containerName -- Check deployment status
+router.get("/:id/deploy/:containerName", async (req, res) => {
+  try {
+    const { id, containerName } = req.params;
+    const deployed = skillManager.getDeploymentStatus(id, containerName);
+    res.json({ deployed });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to check deployment status",
       message: error.message,
     });
   }

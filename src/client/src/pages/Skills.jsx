@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Puzzle, Download, Trash2, Check, X, ExternalLink, ChevronDown, ChevronRight,
   Search, Filter, Package, Globe, Code, Zap, Shield, Database, Server, Wrench,
+  GitBranch, FolderOpen, Tag,
 } from 'lucide-react';
 
 const CATEGORY_ICONS = {
@@ -32,8 +33,11 @@ export default function Skills() {
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
   const [installUrl, setInstallUrl] = useState('');
+  const [installRepoUrl, setInstallRepoUrl] = useState('');
+  const [installRepoRef, setInstallRepoRef] = useState('');
   const [installError, setInstallError] = useState(null);
   const [showInstallModal, setShowInstallModal] = useState(false);
+  const [installMode, setInstallMode] = useState('url'); // 'url' | 'repo'
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [expandedSkill, setExpandedSkill] = useState(null);
@@ -118,6 +122,66 @@ export default function Skills() {
       setInstallError(err.message);
     } finally {
       setInstalling(false);
+    }
+  };
+
+  // Install from repository
+  const handleInstallRepo = async () => {
+    if (!installRepoUrl.trim()) return;
+    setInstalling(true);
+    setInstallError(null);
+
+    try {
+      const res = await fetch('/api/skills/install-repo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: installRepoUrl.trim(),
+          ref: installRepoRef.trim() || undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.message || 'Failed to install skill from repository');
+      }
+
+      const newSkill = await res.json();
+      setSkills(prev => [...prev, newSkill]);
+      setInstallRepoUrl('');
+      setInstallRepoRef('');
+      setShowInstallModal(false);
+    } catch (err) {
+      setInstallError(err.message);
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  // Deploy/undeploy skill to container
+  const handleDeploy = async (skillId, containerName, isDeployed) => {
+    try {
+      const method = isDeployed ? 'DELETE' : 'POST';
+      const res = await fetch(`/api/skills/${skillId}/deploy/${containerName}`, { method });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.message || 'Deploy operation failed');
+      }
+
+      // Update skill's deployedContainers locally
+      setSkills(prev => prev.map(s => {
+        if (s.id !== skillId) return s;
+        const deployed = s.deployedContainers || [];
+        return {
+          ...s,
+          deployedContainers: isDeployed
+            ? deployed.filter(c => c !== containerName)
+            : [...deployed, containerName],
+        };
+      }));
+    } catch (err) {
+      console.error('Deploy operation failed:', err);
     }
   };
 
@@ -235,6 +299,7 @@ export default function Skills() {
               const CategoryIcon = CATEGORY_ICONS[skill.category] || Puzzle;
               const categoryColor = CATEGORY_COLORS[skill.category] || 'text-surface-400';
               const isExpanded = expandedSkill === skill.id;
+              const isFolder = skill.format === 'folder';
 
               return (
                 <div
@@ -258,9 +323,27 @@ export default function Skills() {
                             Built-in
                           </span>
                         )}
+                        {isFolder && (
+                          <span className="px-1.5 py-0.5 bg-surface-700 text-blue-400 text-[9px] uppercase rounded flex items-center gap-1">
+                            <FolderOpen size={9} />
+                            Folder
+                          </span>
+                        )}
                         <span className="text-[10px] text-surface-500">v{skill.version}</span>
                       </div>
-                      <p className="text-xs text-surface-500 truncate">{skill.description}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs text-surface-500 truncate">{skill.description}</p>
+                        {isFolder && skill.tags && skill.tags.length > 0 && (
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            {skill.tags.slice(0, 3).map((tag, i) => (
+                              <span key={i} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-surface-700/50 text-surface-400 text-[9px] rounded">
+                                <Tag size={8} />
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -312,27 +395,99 @@ export default function Skills() {
                   {isExpanded && (
                     <div className="border-t border-surface-700 p-4 bg-surface-800/30">
                       <div className="grid grid-cols-2 gap-6">
-                        {/* Left: Rules & Conventions */}
+                        {/* Left: Rules & Conventions OR Skill Files */}
                         <div className="space-y-4">
-                          {skill.rules && skill.rules.length > 0 && (
-                            <div>
-                              <h4 className="text-[10px] uppercase text-surface-500 mb-2">Rules</h4>
-                              <ul className="space-y-1">
-                                {skill.rules.map((rule, i) => (
-                                  <li key={i} className="text-xs text-surface-300 flex items-start gap-2">
-                                    <span className="text-primary-400 mt-0.5">•</span>
-                                    {rule}
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
+                          {isFolder ? (
+                            <>
+                              {/* Skill Files section for folder-based skills */}
+                              <div>
+                                <h4 className="text-[10px] uppercase text-surface-500 mb-2 flex items-center gap-1.5">
+                                  <FolderOpen size={10} />
+                                  Skill Files
+                                </h4>
+                                {skill.alwaysFiles && skill.alwaysFiles.length > 0 && (
+                                  <div className="mb-2">
+                                    <span className="text-[9px] uppercase text-primary-400 mb-1 block">always/</span>
+                                    <ul className="space-y-0.5">
+                                      {skill.alwaysFiles.map((file, i) => (
+                                        <li key={i} className="text-xs text-surface-300 flex items-start gap-2">
+                                          <span className="text-primary-400 mt-0.5">-</span>
+                                          <span className="font-mono text-[10px]">{file}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                                {skill.referenceFiles && skill.referenceFiles.length > 0 && (
+                                  <div>
+                                    <span className="text-[9px] uppercase text-surface-400 mb-1 block">reference/</span>
+                                    <ul className="space-y-0.5">
+                                      {skill.referenceFiles.map((file, i) => (
+                                        <li key={i} className="text-xs text-surface-300 flex items-start gap-2">
+                                          <span className="text-surface-500 mt-0.5">-</span>
+                                          <span className="font-mono text-[10px]">{file}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                                {(!skill.alwaysFiles || skill.alwaysFiles.length === 0) && (!skill.referenceFiles || skill.referenceFiles.length === 0) && (
+                                  <p className="text-xs text-surface-500">No files listed</p>
+                                )}
+                              </div>
 
-                          {skill.conventions && (
-                            <div>
-                              <h4 className="text-[10px] uppercase text-surface-500 mb-2">Conventions</h4>
-                              <p className="text-xs text-surface-400 whitespace-pre-wrap">{skill.conventions}</p>
-                            </div>
+                              {/* Tags for folder skills */}
+                              {skill.tags && skill.tags.length > 0 && (
+                                <div>
+                                  <h4 className="text-[10px] uppercase text-surface-500 mb-2 flex items-center gap-1.5">
+                                    <Tag size={10} />
+                                    Tags
+                                  </h4>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {skill.tags.map((tag, i) => (
+                                      <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-surface-700 text-surface-300 text-[10px] rounded">
+                                        <Tag size={8} className="text-surface-500" />
+                                        {tag}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Source info */}
+                              {skill.source && (
+                                <div>
+                                  <h4 className="text-[10px] uppercase text-surface-500 mb-2 flex items-center gap-1.5">
+                                    <GitBranch size={10} />
+                                    Source
+                                  </h4>
+                                  <p className="text-xs text-surface-400 font-mono break-all">{skill.source}</p>
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              {skill.rules && skill.rules.length > 0 && (
+                                <div>
+                                  <h4 className="text-[10px] uppercase text-surface-500 mb-2">Rules</h4>
+                                  <ul className="space-y-1">
+                                    {skill.rules.map((rule, i) => (
+                                      <li key={i} className="text-xs text-surface-300 flex items-start gap-2">
+                                        <span className="text-primary-400 mt-0.5">-</span>
+                                        {rule}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+
+                              {skill.conventions && (
+                                <div>
+                                  <h4 className="text-[10px] uppercase text-surface-500 mb-2">Conventions</h4>
+                                  <p className="text-xs text-surface-400 whitespace-pre-wrap">{skill.conventions}</p>
+                                </div>
+                              )}
+                            </>
                           )}
                         </div>
 
@@ -363,6 +518,47 @@ export default function Skills() {
                           </div>
                         </div>
                       </div>
+
+                      {/* Container Deployment for folder-based skills */}
+                      {isFolder && (
+                        <div className="mt-4 pt-4 border-t border-surface-700">
+                          <h4 className="text-[10px] uppercase text-surface-500 mb-2 flex items-center gap-1.5">
+                            <Server size={10} />
+                            Container Deployment
+                          </h4>
+                          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                            {projects.map(project => {
+                              if (!project.containerName) return null;
+                              const deployed = skill.deployedContainers || [];
+                              const isDeployed = deployed.includes(project.containerName);
+                              return (
+                                <div
+                                  key={project.id}
+                                  className="flex items-center justify-between px-3 py-2 rounded-lg bg-surface-700/30 border border-surface-700"
+                                >
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span className="text-sm text-surface-300 truncate">{project.name}</span>
+                                    <span className="text-[10px] text-surface-500 font-mono truncate">{project.containerName}</span>
+                                  </div>
+                                  <button
+                                    onClick={() => handleDeploy(skill.id, project.containerName, isDeployed)}
+                                    className={`flex-shrink-0 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                                      isDeployed
+                                        ? 'bg-green-500/15 text-green-400 border border-green-500/30 hover:bg-red-500/15 hover:text-red-400 hover:border-red-500/30'
+                                        : 'bg-surface-700/50 text-surface-400 border border-surface-700 hover:text-surface-200 hover:border-surface-600'
+                                    }`}
+                                  >
+                                    {isDeployed ? 'Undeploy' : 'Deploy'}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                            {projects.filter(p => p.containerName).length === 0 && (
+                              <p className="text-xs text-surface-500">No project containers available</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Quick commands & templates */}
                       {(skill.quickCommands?.length > 0 || skill.promptTemplates?.length > 0) && (
@@ -399,6 +595,7 @@ export default function Skills() {
                       <div className="mt-4 pt-3 border-t border-surface-700 flex items-center gap-4 text-[10px] text-surface-500">
                         <span>Author: {skill.author || 'Unknown'}</span>
                         <span>Category: {skill.category || 'general'}</span>
+                        {skill.format && <span>Format: {skill.format}</span>}
                         {skill.installedAt && <span>Installed: {new Date(skill.installedAt).toLocaleDateString()}</span>}
                       </div>
                     </div>
@@ -443,17 +640,25 @@ export default function Skills() {
                 <h3 className="text-sm font-medium text-surface-300">About Skills</h3>
                 <p className="text-xs text-surface-500 mt-1">
                   Skills extend AI capabilities with custom rules, conventions, and commands.
-                  Install skills from public GitHub repos or any URL pointing to .md or .json files.
+                  Install skills from public GitHub repos, any URL pointing to .md or .json files,
+                  or from git repositories with a manifest.json for folder-based skill packs.
                   Built-in skills cannot be uninstalled.
                 </p>
-                <div className="mt-3 grid grid-cols-2 gap-3 text-[10px]">
+                <div className="mt-3 grid grid-cols-3 gap-3 text-[10px]">
                   <div className="p-2 bg-surface-800 rounded">
-                    <div className="text-surface-400 mb-1">Install from GitHub</div>
+                    <div className="text-surface-400 mb-1">Install from URL</div>
                     <code className="text-surface-500">github.com/user/repo/blob/main/skill.md</code>
                   </div>
                   <div className="p-2 bg-surface-800 rounded">
                     <div className="text-surface-400 mb-1">Supported formats</div>
                     <code className="text-surface-500">.md (Markdown) or .json</code>
+                  </div>
+                  <div className="p-2 bg-surface-800 rounded">
+                    <div className="text-surface-400 mb-1 flex items-center gap-1">
+                      <FolderOpen size={9} />
+                      Repository format
+                    </div>
+                    <code className="text-surface-500">manifest.json + always/*.md + reference/*.md</code>
                   </div>
                 </div>
               </div>
@@ -469,49 +674,71 @@ export default function Skills() {
             <div className="flex items-center justify-between p-4 border-b border-surface-700 sticky top-0 bg-surface-850">
               <h2 className="text-sm font-semibold flex items-center gap-2">
                 <Download size={16} className="text-primary-400" />
-                Install Skill from URL
+                Install Skill
               </h2>
               <button
-                onClick={() => { setShowInstallModal(false); setInstallError(null); }}
+                onClick={() => { setShowInstallModal(false); setInstallError(null); setInstallMode('url'); }}
                 className="p-1 text-surface-500 hover:text-surface-200 rounded"
               >
                 <X size={16} />
               </button>
             </div>
 
+            {/* Mode tabs */}
+            <div className="flex border-b border-surface-700">
+              <button
+                onClick={() => { setInstallMode('url'); setInstallError(null); }}
+                className={`flex-1 px-4 py-2.5 text-xs font-medium transition-colors flex items-center justify-center gap-2 ${
+                  installMode === 'url'
+                    ? 'text-primary-300 border-b-2 border-primary-400'
+                    : 'text-surface-500 hover:text-surface-300'
+                }`}
+              >
+                <Globe size={12} />
+                From URL
+              </button>
+              <button
+                onClick={() => { setInstallMode('repo'); setInstallError(null); }}
+                className={`flex-1 px-4 py-2.5 text-xs font-medium transition-colors flex items-center justify-center gap-2 ${
+                  installMode === 'repo'
+                    ? 'text-primary-300 border-b-2 border-primary-400'
+                    : 'text-surface-500 hover:text-surface-300'
+                }`}
+              >
+                <GitBranch size={12} />
+                From Repository
+              </button>
+            </div>
+
             <div className="p-4 space-y-4">
-              <div>
-                <label className="text-[11px] text-surface-500 uppercase mb-1 block">Skill URL (JSON or Markdown)</label>
-                <input
-                  type="url"
-                  value={installUrl}
-                  onChange={e => setInstallUrl(e.target.value)}
-                  placeholder="https://github.com/user/repo/blob/main/skill.md"
-                  className="w-full bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 outline-none focus:border-primary-500/50"
-                  disabled={installing}
-                />
-                <p className="text-[10px] text-surface-500 mt-1">
-                  GitHub URLs are automatically converted to raw format
-                </p>
-              </div>
-
-              {installError && (
-                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300">
-                  {installError}
-                </div>
-              )}
-
-              {/* Format tabs */}
-              <div className="space-y-3">
-                <p className="text-xs text-surface-400">Supports both Markdown (.md) and JSON formats:</p>
-
-                {/* Markdown format */}
-                <div className="bg-surface-800 rounded-lg border border-surface-700 overflow-hidden">
-                  <div className="px-3 py-1.5 bg-surface-750 border-b border-surface-700 flex items-center gap-2">
-                    <span className="text-[10px] font-medium text-primary-400">MARKDOWN FORMAT</span>
-                    <span className="text-[10px] text-surface-500">(Recommended)</span>
+              {installMode === 'url' ? (
+                <>
+                  <div>
+                    <label className="text-[11px] text-surface-500 uppercase mb-1 block">Skill URL (JSON or Markdown)</label>
+                    <input
+                      type="url"
+                      value={installUrl}
+                      onChange={e => setInstallUrl(e.target.value)}
+                      placeholder="https://github.com/user/repo/blob/main/skill.md"
+                      className="w-full bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 outline-none focus:border-primary-500/50"
+                      disabled={installing}
+                    />
+                    <p className="text-[10px] text-surface-500 mt-1">
+                      GitHub URLs are automatically converted to raw format
+                    </p>
                   </div>
-                  <pre className="p-3 text-[10px] text-surface-300 overflow-x-auto">
+
+                  {/* Format tabs */}
+                  <div className="space-y-3">
+                    <p className="text-xs text-surface-400">Supports both Markdown (.md) and JSON formats:</p>
+
+                    {/* Markdown format */}
+                    <div className="bg-surface-800 rounded-lg border border-surface-700 overflow-hidden">
+                      <div className="px-3 py-1.5 bg-surface-750 border-b border-surface-700 flex items-center gap-2">
+                        <span className="text-[10px] font-medium text-primary-400">MARKDOWN FORMAT</span>
+                        <span className="text-[10px] text-surface-500">(Recommended)</span>
+                      </div>
+                      <pre className="p-3 text-[10px] text-surface-300 overflow-x-auto">
 {`---
 name: My Skill
 description: What this skill does
@@ -529,24 +756,82 @@ category: general
 
 Additional guidelines and best practices
 that the AI should follow...`}
-                  </pre>
-                </div>
+                      </pre>
+                    </div>
 
-                {/* JSON format */}
-                <div className="bg-surface-800 rounded-lg border border-surface-700 overflow-hidden">
-                  <div className="px-3 py-1.5 bg-surface-750 border-b border-surface-700">
-                    <span className="text-[10px] font-medium text-surface-400">JSON FORMAT</span>
-                  </div>
-                  <pre className="p-3 text-[10px] text-surface-300 overflow-x-auto">
+                    {/* JSON format */}
+                    <div className="bg-surface-800 rounded-lg border border-surface-700 overflow-hidden">
+                      <div className="px-3 py-1.5 bg-surface-750 border-b border-surface-700">
+                        <span className="text-[10px] font-medium text-surface-400">JSON FORMAT</span>
+                      </div>
+                      <pre className="p-3 text-[10px] text-surface-300 overflow-x-auto">
 {`{
   "name": "My Skill",
   "description": "What this skill does",
   "version": "1.0.0",
   "rules": ["Rule 1", "Rule 2"]
 }`}
-                  </pre>
+                      </pre>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="text-[11px] text-surface-500 uppercase mb-1 block">Repository URL</label>
+                    <input
+                      type="text"
+                      value={installRepoUrl}
+                      onChange={e => setInstallRepoUrl(e.target.value)}
+                      placeholder="github.com/user/skill-pack"
+                      className="w-full bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 outline-none focus:border-primary-500/50"
+                      disabled={installing}
+                    />
+                    <p className="text-[10px] text-surface-500 mt-1">
+                      Git repository containing a manifest.json skill definition
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] text-surface-500 uppercase mb-1 block">Branch / Ref (optional)</label>
+                    <input
+                      type="text"
+                      value={installRepoRef}
+                      onChange={e => setInstallRepoRef(e.target.value)}
+                      placeholder="main"
+                      className="w-full bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-sm text-surface-200 outline-none focus:border-primary-500/50"
+                      disabled={installing}
+                    />
+                    <p className="text-[10px] text-surface-500 mt-1">
+                      Defaults to &quot;main&quot; if not specified
+                    </p>
+                  </div>
+
+                  {/* Repo format example */}
+                  <div className="bg-surface-800 rounded-lg border border-surface-700 overflow-hidden">
+                    <div className="px-3 py-1.5 bg-surface-750 border-b border-surface-700 flex items-center gap-2">
+                      <FolderOpen size={10} className="text-primary-400" />
+                      <span className="text-[10px] font-medium text-primary-400">REPOSITORY FORMAT</span>
+                    </div>
+                    <pre className="p-3 text-[10px] text-surface-300 overflow-x-auto">
+{`my-skill-pack/
+  manifest.json     # name, description, version, tags
+  always/           # Rules always included in context
+    coding-style.md
+    naming.md
+  reference/        # Rules included on demand
+    advanced.md
+    patterns.md`}
+                    </pre>
+                  </div>
+                </>
+              )}
+
+              {installError && (
+                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300">
+                  {installError}
                 </div>
-              </div>
+              )}
 
               {/* Info box */}
               <div className="p-3 bg-primary-500/10 border border-primary-500/20 rounded-lg">
@@ -565,18 +850,29 @@ that the AI should follow...`}
 
             <div className="flex justify-end gap-2 p-4 border-t border-surface-700 sticky bottom-0 bg-surface-850">
               <button
-                onClick={() => { setShowInstallModal(false); setInstallError(null); }}
+                onClick={() => { setShowInstallModal(false); setInstallError(null); setInstallMode('url'); }}
                 className="px-3 py-1.5 text-sm text-surface-400 hover:text-surface-200"
               >
                 Cancel
               </button>
-              <button
-                onClick={handleInstall}
-                disabled={installing || !installUrl.trim()}
-                className="flex items-center gap-2 px-4 py-1.5 bg-primary-500 hover:bg-primary-600 text-surface-950 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-              >
-                {installing ? 'Installing...' : 'Install Skill'}
-              </button>
+              {installMode === 'url' ? (
+                <button
+                  onClick={handleInstall}
+                  disabled={installing || !installUrl.trim()}
+                  className="flex items-center gap-2 px-4 py-1.5 bg-primary-500 hover:bg-primary-600 text-surface-950 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  {installing ? 'Installing...' : 'Install Skill'}
+                </button>
+              ) : (
+                <button
+                  onClick={handleInstallRepo}
+                  disabled={installing || !installRepoUrl.trim()}
+                  className="flex items-center gap-2 px-4 py-1.5 bg-primary-500 hover:bg-primary-600 text-surface-950 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  <GitBranch size={14} />
+                  {installing ? 'Installing...' : 'Install from Repo'}
+                </button>
+              )}
             </div>
           </div>
         </div>

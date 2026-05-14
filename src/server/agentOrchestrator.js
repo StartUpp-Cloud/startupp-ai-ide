@@ -5,6 +5,7 @@ import { sqliteStore } from './sqliteStore.js';
 import { chatStore } from './chatStore.js';
 import { agentGateway } from './agentGateway.js';
 import { memoryStore } from './memoryStore.js';
+import skillManager from './skillManager.js';
 import { shouldOrchestrateRequest } from './orchestratorRouting.js';
 import { batchTasks } from './orchestratorBatching.js';
 import { ACTIVE_RUN_STALE_MS } from './sessionRecovery.js';
@@ -730,11 +731,45 @@ ${run.goal}`;
       this._xmlBlock('ide_selected_workspace', workContext),
       this._xmlBlock('attached_files', attachments),
       this._xmlBlock('durable_project_memory', memory || '(none)'),
+      this._xmlBlock('skill_context', this._buildSkillContextForTask(run, prompt) || '(none)'),
       this._xmlBlock('prior_completed_task_results', prior),
       this._xmlBlock('assigned_task', prompt),
       this._xmlBlock('execution_contract', 'Complete the assigned task end-to-end. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. Do not wait for user input unless truly blocked. If you need user input, include the exact questions, options, and recommended safe default in your final answer. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
       '</ide_orchestrator_handoff>',
     ].join('\n\n');
+  }
+
+  _buildSkillContextForTask(run, taskPrompt) {
+    try {
+      const text = String(taskPrompt || '').toLowerCase();
+      const taskTags = [];
+
+      const tagMap = [
+        [['react', 'component', 'jsx', 'tsx', 'ui', 'frontend', 'css', 'tailwind'], ['frontend', 'react', 'ui']],
+        [['test', 'testing', 'spec', 'coverage', 'jest', 'vitest'], ['testing']],
+        [['deploy', 'docker', 'container', 'kubernetes', 'ci/cd'], ['deployment', 'devops']],
+        [['database', 'migration', 'schema', 'sql', 'prisma'], ['database']],
+        [['security', 'auth', 'authentication', 'vulnerability', 'owasp'], ['security']],
+        [['api', 'endpoint', 'route', 'rest', 'graphql'], ['api']],
+        [['git', 'commit', 'branch', 'merge', 'pr'], ['git']],
+        [['typescript', 'types', 'interface'], ['typescript']],
+      ];
+
+      for (const [keywords, tags] of tagMap) {
+        if (keywords.some((kw) => text.includes(kw))) {
+          for (const tag of tags) {
+            if (!taskTags.includes(tag)) taskTags.push(tag);
+          }
+        }
+      }
+
+      if (!taskTags.length) return '';
+
+      return skillManager.buildSkillContextForTask(run.projectId, { taskTags, filePaths: [] }) || '';
+    } catch (err) {
+      console.error('[AgentOrchestrator] skill context error:', err.message);
+      return '';
+    }
   }
 
   _runWorkContext(run) {
