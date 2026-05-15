@@ -4,7 +4,7 @@ import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from '
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
-import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft } from 'lucide-react';
 import ModeToggle from './ModeToggle';
 import {
   CLI_TOOLS,
@@ -681,6 +681,40 @@ function MainThreadHeader({ project, session }) {
   );
 }
 
+function ChildThreadHeader({ project, session, mainSession, onOpenMain }) {
+  const status = getSessionStatus(session, { expanded: true, active: true });
+  const sessionName = session?.name || 'Thread';
+
+  return (
+    <div className="border-b border-surface-700/45 bg-surface-950/95 px-3 py-2 shadow-[0_6px_18px_rgba(0,0,0,0.18)] sm:px-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <button
+          type="button"
+          onClick={onOpenMain}
+          disabled={!mainSession?.id}
+          className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-full border border-surface-700 bg-surface-900 px-2.5 py-1.5 text-[11px] font-medium text-surface-300 transition-colors hover:border-primary-500/45 hover:bg-primary-500/10 hover:text-primary-200 disabled:cursor-not-allowed disabled:opacity-50"
+          title="Back to main thread"
+        >
+          <ArrowLeft size={13} />
+          <span className="hidden sm:inline">Main thread</span>
+          <span className="sm:hidden">Main</span>
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <MessageCircle size={14} className="flex-shrink-0 text-primary-400" />
+            <span className="truncate text-sm font-semibold text-surface-100">{sessionName}</span>
+            <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
+            <span className={`hidden text-[10px] sm:inline ${status.text}`}>{status.label}</span>
+          </div>
+          <div className="truncate text-[11px] text-surface-500">
+            {project?.name || 'Project'} thread. Use Main to start or coordinate new work.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange, project }) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
@@ -926,6 +960,8 @@ function ChatSessionContent({
   isSelected,
   onChangedFilesChange,
   sessionBubbleDock,
+  mainSession,
+  onOpenMain,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1121,21 +1157,25 @@ function ChatSessionContent({
   // scrollIntoView() which can be defeated by overflow:hidden ancestors.
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+      setShowJumpBottom(false);
+      setShowJumpTop(el.scrollHeight > el.clientHeight + 300);
+    }
   }, []);
 
   const scheduleScrollToBottom = useCallback(() => {
     if (!isVisible) return undefined;
 
     let rafId = null;
-    const timeoutId = setTimeout(scrollToBottom, 80);
+    const timeoutIds = [80, 240].map(delay => setTimeout(scrollToBottom, delay));
     rafId = requestAnimationFrame(() => {
       scrollToBottom();
       rafId = requestAnimationFrame(scrollToBottom);
     });
 
     return () => {
-      clearTimeout(timeoutId);
+      timeoutIds.forEach(clearTimeout);
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, [isVisible, scrollToBottom]);
@@ -1638,6 +1678,11 @@ function ChatSessionContent({
     }
   }, [isVisible, scheduleScrollToBottom]);
 
+  useEffect(() => {
+    if (!isVisible || loading) return undefined;
+    return scheduleScrollToBottom();
+  }, [isVisible, loading, scheduleScrollToBottom]);
+
   // Ensure visible sessions jump to latest when switching projects
   useEffect(() => {
     if (!isVisible) return;
@@ -1974,7 +2019,11 @@ function ChatSessionContent({
         </div>
       )}
 
-      {session?.isMainThread && <MainThreadHeader project={project} session={session} />}
+      {session?.isMainThread ? (
+        <MainThreadHeader project={project} session={session} />
+      ) : (
+        <ChildThreadHeader project={project} session={session} mainSession={mainSession} onOpenMain={onOpenMain} />
+      )}
 
       <SessionAssistantControls
         session={session}
@@ -2351,6 +2400,13 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   // Session actions
   const creatingRef = useRef(false);
+  const getTabsWithMain = useCallback((sessionId) => {
+    const mainId = sessionsRef.current.find(session => session?.isMainThread)?.id;
+    if (!sessionId) return mainId ? [mainId] : [];
+    if (!mainId || sessionId === mainId) return [sessionId];
+    return [mainId, sessionId];
+  }, []);
+
   const createNewSession = useCallback(async ({ initialMessage = null, channel = 'assistant', mode: requestedMode = null } = {}) => {
     if (!projectId || creatingRef.current) return null;
     creatingRef.current = true;
@@ -2376,7 +2432,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     };
 
     setSessions(prev => [optimisticSession, ...prev]);
-    setOpenTabs([tempId]);
+    setOpenTabs(getTabsWithMain(tempId));
     setActiveSessionId(tempId);
     setShowSessionList(false);
     if (initialMessage) {
@@ -2406,7 +2462,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         });
         return replaced ? next : [session, ...prev];
       });
-      setOpenTabs([session.id]);
+      setOpenTabs(getTabsWithMain(session.id));
       setActiveSessionId(prev => (prev === tempId ? session.id : prev));
       if (initialMessage) {
         setPendingInitialMessages(prev => {
@@ -2430,7 +2486,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     } finally {
       creatingRef.current = false;
     }
-  }, [projectId, tool, mode, activeSessionId]);
+  }, [projectId, tool, mode, activeSessionId, getTabsWithMain]);
 
   const deleteSession = useCallback(async (sessionId) => {
     if (!projectId) return;
@@ -2439,7 +2495,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       const remainingTabs = openTabsRef.current.filter(id => id !== sessionId);
       setOpenTabs(prev => prev.filter(id => id !== sessionId));
       setSessions(prev => prev.filter(s => s.id !== sessionId));
-      setActiveSessionId(prev => (prev === sessionId ? (remainingTabs[remainingTabs.length - 1] || null) : prev));
+      setActiveSessionId(prev => (prev === sessionId ? (remainingTabs[remainingTabs.length - 1] || getTabsWithMain(null)[0] || null) : prev));
       return;
     }
     try {
@@ -2452,13 +2508,13 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
           if (remainingTabs.length > 0) {
             setActiveSessionId(remainingTabs[remainingTabs.length - 1]);
           } else {
-            setActiveSessionId(null);
+            setActiveSessionId(getTabsWithMain(null)[0] || null);
           }
         }
         return filtered;
       });
     } catch {}
-  }, [projectId, activeSessionId, openTabs]);
+  }, [projectId, activeSessionId, openTabs, getTabsWithMain]);
 
   const markSessionRead = useCallback((sessionId) => {
     if (!projectId || !sessionId) return;
@@ -2470,8 +2526,10 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   }, [projectId, onUnreadChange]);
 
   const switchToTab = useCallback((sessionId) => {
-    const previouslyOpen = openTabsRef.current.filter(id => id !== sessionId);
-    setOpenTabs([sessionId]);
+    const nextTabs = getTabsWithMain(sessionId);
+    const nextOpen = new Set(nextTabs);
+    const previouslyOpen = openTabsRef.current.filter(id => !nextOpen.has(id));
+    setOpenTabs(nextTabs);
     setActiveSessionId(sessionId);
     markSessionRead(sessionId);
     if (projectId) {
@@ -2488,11 +2546,13 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         body: JSON.stringify({ status: 'open' }),
       }).catch(() => {});
     }
-  }, [projectId, markSessionRead]);
+  }, [projectId, markSessionRead, getTabsWithMain]);
 
   const openSession = useCallback((sessionId) => {
-    const previouslyOpen = openTabsRef.current.filter(id => id !== sessionId);
-    setOpenTabs([sessionId]);
+    const nextTabs = getTabsWithMain(sessionId);
+    const nextOpen = new Set(nextTabs);
+    const previouslyOpen = openTabsRef.current.filter(id => !nextOpen.has(id));
+    setOpenTabs(nextTabs);
     setActiveSessionId(sessionId);
     setShowSessionList(false);
     markSessionRead(sessionId);
@@ -2510,7 +2570,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         body: JSON.stringify({ status: 'open' }),
       }).catch(() => {});
     }
-  }, [projectId, markSessionRead]);
+  }, [projectId, markSessionRead, getTabsWithMain]);
 
   const openHistorySession = useCallback((session) => {
     if (!session?.id) return;
@@ -2523,7 +2583,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     setOpenTabs(prev => {
       const filtered = prev.filter(id => id !== sessionId);
       if (sessionId === activeSessionId) {
-        setActiveSessionId(null);
+        setActiveSessionId(filtered[filtered.length - 1] || getTabsWithMain(null)[0] || null);
       }
       return filtered;
     });
@@ -2535,7 +2595,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         body: JSON.stringify({ status: 'closed' }),
       }).catch(() => {});
     }
-  }, [projectId, activeSessionId]);
+  }, [projectId, activeSessionId, getTabsWithMain]);
 
   const clearActiveSession = useCallback(() => {
     if (activeSessionId) {
@@ -3215,6 +3275,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                   isSelected={activeSessionId === tabId}
                   onChangedFilesChange={handleChangedFilesChange}
                   sessionBubbleDock={tabVisible ? sessionBubbleDock : null}
+                  mainSession={mainSession}
+                  onOpenMain={openMainThread}
                 />
               )}
             </div>
