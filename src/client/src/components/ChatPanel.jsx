@@ -24,6 +24,23 @@ function chatHistorySinceIso() {
   return new Date(Date.now() - CHAT_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function useIsMobileLayout() {
+  const [isMobile, setIsMobile] = useState(() => (
+    typeof window !== 'undefined' ? window.matchMedia('(max-width: 767px)').matches : false
+  ));
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const query = window.matchMedia('(max-width: 767px)');
+    const update = () => setIsMobile(query.matches);
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+
+  return isMobile;
+}
+
 /**
  * Format job progress for display
  */
@@ -445,8 +462,8 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   const effortOptions = toolEfforts;
 
   return (
-    <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-surface-700/40 bg-surface-850/40">
-      <div className="flex items-center gap-1 rounded-md border border-surface-700 bg-surface-900/60 p-0.5">
+    <div className="flex flex-wrap items-center gap-2 px-2 py-2 border-b border-surface-700/40 bg-surface-850/40 sm:px-3">
+      <div className="flex w-full items-center gap-1 overflow-x-auto rounded-md border border-surface-700 bg-surface-900/60 p-0.5 sm:w-auto">
         <button
           onClick={() => onChannelChange?.('assistant')}
           className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
@@ -497,7 +514,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
           value={effectiveTool}
           disabled={disabled}
           onChange={(e) => onUpdate({ tool: e.target.value, model: '', effort: '' })}
-          className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50"
+          className="max-w-[140px] bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50 sm:max-w-none"
         >
           {CLI_TOOLS.map((toolOption) => (
             <option key={toolOption.id} value={toolOption.id}>
@@ -514,7 +531,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
             value={selectedModel}
             disabled={disabled}
             onChange={(e) => onUpdate({ model: e.target.value })}
-            className="max-w-[220px] bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50"
+            className="max-w-[150px] bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50 sm:max-w-[220px]"
           >
             {modelOptions.map((option, idx) => (
               <option
@@ -550,7 +567,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
         </>
       )}
 
-      <div className="ml-auto text-[10px] text-surface-500 truncate">
+      <div className="hidden min-w-0 text-[10px] text-surface-500 truncate sm:ml-auto sm:block">
         {channel === 'salesforce'
           ? 'Salesforce workbench: schema, SOQL, flows, debug, REST, data'
           : channel === 'shell'
@@ -1798,6 +1815,7 @@ function ChatSessionContent({
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
 export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], onProjectUpdated, onSelectedSessionFilesChange }) {
+  const isMobileLayout = useIsMobileLayout();
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -2362,8 +2380,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const allCollapsed = expandedSessions.length === 0;
   const visibleTabIds = useMemo(() => {
     const ordered = [activeSessionId, ...openTabs.filter(id => id !== activeSessionId)].filter(Boolean);
-    return ordered.slice(0, Math.min(Math.max(splitCount, 1), 4));
-  }, [activeSessionId, openTabs, splitCount]);
+    return ordered.slice(0, isMobileLayout ? 1 : Math.min(Math.max(splitCount, 1), 4));
+  }, [activeSessionId, openTabs, splitCount, isMobileLayout]);
 
   const gridStyle = useMemo(() => {
     const count = visibleTabIds.length;
@@ -2386,7 +2404,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
       {/* Collapsible session sections */}
-      <div className="flex items-center border-b border-surface-700/50 bg-surface-850/60" style={{ flexShrink: 0 }}>
+      <div className="flex items-center border-b border-surface-700/50 bg-surface-850/60 pt-10 sm:pt-0" style={{ flexShrink: 0 }}>
         <div className="flex-1 flex items-center overflow-x-auto scrollbar-none min-w-0">
           {sortedSessions.map((s) => {
             const expanded = openTabs.includes(s.id);
@@ -2395,7 +2413,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
             <div
               key={s.id}
               onClick={() => expanded ? switchToTab(s.id) : openSession(s.id)}
-              className={`group flex items-center gap-1.5 px-3 py-1.5 cursor-pointer border-r border-surface-700/30 min-w-0 max-w-[220px] transition-all duration-200 ${
+              className={`group flex items-center gap-1.5 px-2.5 py-1.5 cursor-pointer border-r border-surface-700/30 min-w-[150px] max-w-[190px] transition-all duration-200 sm:min-w-0 sm:max-w-[220px] sm:px-3 ${
                 s.id === activeSessionId
                   ? 'bg-surface-800 text-surface-100'
                   : 'bg-surface-850/80 text-surface-400 hover:bg-surface-800/50 hover:text-surface-200'
@@ -2436,7 +2454,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
               {s.hasUnread && s.id !== activeSessionId && (
                 <span className="flex-shrink-0 w-1.5 h-1.5 rounded-full bg-primary-500 animate-pulse" />
               )}
-              <span className={`flex items-center gap-1 rounded-full px-1 py-0.5 text-[9px] ${status.text}`} title={status.label}>
+              <span className={`hidden items-center gap-1 rounded-full px-1 py-0.5 text-[9px] sm:flex ${status.text}`} title={status.label}>
                 <span className={`h-1.5 w-1.5 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
                 {status.label}
               </span>
@@ -2486,7 +2504,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         </div>
 
         <div className="flex items-center gap-0.5 px-1 border-l border-surface-700/30 flex-shrink-0">
-          <div className="flex items-center gap-0.5 mr-1 border-r border-surface-700/30 pr-1">
+          <div className="hidden items-center gap-0.5 mr-1 border-r border-surface-700/30 pr-1 sm:flex">
             {[1, 2, 3, 4].map(n => (
               <button
                 key={n}

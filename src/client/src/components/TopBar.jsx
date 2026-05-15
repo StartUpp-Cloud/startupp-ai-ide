@@ -60,32 +60,32 @@ export default function TopBar({
 
   return (
     <div className="flex-shrink-0">
-      <div className="flex items-center bg-surface-850 border-b border-surface-700 px-3 py-1.5 gap-3">
+      <div className="flex flex-wrap items-center bg-surface-850 border-b border-surface-700 px-2 py-1.5 gap-1.5 sm:flex-nowrap sm:px-3 sm:gap-3">
 
         {/* Logo + Project */}
         <div className="flex items-center gap-2 flex-shrink-0">
-          <div className="w-6 h-6 rounded-md bg-primary-500 flex items-center justify-center">
+          <div className="w-6 h-6 rounded-md bg-primary-500 flex items-center justify-center flex-shrink-0">
             <span className="text-surface-950 font-display font-bold text-[10px]">P</span>
           </div>
           <span className="text-[11px] font-medium text-surface-400 tracking-tight hidden sm:inline">IDE</span>
           {selectedProject && (
             <>
-              <span className="text-surface-600 text-[11px]">/</span>
-              <span className="text-[11px] text-surface-200 font-medium truncate max-w-[160px]">{selectedProject.name}</span>
+              <span className="text-surface-600 text-[11px] hidden sm:inline">/</span>
+              <span className="text-[11px] text-surface-200 font-medium truncate max-w-[110px] sm:max-w-[160px]">{selectedProject.name}</span>
             </>
           )}
         </div>
 
         {/* Branch info */}
         {currentBranch?.branch && (
-          <div className="flex items-center gap-1.5 text-[11px] text-surface-400">
+          <div className="hidden min-w-0 items-center gap-1.5 text-[11px] text-surface-400 sm:flex">
             <GitBranch className="w-3 h-3" />
             <span className="truncate max-w-[120px]">{currentBranch.branch}</span>
             {currentBranch.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" title="Uncommitted changes" />}
           </div>
         )}
 
-        <div className="w-px h-4 bg-surface-700" />
+        <div className="hidden w-px h-4 bg-surface-700 sm:block" />
 
         {/* Tool selector */}
         <div className="relative" ref={toolMenuRef}>
@@ -131,7 +131,7 @@ export default function TopBar({
           </div>
         )}
 
-        <div className="w-px h-4 bg-surface-700" />
+        <div className="hidden w-px h-4 bg-surface-700 sm:block" />
 
         {selectedProject && (
           <select
@@ -145,12 +145,12 @@ export default function TopBar({
           </select>
         )}
 
-        <div className="w-px h-4 bg-surface-700" />
+        <div className="hidden w-px h-4 bg-surface-700 sm:block" />
 
         {/* Slack */}
         <button
           onClick={() => setShowSlack(true)}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium text-surface-400 hover:text-surface-200 hover:bg-surface-750 transition-colors"
+          className="hidden items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium text-surface-400 hover:text-surface-200 hover:bg-surface-750 transition-colors sm:flex"
           title="Connect Slack"
         >
           <MessageSquare size={12} className="text-[#4A154B]" />
@@ -158,10 +158,10 @@ export default function TopBar({
         </button>
 
         {/* Spacer */}
-        <div className="flex-1" />
+        <div className="flex-1 min-w-2" />
 
         {/* Tools */}
-        <div className="flex items-center gap-1 flex-shrink-0">
+        <div className="flex items-center gap-0.5 flex-shrink-0 sm:gap-1">
           <button
             onClick={() => window.open('/branch-review', '_blank')}
             className="p-1.5 rounded hover:bg-surface-750 text-surface-400 hover:text-surface-200 transition-colors"

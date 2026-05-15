@@ -9,6 +9,8 @@ import { useWebSocket, WS_STATUS } from '../hooks/useWebSocket';
 import {
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   ChevronDown,
   ChevronUp,
   GitBranch,
@@ -25,6 +27,23 @@ const STORAGE_KEYS = {
   LEFT_PANEL_COLLAPSED: 'ide-left-collapsed',
 };
 
+function useIsMobileLayout() {
+  const [isMobile, setIsMobile] = useState(() => (
+    typeof window !== 'undefined' ? window.matchMedia('(max-width: 767px)').matches : false
+  ));
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const query = window.matchMedia('(max-width: 767px)');
+    const update = () => setIsMobile(query.matches);
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+
+  return isMobile;
+}
+
 function normalizeUnreadSessions(value) {
   if (!value || typeof value !== 'object') return {};
 
@@ -39,6 +58,7 @@ function normalizeUnreadSessions(value) {
 
 export default function IDE() {
   const { projects, getProject, getGlobalRules, notify } = useProjects();
+  const isMobileLayout = useIsMobileLayout();
   // Layout state (with persistence)
   const [leftPanelWidth, setLeftPanelWidth] = useState(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.LEFT_PANEL_WIDTH);
@@ -51,6 +71,7 @@ export default function IDE() {
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(() => {
     return localStorage.getItem(STORAGE_KEYS.LEFT_PANEL_COLLAPSED) === 'true';
   });
+  const [mobileDrawer, setMobileDrawer] = useState(null);
 
   // Project state (with persistence)
   const [selectedProjectId, setSelectedProjectId] = useState(() => {
@@ -388,7 +409,99 @@ export default function IDE() {
 
   // ── Computed layout values ──
 
-  const leftW = leftPanelCollapsed ? 'auto' : `${leftPanelWidth}px`;
+  const projectPanel = (
+    <>
+      {/* Projects header */}
+      <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-700 flex-shrink-0">
+        <span className="text-[11px] font-medium text-surface-300 uppercase tracking-wide">Projects</span>
+        <button
+          onClick={() => isMobileLayout ? setMobileDrawer(null) : setLeftPanelCollapsed(true)}
+          className="p-1 hover:bg-surface-700 rounded text-surface-400 hover:text-surface-200"
+          title={isMobileLayout ? 'Close projects' : 'Collapse projects'}
+        >
+          <PanelLeftClose className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {/* Project list */}
+      <div className="flex-1 min-h-0 overflow-auto">
+        <ProjectManagerPanel
+          selectedProjectId={selectedProjectId}
+          onSelectProject={(id) => {
+            setSelectedProjectId(id);
+            if (isMobileLayout) setMobileDrawer(null);
+          }}
+          onProjectChanged={() => {
+            if (selectedProjectId) loadProject(selectedProjectId);
+          }}
+          onProjectRead={handleProjectRead}
+          unreadCounts={unreadCounts}
+        />
+      </div>
+
+      {/* Repos + Branches */}
+      {selectedProject && (containerRepos.length > 0 || currentBranch) && (
+        <div className="flex-shrink-0 px-2 py-2 bg-surface-800/50 border-y border-surface-700 space-y-1 max-h-48 overflow-y-auto">
+          {containerRepos.length > 0 ? (
+            containerRepos.map(repo => (
+              <div key={repo.path} className="px-2 py-1.5 rounded-md bg-surface-850 border border-surface-700/50">
+                <div className="flex items-center gap-1.5">
+                  <FolderOpen className="w-3 h-3 text-surface-500 flex-shrink-0" />
+                  <span className="text-[11px] font-medium text-surface-200 truncate">{repo.name}</span>
+                  {repo.isGitRepo && repo.branch && (
+                    <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono ml-auto flex-shrink-0 ${
+                      ['main','master'].includes(repo.branch) ? 'bg-yellow-500/10 text-yellow-300' : 'bg-green-500/10 text-green-300'
+                    }`}>
+                      <GitBranch className="w-2.5 h-2.5" />
+                      <span className="truncate max-w-20">{repo.branch}</span>
+                      {repo.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : currentBranch ? (
+            <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md ${
+              currentBranch.isMainBranch ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-green-500/10 border border-green-500/20'
+            }`}>
+              <GitBranch className={`w-3.5 h-3.5 ${currentBranch.isMainBranch ? 'text-yellow-400' : 'text-green-400'}`} />
+              <span className={`text-[11px] font-mono font-semibold truncate ${currentBranch.isMainBranch ? 'text-yellow-300' : 'text-green-300'}`}>
+                {currentBranch.branch}
+              </span>
+              {currentBranch.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
+            </div>
+          ) : null}
+          <button
+            onClick={() => window.open('/branch-review', '_blank')}
+            className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[10px] font-medium text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors"
+          >
+            <Sparkles className="w-3 h-3" />
+            Review Changes
+          </button>
+        </div>
+      )}
+
+      {/* Selected session changed files */}
+      <div className="flex-shrink-0 overflow-hidden border-t border-surface-700 bg-surface-850" style={{ minHeight: '120px', maxHeight: '40%' }}>
+        <div className="flex items-center gap-1.5 border-b border-surface-700 px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-surface-300">
+          <FileCode className="h-3 w-3 text-primary-400" />
+          Session Files
+        </div>
+        <div className="max-h-56 overflow-y-auto p-2">
+          {selectedSessionFiles.length > 0 ? selectedSessionFiles.map(file => (
+            <div key={`${file.status}:${file.path}`} className="mb-1 flex items-center gap-2 rounded border border-surface-700/50 bg-surface-900/45 px-2 py-1 font-mono text-[10px] text-surface-300">
+              <span className="w-4 flex-shrink-0 text-primary-300">{file.status || 'M'}</span>
+              <span className="truncate" title={file.path}>{file.path}</span>
+            </div>
+          )) : (
+            <div className="rounded border border-dashed border-surface-700/60 px-3 py-4 text-center text-[11px] text-surface-500">
+              Select a session to see files it changed.
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
 
   // ── Render ──
 
@@ -424,105 +537,41 @@ export default function IDE() {
         }
       />
 
-      {/* ═══ Row 2: Main content (3-column) ═══ */}
+      {/* ═══ Row 2: Main content ═══ */}
       <div
+        className="relative min-h-0"
         style={{
           display: 'grid',
-          gridTemplateColumns: `${leftPanelCollapsed ? 'auto' : `${leftPanelWidth}px 4px`} 1fr 4px ${rightPanelWidth}px`,
+          gridTemplateColumns: isMobileLayout
+            ? '1fr'
+            : `${leftPanelCollapsed ? 'auto' : `${leftPanelWidth}px 4px`} 1fr 4px ${rightPanelWidth}px`,
           overflow: 'hidden',
         }}
       >
+        {isMobileLayout && (
+          <div className="absolute left-2 right-2 top-2 z-20 flex items-center justify-between pointer-events-none">
+            <button
+              onClick={() => setMobileDrawer('left')}
+              className="pointer-events-auto flex items-center gap-1 rounded-full border border-surface-700/70 bg-surface-900/90 px-3 py-1.5 text-[11px] font-medium text-surface-200 shadow-lg backdrop-blur"
+            >
+              <PanelLeftOpen className="h-3.5 w-3.5" />
+              Projects
+            </button>
+            <button
+              onClick={() => setMobileDrawer('right')}
+              className="pointer-events-auto flex items-center gap-1 rounded-full border border-surface-700/70 bg-surface-900/90 px-3 py-1.5 text-[11px] font-medium text-surface-200 shadow-lg backdrop-blur"
+            >
+              Tools
+              <PanelRightOpen className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* ── Left Panel ── */}
-        {!leftPanelCollapsed ? (
+        {!isMobileLayout && !leftPanelCollapsed ? (
           <>
             <div className="flex flex-col overflow-hidden bg-surface-850 border-r border-surface-700">
-              {/* Projects header */}
-              <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-700 flex-shrink-0">
-                <span className="text-[11px] font-medium text-surface-300 uppercase tracking-wide">Projects</span>
-                <button
-                  onClick={() => setLeftPanelCollapsed(true)}
-                  className="p-1 hover:bg-surface-700 rounded text-surface-400 hover:text-surface-200"
-                >
-                  <PanelLeftClose className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {/* Project list */}
-              <div className="flex-1 min-h-0 overflow-auto">
-                <ProjectManagerPanel
-                  selectedProjectId={selectedProjectId}
-                  onSelectProject={(id) => {
-                    setSelectedProjectId(id);
-                  }}
-                  onProjectChanged={() => {
-                    if (selectedProjectId) loadProject(selectedProjectId);
-                  }}
-                  onProjectRead={handleProjectRead}
-                  unreadCounts={unreadCounts}
-                />
-              </div>
-
-              {/* Repos + Branches */}
-              {selectedProject && (containerRepos.length > 0 || currentBranch) && (
-                <div className="flex-shrink-0 px-2 py-2 bg-surface-800/50 border-y border-surface-700 space-y-1 max-h-48 overflow-y-auto">
-                  {containerRepos.length > 0 ? (
-                    containerRepos.map(repo => (
-                      <div key={repo.path} className="px-2 py-1.5 rounded-md bg-surface-850 border border-surface-700/50">
-                        <div className="flex items-center gap-1.5">
-                          <FolderOpen className="w-3 h-3 text-surface-500 flex-shrink-0" />
-                          <span className="text-[11px] font-medium text-surface-200 truncate">{repo.name}</span>
-                          {repo.isGitRepo && repo.branch && (
-                            <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono ml-auto flex-shrink-0 ${
-                              ['main','master'].includes(repo.branch) ? 'bg-yellow-500/10 text-yellow-300' : 'bg-green-500/10 text-green-300'
-                            }`}>
-                              <GitBranch className="w-2.5 h-2.5" />
-                              <span className="truncate max-w-20">{repo.branch}</span>
-                              {repo.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  ) : currentBranch ? (
-                    <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md ${
-                      currentBranch.isMainBranch ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-green-500/10 border border-green-500/20'
-                    }`}>
-                      <GitBranch className={`w-3.5 h-3.5 ${currentBranch.isMainBranch ? 'text-yellow-400' : 'text-green-400'}`} />
-                      <span className={`text-[11px] font-mono font-semibold truncate ${currentBranch.isMainBranch ? 'text-yellow-300' : 'text-green-300'}`}>
-                        {currentBranch.branch}
-                      </span>
-                      {currentBranch.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
-                    </div>
-                  ) : null}
-                  <button
-                    onClick={() => window.open('/branch-review', '_blank')}
-                    className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[10px] font-medium text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors"
-                  >
-                    <Sparkles className="w-3 h-3" />
-                    Review Changes
-                  </button>
-                </div>
-              )}
-
-              {/* Selected session changed files */}
-              <div className="flex-shrink-0 overflow-hidden border-t border-surface-700 bg-surface-850" style={{ minHeight: '120px', maxHeight: '40%' }}>
-                <div className="flex items-center gap-1.5 border-b border-surface-700 px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-surface-300">
-                  <FileCode className="h-3 w-3 text-primary-400" />
-                  Session Files
-                </div>
-                <div className="max-h-56 overflow-y-auto p-2">
-                  {selectedSessionFiles.length > 0 ? selectedSessionFiles.map(file => (
-                    <div key={`${file.status}:${file.path}`} className="mb-1 flex items-center gap-2 rounded border border-surface-700/50 bg-surface-900/45 px-2 py-1 font-mono text-[10px] text-surface-300">
-                      <span className="w-4 flex-shrink-0 text-primary-300">{file.status || 'M'}</span>
-                      <span className="truncate" title={file.path}>{file.path}</span>
-                    </div>
-                  )) : (
-                    <div className="rounded border border-dashed border-surface-700/60 px-3 py-4 text-center text-[11px] text-surface-500">
-                      Select a session to see files it changed.
-                    </div>
-                  )}
-                </div>
-              </div>
+              {projectPanel}
             </div>
 
             {/* Left resizer */}
@@ -531,7 +580,7 @@ export default function IDE() {
               onMouseDown={() => setIsResizing('left')}
             />
           </>
-        ) : (
+        ) : !isMobileLayout ? (
           <div className="flex flex-col items-center py-2 px-1 bg-surface-850 border-r border-surface-700">
             <button
               onClick={() => setLeftPanelCollapsed(false)}
@@ -540,7 +589,7 @@ export default function IDE() {
               <PanelLeftOpen className="w-4 h-4" />
             </button>
           </div>
-        )}
+        ) : null}
 
         {/* ── Center: Chat ── */}
         {/* Render cached ChatPanels - keeps them mounted for instant switching */}
@@ -602,20 +651,56 @@ export default function IDE() {
         </div>
 
         {/* Right resizer */}
-        <div
+        {!isMobileLayout && <div
           className="bg-surface-700 hover:bg-primary-500 cursor-col-resize transition-colors"
           onMouseDown={() => setIsResizing('right')}
-        />
+        />}
 
         {/* ── Right Panel ── */}
-        <div className="overflow-hidden">
+        {!isMobileLayout && <div className="overflow-hidden">
           <RightPanel
             projectId={selectedProjectId}
             projectPath={selectedProject?.folderPath}
             selectedTool={selectedTool}
             containerName={selectedProject?.containerName}
           />
-        </div>
+        </div>}
+
+        {isMobileLayout && mobileDrawer && (
+          <div className="absolute inset-0 z-40 bg-surface-950/60 backdrop-blur-sm" onClick={() => setMobileDrawer(null)}>
+            <div
+              className={`absolute top-0 h-full w-[min(88vw,360px)] overflow-hidden border-surface-700 bg-surface-850 shadow-2xl ${
+                mobileDrawer === 'left' ? 'left-0 border-r' : 'right-0 border-l'
+              }`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {mobileDrawer === 'left' ? (
+                <div className="flex h-full flex-col overflow-hidden">
+                  {projectPanel}
+                </div>
+              ) : (
+                <div className="flex h-full flex-col overflow-hidden">
+                  <div className="flex items-center justify-between border-b border-surface-700 px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-surface-300">
+                    Tools
+                    <button
+                      onClick={() => setMobileDrawer(null)}
+                      className="rounded p-1 text-surface-400 hover:bg-surface-700 hover:text-surface-200"
+                      title="Close tools"
+                    >
+                      <PanelRightClose className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <RightPanel
+                    projectId={selectedProjectId}
+                    projectPath={selectedProject?.folderPath}
+                    selectedTool={selectedTool}
+                    containerName={selectedProject?.containerName}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

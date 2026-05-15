@@ -207,7 +207,7 @@ export default function ChatInput({
       : 'Tell the agent what to do... (Ctrl+Enter to send)';
 
   return (
-    <div className="flex-shrink-0 px-4 pt-3 pb-4 w-full">
+    <div className="flex-shrink-0 px-2 pt-2 pb-3 w-full sm:px-4 sm:pt-3 sm:pb-4">
       {/* Search bar */}
       {searching && (
         <div className="flex items-center gap-2 mb-2">
@@ -260,7 +260,7 @@ export default function ChatInput({
       )}
 
       {/* Card container for input + toolbar */}
-      <div className="bg-surface-800/50 border border-surface-700/50 rounded-2xl px-3 pt-2 pb-2">
+      <div className="bg-surface-800/50 border border-surface-700/50 rounded-2xl px-2 pt-2 pb-2 sm:px-3">
         {/* Text input */}
         <textarea
           ref={textareaRef}
@@ -270,7 +270,7 @@ export default function ChatInput({
           placeholder={placeholder}
           disabled={disabled}
           rows={1}
-          className="w-full bg-transparent border-none px-1 py-2 text-sm text-surface-200 resize-none outline-none disabled:opacity-40 placeholder:text-surface-500"
+          className="w-full bg-transparent border-none px-1 py-2 text-[16px] text-surface-200 resize-none outline-none disabled:opacity-40 placeholder:text-surface-500 sm:text-sm"
         />
 
         {/* Hidden file input */}
@@ -284,8 +284,8 @@ export default function ChatInput({
         />
 
         {/* Toolbar */}
-        <div className="flex items-center justify-between gap-2 w-full min-w-0 relative">
-          <div className="flex flex-wrap items-center gap-1 min-w-0 pr-2">
+        <div className="flex items-end justify-between gap-2 w-full min-w-0 relative">
+          <div className="flex flex-wrap items-center gap-1 min-w-0 pr-1 sm:pr-2">
             {/* Search button */}
             <button
               onClick={() => setSearching(!searching)}
@@ -328,7 +328,7 @@ export default function ChatInput({
             </button>
 
             {channel !== 'shell' && (
-              <div className="ml-1 flex flex-wrap items-center gap-1 border-l border-surface-700/50 pl-2">
+              <div className="ml-1 flex max-w-full flex-wrap items-center gap-1 border-l border-surface-700/50 pl-2">
                 {ROLE_PROMPTS.map(role => {
                   const active = activeRolePromptIds.includes(role.id);
                   return (
@@ -347,7 +347,7 @@ export default function ChatInput({
                       <span className={`relative h-3 w-5 rounded-full transition-colors ${active ? 'bg-primary-500/70' : 'bg-surface-700'}`}>
                         <span className={`absolute top-0.5 h-2 w-2 rounded-full bg-white/90 transition-transform ${active ? 'translate-x-2.5' : 'translate-x-0.5'}`} />
                       </span>
-                      <span>{role.shortLabel}</span>
+                      <span className="hidden min-[390px]:inline">{role.shortLabel}</span>
                     </button>
                   );
                 })}

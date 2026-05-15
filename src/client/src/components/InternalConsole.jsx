@@ -430,14 +430,14 @@ export default function InternalConsole({
     <div className={embedded ? 'flex flex-col flex-1 min-h-0 bg-surface-950' : 'border-t border-surface-700 flex-shrink-0'}>
       {/* Toggle button */}
       {embedded ? (
-        <div className="flex items-center gap-2 px-3 py-1.5 text-xs bg-surface-850/80 border-b border-surface-700 flex-shrink-0">
+        <div className="flex flex-wrap items-center gap-2 px-2 py-1.5 text-xs bg-surface-850/80 border-b border-surface-700 flex-shrink-0 sm:flex-nowrap sm:px-3">
           <TerminalIcon size={13} className="text-amber-400" />
           <span className="font-medium text-surface-200">Shell</span>
           <div
             className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}
             title={connected ? 'Connected' : restarting ? 'Restarting...' : 'Connecting...'}
           />
-          <span className="text-[10px] text-surface-500 truncate">Full terminal PTY inside this project container</span>
+          <span className="hidden text-[10px] text-surface-500 truncate sm:inline">Full terminal PTY inside this project container</span>
           <span className="flex-1" />
           {connected && activeChatSessionId && (
             <button
@@ -593,12 +593,12 @@ function CommandBuilder({ onRun }) {
   };
 
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-surface-850 border-t border-surface-700/50 flex-shrink-0">
+      <div className="flex flex-wrap items-center gap-1 px-2 py-1 bg-surface-850 border-t border-surface-700/50 flex-shrink-0 sm:flex-nowrap">
       <Sparkles size={12} className="text-primary-400 flex-shrink-0" />
       <select
         value={quickCommand}
         onChange={(e) => setQuickCommand(e.target.value)}
-        className="max-w-[170px] bg-surface-800 border border-surface-700 rounded px-1.5 py-0.5 text-[10px] text-surface-300 outline-none focus:border-primary-500/50"
+        className="max-w-[130px] bg-surface-800 border border-surface-700 rounded px-1.5 py-0.5 text-[10px] text-surface-300 outline-none focus:border-primary-500/50 sm:max-w-[170px]"
         title="Run a common setup command"
       >
         {QUICK_COMMANDS.map((item) => (
@@ -625,11 +625,11 @@ function CommandBuilder({ onRun }) {
           }
         }}
         placeholder="Describe a command... (Enter to generate)"
-        className="flex-1 bg-transparent text-[11px] text-surface-300 outline-none placeholder:text-surface-600"
+        className="min-w-[160px] flex-1 bg-transparent text-[16px] text-surface-300 outline-none placeholder:text-surface-600 sm:text-[11px]"
       />
       {suggestion && (
-        <div className="flex items-center gap-1">
-          <code className="text-[10px] text-primary-300 bg-surface-800 px-1.5 py-0.5 rounded font-mono max-w-[200px] truncate">{suggestion}</code>
+        <div className="flex min-w-0 items-center gap-1">
+          <code className="max-w-[150px] truncate rounded bg-surface-800 px-1.5 py-0.5 font-mono text-[10px] text-primary-300 sm:max-w-[200px]">{suggestion}</code>
           <button onClick={handleRun} className="text-[10px] text-green-400 hover:text-green-300 px-1">Run</button>
           <button onClick={() => setSuggestion(null)} className="text-[10px] text-surface-500 hover:text-surface-300 px-1">✕</button>
         </div>
