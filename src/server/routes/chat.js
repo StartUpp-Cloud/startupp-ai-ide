@@ -53,16 +53,34 @@ router.get('/:projectId/chat/sessions/search', (req, res) => {
   }
 });
 
+// GET /api/projects/:projectId/chat/sessions/main — Ensure and return the project main thread
+router.get('/:projectId/chat/sessions/main', (req, res) => {
+  try {
+    const { projectId } = req.params;
+    chatStore.migrateIfNeeded(projectId);
+    const assistantSettings = resolveSessionAssistantSettings(req.query, {
+      tool: 'claude',
+    });
+    if (req.query.mode) assistantSettings.mode = String(req.query.mode);
+    const session = chatStore.getMainThreadSession(projectId, assistantSettings);
+    res.json({ session });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // POST /api/projects/:projectId/chat/sessions — Create a new session
 router.post('/:projectId/chat/sessions', (req, res) => {
   try {
     const { projectId } = req.params;
-    const { name } = req.body;
+    const { name, isMainThread } = req.body;
     const assistantSettings = resolveSessionAssistantSettings(req.body, {
       tool: 'claude',
     });
     if (req.body.mode) assistantSettings.mode = String(req.body.mode);
-    const session = chatStore.createSession(projectId, name || null, assistantSettings);
+    const session = isMainThread
+      ? chatStore.getMainThreadSession(projectId, assistantSettings)
+      : chatStore.createSession(projectId, name || null, assistantSettings);
     res.status(201).json(session);
   } catch (error) {
     res.status(500).json({ error: error.message });

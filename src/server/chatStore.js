@@ -80,6 +80,26 @@ class ChatStore {
     }, projectId);
   }
 
+  getMainThreadSession(projectId, assistantSettings = {}) {
+    const existing = this.getSessions(projectId, { includeArchived: true })
+      .find(session => session?.isMainThread);
+    if (existing) return existing;
+
+    const resolvedAssistant = resolveSessionAssistantSettings(assistantSettings, { tool: 'claude' });
+    const now = new Date().toISOString();
+    return sqliteStore.saveChatSession({
+      name: 'Main thread',
+      createdAt: now,
+      updatedAt: now,
+      messageCount: 0,
+      manualName: true,
+      status: 'open',
+      pinned: true,
+      isMainThread: true,
+      ...resolvedAssistant,
+    }, projectId);
+  }
+
   getSessions(projectId, { includeArchived = false } = {}) {
     const rows = includeArchived
       ? this._db().prepare('SELECT * FROM chat_sessions WHERE project_id = ? ORDER BY created_at DESC').all(projectId)

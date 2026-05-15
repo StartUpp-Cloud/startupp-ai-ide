@@ -359,6 +359,7 @@ function SessionBubble({
 
 function SessionBubbleDock({
   sessions,
+  mainSession,
   activeSessionId,
   editingSessionId,
   editingName,
@@ -367,11 +368,11 @@ function SessionBubbleDock({
   onFinishEditing,
   onCancelEditing,
   onOpenSession,
+  onOpenMain,
   onCollapseSession,
   onTogglePin,
   onStartEditing,
   onDeleteSession,
-  onNewThread,
   historySearch,
   onHistorySearchChange,
   historySearchLoading,
@@ -381,6 +382,7 @@ function SessionBubbleDock({
   const orderedSessions = useMemo(() => [...sessions].sort(sortSessionsOldestFirst), [sessions]);
   const normalSessions = orderedSessions.filter(session => !session?.pinned);
   const pinnedSessions = orderedSessions.filter(session => session?.pinned);
+  const mainStatus = getSessionStatus(mainSession, { expanded: mainSession?.id === activeSessionId, active: mainSession?.id === activeSessionId });
 
   const renderBubble = (session) => (
     <SessionBubble
@@ -402,11 +404,34 @@ function SessionBubbleDock({
   );
 
   return (
-    <div className="flex-shrink-0 border-t border-surface-700/50 px-3 py-2 shadow-[0_-10px_30px_rgba(0,0,0,0.22)]">
+    <div className="flex-shrink-0 border-t border-surface-700/50 bg-surface-950/80 px-3 py-2 shadow-[0_-10px_30px_rgba(0,0,0,0.22)]">
+      {mainSession && (
+        <button
+          type="button"
+          onClick={onOpenMain}
+          className={`mb-2 flex w-full items-center gap-3 rounded-2xl border px-3 py-2 text-left transition-all ${
+            mainSession.id === activeSessionId
+              ? 'border-primary-500/45 bg-primary-500/10 text-surface-100 shadow-[0_0_24px_rgba(14,165,233,0.12)]'
+              : 'border-surface-700/70 bg-surface-900/70 text-surface-300 hover:border-surface-600 hover:bg-surface-850'
+          }`}
+        >
+          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl bg-primary-500/15 text-primary-300">
+            <Bot size={15} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="truncate text-sm font-semibold">Main thread</span>
+              <span className={`h-1.5 w-1.5 rounded-full ${mainStatus.color} ${mainStatus.pulse ? 'animate-pulse' : ''}`} />
+              <span className={`text-[10px] ${mainStatus.text}`}>{mainStatus.label}</span>
+            </div>
+            <div className="truncate text-[11px] text-surface-500">Project memory, review queue, and starting point for new work</div>
+          </div>
+        </button>
+      )}
       <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="flex min-w-0 items-center gap-2">
           <MessageSquare size={13} className="text-primary-400" />
-          <span className="text-[11px] font-medium uppercase tracking-wide text-surface-400">Session threads</span>
+          <span className="text-[11px] font-medium uppercase tracking-wide text-surface-400">Thread sessions</span>
           <span className="text-[10px] text-surface-600">oldest to newest</span>
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-2 sm:ml-auto sm:max-w-md">
@@ -417,18 +442,6 @@ function SessionBubbleDock({
             placeholder="Search sessions..."
             className="min-w-0 flex-1 rounded-full border border-surface-700 bg-surface-900 px-3 py-1 text-[11px] text-surface-200 outline-none placeholder:text-surface-600 focus:border-primary-500/60"
           />
-          <button
-            type="button"
-            onClick={onNewThread}
-            className={`flex-shrink-0 rounded-full border px-3 py-1 text-[11px] transition-colors ${
-              activeSessionId
-                ? 'border-primary-500/35 bg-primary-500/10 text-primary-200 hover:bg-primary-500/15'
-                : 'border-surface-700 bg-surface-900 text-surface-500'
-            }`}
-            title="Clear the selected session so the next message creates a new thread"
-          >
-            New thread
-          </button>
         </div>
       </div>
 
@@ -442,7 +455,7 @@ function SessionBubbleDock({
           <div className="space-y-2">
             {normalSessions.length > 0 ? normalSessions.map(renderBubble) : (
               <div className="rounded-xl border border-dashed border-surface-700 px-3 py-3 text-center text-xs text-surface-600">
-                {hasHistorySearch ? 'No matching unpinned sessions' : 'No unpinned sessions yet'}
+                {hasHistorySearch ? 'No matching unpinned sessions' : 'No child sessions yet'}
               </div>
             )}
 
@@ -458,7 +471,7 @@ function SessionBubbleDock({
           </div>
         ) : (
           <div className="rounded-xl border border-dashed border-surface-700 px-3 py-4 text-center text-xs text-surface-600">
-            {hasHistorySearch ? 'No matching sessions found' : 'No sessions yet. Send a message to create the first thread.'}
+            {hasHistorySearch ? 'No matching sessions found' : 'No child sessions yet. Use the main thread as home base.'}
           </div>
         )}
       </div>
@@ -627,6 +640,45 @@ function dedupeModelOptions(options) {
     seen.add(option.value);
     return true;
   });
+}
+
+function MainThreadHeader({ project, session }) {
+  const settings = [session?.tool, session?.model, session?.effort].filter(Boolean).join(' / ');
+
+  return (
+    <div className="border-b border-surface-700/45 bg-gradient-to-r from-primary-950/35 via-surface-900 to-surface-950 px-4 py-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-primary-400/25 bg-primary-500/15 text-primary-300">
+              <Bot size={15} />
+            </div>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-surface-100">Main thread</div>
+              <div className="truncate text-[11px] text-surface-500">{project?.name || 'Project'} home base</div>
+            </div>
+          </div>
+          <p className="mt-2 max-w-3xl text-xs leading-relaxed text-surface-400">
+            Ask what happened across sessions, review finished work, or start the next task from here. Child sessions inherit these settings by default and can still be tuned individually.
+          </p>
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-center sm:min-w-[280px]">
+          <div className="rounded-xl border border-surface-700/55 bg-surface-950/45 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wide text-surface-600">Memory</div>
+            <div className="text-xs font-medium text-surface-200">Session search</div>
+          </div>
+          <div className="rounded-xl border border-surface-700/55 bg-surface-950/45 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wide text-surface-600">Review</div>
+            <div className="text-xs font-medium text-surface-200">Thread status</div>
+          </div>
+          <div className="rounded-xl border border-surface-700/55 bg-surface-950/45 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wide text-surface-600">Defaults</div>
+            <div className="truncate text-xs font-medium text-surface-200" title={settings || 'Default assistant'}>{settings || 'Default assistant'}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange, project }) {
@@ -1922,6 +1974,8 @@ function ChatSessionContent({
         </div>
       )}
 
+      {session?.isMainThread && <MainThreadHeader project={project} session={session} />}
+
       <SessionAssistantControls
         session={session}
         defaultTool={tool}
@@ -1971,7 +2025,7 @@ function ChatSessionContent({
           </div>
         ) : displayMessages.length === 0 ? (
           <div className="flex items-center justify-center h-full text-surface-500 text-sm">
-            {searchResults ? 'No results found' : 'Start a conversation...'}
+            {searchResults ? 'No results found' : (session?.isMainThread ? 'Message the main thread to coordinate this project...' : 'Start a conversation...')}
           </div>
         ) : (
           displayMessages.map(msg => (
@@ -2211,20 +2265,23 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       return;
     }
 
-    fetch(`/api/projects/${projectId}/chat/sessions`)
-      .then(r => r.json())
-      .then(data => {
-        const list = data.sessions || [];
+    Promise.all([
+      fetch(`/api/projects/${projectId}/chat/sessions`).then(r => r.json()),
+      fetch(`/api/projects/${projectId}/chat/sessions/main?tool=${encodeURIComponent(tool)}&mode=${encodeURIComponent(mode || 'agent')}`).then(r => r.json()),
+    ])
+      .then(([data, mainData]) => {
+        const mainSession = mainData.session;
+        const list = mergeSessionLists(data.sessions || [], mainSession ? [mainSession] : []);
         setSessions(list);
-        setOpenTabs([]);
-        setActiveSessionId(null);
+        setOpenTabs(mainSession?.id ? [mainSession.id] : []);
+        setActiveSessionId(mainSession?.id || null);
       })
       .catch(() => {
         setSessions([]);
         setActiveSessionId(null);
         setOpenTabs([]);
       });
-  }, [projectId]);
+  }, [projectId, tool, mode]);
 
   // Keep session list in sync so server-created sessions (e.g. Slack) appear automatically
   useEffect(() => {
@@ -2299,6 +2356,13 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     creatingRef.current = true;
     const tempId = `pending-${Date.now()}`;
     const previousActiveId = activeSessionId;
+    const mainSession = sessionsRef.current.find(session => session?.isMainThread);
+    const inheritedSettings = {
+      tool: mainSession?.tool || tool,
+      model: mainSession?.model || null,
+      effort: mainSession?.effort || null,
+      activeRolePromptIds: mainSession?.activeRolePromptIds || [],
+    };
     const optimisticSession = {
       id: tempId,
       name: 'New conversation',
@@ -2306,8 +2370,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       messageCount: 0,
       manualName: false,
       status: 'open',
-      tool,
-      mode: requestedMode || mode || 'agent',
+      ...inheritedSettings,
+      mode: requestedMode || mainSession?.mode || mode || 'agent',
       pending: true,
     };
 
@@ -2326,7 +2390,10 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       const r = await fetch(`/api/projects/${projectId}/chat/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool, mode: requestedMode || mode || 'agent' })
+        body: JSON.stringify({
+          ...inheritedSettings,
+          mode: requestedMode || mainSession?.mode || mode || 'agent',
+        })
       });
       if (!r.ok) throw new Error('Failed to create session');
       const session = await r.json();
@@ -2697,9 +2764,19 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     [...sessions].sort(sortSessionsOldestFirst),
     [sessions]
   );
+  const mainSession = useMemo(() =>
+    sortedSessions.find(session => session?.isMainThread) || null,
+    [sortedSessions]
+  );
+  const childSessions = useMemo(() =>
+    sortedSessions.filter(session => !session?.isMainThread),
+    [sortedSessions]
+  );
 
   const hasHistorySearch = historySearch.trim().length >= 2;
-  const displayedHistorySessions = hasHistorySearch ? historySearchResults : sortedSessions;
+  const displayedHistorySessions = hasHistorySearch
+    ? historySearchResults.filter(session => !session?.isMainThread)
+    : childSessions;
   const allCollapsed = !activeSessionId;
   const visibleTabIds = useMemo(() => {
     return activeSessionId ? [activeSessionId] : [];
@@ -2715,6 +2792,10 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     else openSession(session.id);
   }, [hasHistorySearch, openHistorySession, openSession]);
 
+  const openMainThread = useCallback(() => {
+    if (mainSession?.id) openSession(mainSession.id);
+  }, [mainSession?.id, openSession]);
+
   const handleLoadArchivedSessions = useCallback(async () => {
     if (!projectId) return;
     try {
@@ -2727,6 +2808,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const sessionBubbleDock = (
     <SessionBubbleDock
       sessions={displayedHistorySessions}
+      mainSession={mainSession}
       activeSessionId={activeSessionId}
       editingSessionId={editingSessionId}
       editingName={editingName}
@@ -2735,11 +2817,11 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       onFinishEditing={finishEditing}
       onCancelEditing={cancelEditing}
       onOpenSession={handleSessionBubbleOpen}
+      onOpenMain={openMainThread}
       onCollapseSession={closeTab}
       onTogglePin={togglePin}
       onStartEditing={startEditing}
       onDeleteSession={deleteSession}
-      onNewThread={clearActiveSession}
       historySearch={historySearch}
       onHistorySearchChange={setHistorySearch}
       historySearchLoading={historySearchLoading}
@@ -3048,8 +3130,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
           <div className="flex h-full items-center justify-center px-6 text-center text-surface-500">
             <div>
               <MessageSquare size={36} className="mx-auto mb-3 opacity-25" />
-              <div className="text-sm text-surface-300">No session selected</div>
-              <div className="mt-1 text-xs text-surface-600">Send a message below to launch a new individual session.</div>
+              <div className="text-sm text-surface-300">Main thread is loading</div>
+              <div className="mt-1 text-xs text-surface-600">Once ready, it becomes the project home base.</div>
             </div>
           </div>
         )}
@@ -3142,7 +3224,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       {allCollapsed && sessionBubbleDock}
       {allCollapsed && (
         <div className="border-t border-surface-700/50 bg-surface-900">
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-surface-500">New message creates a new session</div>
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-surface-500">Fallback composer</div>
           <ChatInput mode={mode} channel="assistant" projectId={projectId} onSend={handleGlobalSend} busy={creatingRef.current} isVisible={isActive} />
         </div>
       )}

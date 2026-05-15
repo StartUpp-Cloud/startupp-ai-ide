@@ -671,7 +671,18 @@ class TerminalServer {
         // Build display content with attachment info
         let displayContent = payload.content || '';
         const attachments = payload.attachments || [];
-        const agentContent = appendRolePromptInstructions(payload.content, rolePromptInstructions);
+        let agentContent = appendRolePromptInstructions(payload.content, rolePromptInstructions);
+        if (sessionMeta?.isMainThread) {
+          agentContent = [
+            'You are the project main thread inside the IDE. Treat this chat as the durable project knowledge base and coordinator.',
+            'When the user asks what happened before, inspect/search prior chat sessions and summarize with specific session names or dates when available.',
+            'When work in child sessions appears complete, proactively summarize what needs review in a friendly, concise way.',
+            'Suggest updates to project rules, descriptions, or workflow only as proposals and always wait for explicit approval before changing them.',
+            'If the user asks for implementation work, either answer directly or help launch/focus a child session; keep the main thread useful as the home base.',
+            '',
+            agentContent,
+          ].join('\n');
+        }
         if (attachments.length > 0) {
           const attachmentList = attachments.map(a => `📎 ${a.name}`).join('\n');
           displayContent = displayContent ? `${displayContent}\n\n${attachmentList}` : attachmentList;
