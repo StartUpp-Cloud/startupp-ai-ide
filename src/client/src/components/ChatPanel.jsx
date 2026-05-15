@@ -83,13 +83,35 @@ function getSessionMode(session, fallback = 'agent') {
 }
 
 function getSessionStatus(session, { expanded = false, active = false } = {}) {
-  if (session?.pending) return { label: 'Starting', color: 'bg-surface-500', text: 'text-surface-300', pulse: true };
-  if (session?.busy || session?.working) return { label: 'Working', color: 'bg-blue-400', text: 'text-blue-300', pulse: true };
-  if (session?.waitingForInput || session?.needsInput) return { label: 'Waiting', color: 'bg-amber-400', text: 'text-amber-300', pulse: true };
-  if (session?.hasUnread) return { label: 'Done', color: 'bg-primary-400', text: 'text-primary-300', pulse: true };
-  if (active && expanded) return { label: 'Ready', color: 'bg-green-400', text: 'text-green-300', pulse: false };
-  if (expanded) return { label: 'Open', color: 'bg-sky-400', text: 'text-sky-300', pulse: false };
-  return { label: 'Stand by', color: 'bg-surface-600', text: 'text-surface-500', pulse: false };
+  if (session?.pending || session?.busy || session?.working) {
+    return { label: 'In Progress', color: 'bg-blue-400', text: 'text-blue-300', ring: 'ring-blue-400/20', pulse: true };
+  }
+  if (session?.waitingForInput || session?.needsInput || session?.awaitingFeedback) {
+    return { label: 'Waiting for feedback', color: 'bg-amber-400', text: 'text-amber-300', ring: 'ring-amber-400/20', pulse: false };
+  }
+  if (session?.hasUnread || (session?.messageCount > 0 && !active && !expanded)) {
+    return { label: 'Done', color: 'bg-green-400', text: 'text-green-300', ring: 'ring-green-400/20', pulse: session?.hasUnread };
+  }
+  return { label: 'Stand By', color: 'bg-surface-500', text: 'text-surface-400', ring: 'ring-surface-600/20', pulse: false };
+}
+
+function getSessionTimeValue(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function sortSessionsOldestFirst(a, b) {
+  return getSessionTimeValue(a?.createdAt || a?.updatedAt) - getSessionTimeValue(b?.createdAt || b?.updatedAt);
+}
+
+function formatSessionTimestamp(value) {
+  if (!value) return 'No timestamp';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'No timestamp';
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  if (sameDay) return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function collectChangedFilesFromMessages(messages = [], liveChangedFiles = []) {
@@ -204,6 +226,252 @@ function mergeSessionLists(current, incoming) {
     if (session?.id && !currentIds.has(session.id)) merged.push(byId.get(session.id));
   }
   return merged;
+}
+
+function SessionBubble({
+  session,
+  active,
+  editing,
+  editingName,
+  editInputRef,
+  onEditingNameChange,
+  onFinishEditing,
+  onCancelEditing,
+  onOpen,
+  onCollapse,
+  onTogglePin,
+  onStartEditing,
+  onDelete,
+}) {
+  const status = getSessionStatus(session, { expanded: active, active });
+  const timestamp = formatSessionTimestamp(session?.createdAt || session?.updatedAt);
+  const name = session?.name || 'Chat';
+
+  const handleOpen = () => {
+    if (!editing) onOpen?.(session);
+  };
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={handleOpen}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          handleOpen();
+        }
+      }}
+      className={`group max-w-full cursor-pointer rounded-2xl border px-3 py-2 text-left shadow-sm transition-all ${
+        active
+          ? 'border-primary-500/45 bg-primary-500/10 ring-1 ring-primary-500/20'
+          : session?.pinned
+          ? 'border-amber-500/25 bg-amber-500/5 hover:border-amber-400/40 hover:bg-amber-500/10'
+          : 'border-surface-700/55 bg-surface-850/75 hover:border-surface-600 hover:bg-surface-800/80'
+      }`}
+    >
+      <div className="mb-1 flex min-w-0 items-center gap-2">
+        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
+        <span className={`truncate text-[10px] font-medium uppercase tracking-wide ${status.text}`}>{status.label}</span>
+        <span className="ml-auto flex-shrink-0 text-[10px] tabular-nums text-surface-500">{timestamp}</span>
+        {session?.pinned && <Pin size={11} className="flex-shrink-0 -rotate-45 text-amber-400" />}
+      </div>
+
+      <div className="flex min-w-0 items-start gap-2">
+        <MessageCircle size={14} className={active ? 'mt-0.5 flex-shrink-0 text-primary-300' : 'mt-0.5 flex-shrink-0 text-surface-500'} />
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <input
+              ref={editInputRef}
+              type="text"
+              value={editingName}
+              onChange={(event) => onEditingNameChange?.(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') onFinishEditing?.();
+                if (event.key === 'Escape') onCancelEditing?.();
+              }}
+              onBlur={onFinishEditing}
+              onClick={(event) => event.stopPropagation()}
+              className="w-full rounded border border-surface-600 bg-surface-900 px-2 py-1 text-xs text-surface-100 outline-none focus:border-primary-500"
+              placeholder="Session name..."
+            />
+          ) : (
+            <div className="truncate text-sm font-medium text-surface-100" title={name}>{name}</div>
+          )}
+          {session?.matchSnippet && session?.matchType === 'content' && (
+            <div className="mt-1 truncate text-[11px] text-surface-500">{session.matchSnippet}</div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 flex min-w-0 items-center gap-2 pl-5 text-[10px] text-surface-500">
+        <span>{session?.messageCount || 0} msg</span>
+        {session?.branch && (
+          <span className="flex min-w-0 items-center gap-0.5 rounded bg-green-500/10 px-1 py-0.5 font-mono text-[9px] text-green-400" title={`Branch: ${session.branch}`}>
+            <GitBranch size={8} />
+            <span className="truncate">{session.branch}</span>
+          </span>
+        )}
+        {session?.hasUnread && !active && <span className="rounded-full bg-primary-500/15 px-1.5 py-0.5 text-primary-300">new</span>}
+        {!session?.pending && (
+          <div className="ml-auto flex items-center gap-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
+            <button
+              type="button"
+              onClick={(event) => onTogglePin?.(session.id, event)}
+              className={`rounded p-1 transition-colors ${session?.pinned ? 'text-amber-400 hover:text-amber-300' : 'text-surface-500 hover:text-amber-400'}`}
+              title={session?.pinned ? 'Unpin session' : 'Pin session'}
+            >
+              <Pin size={11} className={session?.pinned ? '-rotate-45' : ''} />
+            </button>
+            <button
+              type="button"
+              onClick={(event) => onStartEditing?.(session.id, name, event)}
+              className="rounded p-1 text-surface-500 transition-colors hover:text-surface-200"
+              title="Rename session"
+            >
+              <Pencil size={11} />
+            </button>
+            {active ? (
+              <button
+                type="button"
+                onClick={(event) => onCollapse?.(session.id, event)}
+                className="rounded p-1 text-surface-500 transition-colors hover:bg-surface-700 hover:text-surface-200"
+                title="Collapse thread"
+              >
+                <X size={12} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(event) => { event.stopPropagation(); onDelete?.(session.id); }}
+                className="rounded p-1 text-surface-700 transition-colors hover:text-red-400"
+                title="Delete permanently"
+              >
+                <Trash2 size={11} />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SessionBubbleDock({
+  sessions,
+  activeSessionId,
+  editingSessionId,
+  editingName,
+  editInputRef,
+  onEditingNameChange,
+  onFinishEditing,
+  onCancelEditing,
+  onOpenSession,
+  onCollapseSession,
+  onTogglePin,
+  onStartEditing,
+  onDeleteSession,
+  onNewThread,
+  historySearch,
+  onHistorySearchChange,
+  historySearchLoading,
+  hasHistorySearch,
+  onLoadArchived,
+}) {
+  const orderedSessions = useMemo(() => [...sessions].sort(sortSessionsOldestFirst), [sessions]);
+  const normalSessions = orderedSessions.filter(session => !session?.pinned);
+  const pinnedSessions = orderedSessions.filter(session => session?.pinned);
+
+  const renderBubble = (session) => (
+    <SessionBubble
+      key={session.id}
+      session={session}
+      active={session.id === activeSessionId}
+      editing={editingSessionId === session.id}
+      editingName={editingName}
+      editInputRef={editInputRef}
+      onEditingNameChange={onEditingNameChange}
+      onFinishEditing={onFinishEditing}
+      onCancelEditing={onCancelEditing}
+      onOpen={onOpenSession}
+      onCollapse={onCollapseSession}
+      onTogglePin={onTogglePin}
+      onStartEditing={onStartEditing}
+      onDelete={onDeleteSession}
+    />
+  );
+
+  return (
+    <div className="flex-shrink-0 border-t border-surface-700/50 px-3 py-2 shadow-[0_-10px_30px_rgba(0,0,0,0.22)]">
+      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 items-center gap-2">
+          <MessageSquare size={13} className="text-primary-400" />
+          <span className="text-[11px] font-medium uppercase tracking-wide text-surface-400">Session threads</span>
+          <span className="text-[10px] text-surface-600">oldest to newest</span>
+        </div>
+        <div className="flex min-w-0 flex-1 items-center gap-2 sm:ml-auto sm:max-w-md">
+          <input
+            type="text"
+            value={historySearch}
+            onChange={(event) => onHistorySearchChange?.(event.target.value)}
+            placeholder="Search sessions..."
+            className="min-w-0 flex-1 rounded-full border border-surface-700 bg-surface-900 px-3 py-1 text-[11px] text-surface-200 outline-none placeholder:text-surface-600 focus:border-primary-500/60"
+          />
+          <button
+            type="button"
+            onClick={onNewThread}
+            className={`flex-shrink-0 rounded-full border px-3 py-1 text-[11px] transition-colors ${
+              activeSessionId
+                ? 'border-primary-500/35 bg-primary-500/10 text-primary-200 hover:bg-primary-500/15'
+                : 'border-surface-700 bg-surface-900 text-surface-500'
+            }`}
+            title="Clear the selected session so the next message creates a new thread"
+          >
+            New thread
+          </button>
+        </div>
+      </div>
+
+      <div className="max-h-52 overflow-y-auto pr-1 sm:max-h-60">
+        {historySearchLoading ? (
+          <div className="flex items-center justify-center gap-2 rounded-xl border border-surface-800 bg-surface-900/50 px-3 py-4 text-xs text-surface-500">
+            <Loader size={13} className="animate-spin" />
+            Searching sessions...
+          </div>
+        ) : orderedSessions.length > 0 ? (
+          <div className="space-y-2">
+            {normalSessions.length > 0 ? normalSessions.map(renderBubble) : (
+              <div className="rounded-xl border border-dashed border-surface-700 px-3 py-3 text-center text-xs text-surface-600">
+                {hasHistorySearch ? 'No matching unpinned sessions' : 'No unpinned sessions yet'}
+              </div>
+            )}
+
+            {pinnedSessions.length > 0 && (
+              <div className="border-t border-surface-700/50 pt-2">
+                <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-amber-300/80">
+                  <Pin size={10} className="-rotate-45" />
+                  Pinned sessions stay at the bottom
+                </div>
+                <div className="space-y-2">{pinnedSessions.map(renderBubble)}</div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed border-surface-700 px-3 py-4 text-center text-xs text-surface-600">
+            {hasHistorySearch ? 'No matching sessions found' : 'No sessions yet. Send a message to create the first thread.'}
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={onLoadArchived}
+        className="mt-2 w-full rounded-lg border border-surface-800 px-3 py-1.5 text-center text-[10px] text-surface-500 transition-colors hover:border-surface-700 hover:bg-surface-900 hover:text-surface-300"
+      >
+        Load older sessions
+      </button>
+    </div>
+  );
 }
 
 /**
@@ -605,6 +873,7 @@ function ChatSessionContent({
   onInitialMessageHandled,
   isSelected,
   onChangedFilesChange,
+  sessionBubbleDock,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1569,6 +1838,19 @@ function ChatSessionContent({
     [messages]
   );
 
+  useEffect(() => {
+    const lastMessage = sortedMessages[sortedMessages.length - 1] || null;
+    const working = agentBusy || Boolean(streamingMessage) || recoveryStatus.active || Boolean(orchestratorRun);
+    const awaitingFeedback = !working && (lastMessage?.role === 'agent' || lastMessage?.role === 'error');
+    onSessionUpdate?.(sessionId, {
+      busy: working,
+      working,
+      awaitingFeedback,
+      lastMessageRole: lastMessage?.role || null,
+      messageCount: Math.max(session?.messageCount || 0, sortedMessages.filter(message => message.role !== 'progress').length),
+    });
+  }, [agentBusy, streamingMessage, recoveryStatus.active, orchestratorRun, sortedMessages, sessionId, session?.messageCount, onSessionUpdate]);
+
   const progressTranscriptEntries = useMemo(() => {
     if (searchResults) return [];
 
@@ -1793,6 +2075,8 @@ function ChatSessionContent({
         />
       )}
 
+      {sessionBubbleDock}
+
       <ChatInput
         mode={sessionMode}
         channel={chatChannel}
@@ -1932,18 +2216,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       .then(data => {
         const list = data.sessions || [];
         setSessions(list);
-        if (list.length > 0) {
-          // Restore sessions that were open (or pinned) before refresh
-          const openIds = list.filter(s => s.status === 'open' || s.pinned).map(s => s.id);
-          const mostRecentId = list[0].id;
-          const tabsToOpen = openIds.length > 0
-            ? (openIds.includes(mostRecentId) ? openIds : [mostRecentId, ...openIds])
-            : [mostRecentId];
-          setOpenTabs(tabsToOpen);
-          setActiveSessionId(mostRecentId);
-        } else {
-          createNewSession();
-        }
+        setOpenTabs([]);
+        setActiveSessionId(null);
       })
       .catch(() => {
         setSessions([]);
@@ -1963,14 +2237,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         const latest = data.sessions || [];
         const prev = sessionsRef.current;
 
-        const prevIds = new Set(prev.map(s => s.id));
-        const newSessions = latest.filter(s => !prevIds.has(s.id));
-
-        if (newSessions.length > 0) {
-          const newest = newSessions[0];
-          setOpenTabs(prevTabs => (prevTabs.includes(newest.id) ? prevTabs : [newest.id, ...prevTabs]));
-          setActiveSessionId(newest.id);
-        }
+        // New sessions should appear as bubbles without stealing focus. Sending
+        // from the empty composer is the only automatic expansion path.
 
         // Reconcile session status: openTabs is the client source-of-truth.
         // If a status PATCH was lost (network glitch, tab closed mid-flight),
@@ -2044,7 +2312,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     };
 
     setSessions(prev => [optimisticSession, ...prev]);
-    setOpenTabs(prev => (prev.includes(tempId) ? prev : [...prev, tempId]));
+    setOpenTabs([tempId]);
     setActiveSessionId(tempId);
     setShowSessionList(false);
     if (initialMessage) {
@@ -2071,7 +2339,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         });
         return replaced ? next : [session, ...prev];
       });
-      setOpenTabs(prev => [...new Set(prev.map(id => (id === tempId ? session.id : id)))]);
+      setOpenTabs([session.id]);
       setActiveSessionId(prev => (prev === tempId ? session.id : prev));
       if (initialMessage) {
         setPendingInitialMessages(prev => {
@@ -2135,36 +2403,47 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   }, [projectId, onUnreadChange]);
 
   const switchToTab = useCallback((sessionId) => {
-    if (!openTabsRef.current.includes(sessionId)) {
-      setOpenTabs(prev => [...prev, sessionId]);
-      if (projectId) {
-        fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, {
+    const previouslyOpen = openTabsRef.current.filter(id => id !== sessionId);
+    setOpenTabs([sessionId]);
+    setActiveSessionId(sessionId);
+    markSessionRead(sessionId);
+    if (projectId) {
+      for (const id of previouslyOpen) {
+        fetch(`/api/projects/${projectId}/chat/sessions/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'open' }),
+          body: JSON.stringify({ status: 'closed' }),
         }).catch(() => {});
       }
-    }
-    setActiveSessionId(sessionId);
-    markSessionRead(sessionId);
-  }, [projectId, markSessionRead]);
-
-  const openSession = useCallback((sessionId) => {
-    if (!openTabs.includes(sessionId)) {
-      setOpenTabs(prev => [...prev, sessionId]);
-    }
-    setActiveSessionId(sessionId);
-    setShowSessionList(false);
-    markSessionRead(sessionId);
-    // Persist open status for recovery on refresh
-    if (projectId) {
       fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'open' }),
       }).catch(() => {});
     }
-  }, [projectId, openTabs, markSessionRead]);
+  }, [projectId, markSessionRead]);
+
+  const openSession = useCallback((sessionId) => {
+    const previouslyOpen = openTabsRef.current.filter(id => id !== sessionId);
+    setOpenTabs([sessionId]);
+    setActiveSessionId(sessionId);
+    setShowSessionList(false);
+    markSessionRead(sessionId);
+    if (projectId) {
+      for (const id of previouslyOpen) {
+        fetch(`/api/projects/${projectId}/chat/sessions/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'closed' }),
+        }).catch(() => {});
+      }
+      fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'open' }),
+      }).catch(() => {});
+    }
+  }, [projectId, markSessionRead]);
 
   const openHistorySession = useCallback((session) => {
     if (!session?.id) return;
@@ -2177,11 +2456,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     setOpenTabs(prev => {
       const filtered = prev.filter(id => id !== sessionId);
       if (sessionId === activeSessionId) {
-        if (filtered.length > 0) {
-          setActiveSessionId(filtered[filtered.length - 1]);
-        } else {
-          setActiveSessionId(null);
-        }
+        setActiveSessionId(null);
       }
       return filtered;
     });
@@ -2195,6 +2470,14 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     }
   }, [projectId, activeSessionId]);
 
+  const clearActiveSession = useCallback(() => {
+    if (activeSessionId) {
+      closeTab(activeSessionId);
+      return;
+    }
+    setOpenTabs([]);
+  }, [activeSessionId, closeTab]);
+
   const toggleSessionExpanded = useCallback((sessionId, e) => {
     e?.stopPropagation();
     const isOpen = openTabsRef.current.includes(sessionId);
@@ -2204,10 +2487,54 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   // Handle session state updates from child components
   const handleSessionUpdate = useCallback((sessionId, updates) => {
-    setSessions(prev => prev.map(s =>
-      s.id === sessionId ? { ...s, ...updates } : s
-    ));
+    setSessions(prev => prev.map(s => {
+      if (s.id !== sessionId) return s;
+      const changed = Object.entries(updates || {}).some(([key, value]) => s[key] !== value);
+      return changed ? { ...s, ...updates } : s;
+    }));
   }, []);
+
+  useEffect(() => {
+    const ws = wsRef?.current;
+    if (!ws || !projectId) return undefined;
+
+    const handleThreadStatusMessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+
+      if (msg.type === 'agent-status' && msg.projectId === projectId && msg.sessionId) {
+        handleSessionUpdate(msg.sessionId, {
+          busy: !!msg.busy,
+          working: !!msg.busy,
+          awaitingFeedback: !msg.busy,
+        });
+        return;
+      }
+
+      if (msg.type === 'chat-message-stream-start' && msg.projectId === projectId && msg.sessionId) {
+        handleSessionUpdate(msg.sessionId, { busy: true, working: true, awaitingFeedback: false });
+        return;
+      }
+
+      if (msg.type === 'chat-message-stream-complete' && msg.projectId === projectId && msg.sessionId) {
+        handleSessionUpdate(msg.sessionId, { busy: false, working: false, awaitingFeedback: true });
+        return;
+      }
+
+      if (msg.type === 'chat-message' && msg.message?.projectId === projectId && msg.message?.sessionId) {
+        const role = msg.message.role;
+        handleSessionUpdate(msg.message.sessionId, {
+          busy: role === 'user',
+          working: role === 'user',
+          awaitingFeedback: role === 'agent' || role === 'error',
+          lastMessageRole: role,
+        });
+      }
+    };
+
+    ws.addEventListener('message', handleThreadStatusMessage);
+    return () => ws.removeEventListener('message', handleThreadStatusMessage);
+  }, [wsRef, wsConnectionVersion, projectId, handleSessionUpdate]);
 
   const updateSessionAssistantConfig = useCallback(async (sessionId, updates) => {
     if (!projectId) return;
@@ -2364,31 +2691,62 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     setEditingName('');
   }, []);
 
-  // Sort sessions: pinned first, then by most recent
+  // Chat thread bubbles are chronological, with pinned sessions rendered as a
+  // separate bottom group by SessionBubbleDock.
   const sortedSessions = useMemo(() =>
-    [...sessions].sort((a, b) => {
-      if (a.pinned && !b.pinned) return -1;
-      if (!a.pinned && b.pinned) return 1;
-      return 0; // Keep original order (most recent) for same pin status
-    }),
+    [...sessions].sort(sortSessionsOldestFirst),
     [sessions]
   );
 
-  const expandedSessions = sortedSessions.filter(s => openTabs.includes(s.id));
   const hasHistorySearch = historySearch.trim().length >= 2;
   const displayedHistorySessions = hasHistorySearch ? historySearchResults : sortedSessions;
-  const allCollapsed = expandedSessions.length === 0;
+  const allCollapsed = !activeSessionId;
   const visibleTabIds = useMemo(() => {
-    const ordered = [activeSessionId, ...openTabs.filter(id => id !== activeSessionId)].filter(Boolean);
-    return ordered.slice(0, isMobileLayout ? 1 : Math.min(Math.max(splitCount, 1), 4));
-  }, [activeSessionId, openTabs, splitCount, isMobileLayout]);
+    return activeSessionId ? [activeSessionId] : [];
+  }, [activeSessionId]);
 
   const gridStyle = useMemo(() => {
-    const count = visibleTabIds.length;
-    if (count <= 1) return { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' };
-    if (count === 2) return { gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr' };
-    return { gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr' };
-  }, [visibleTabIds.length]);
+    return { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' };
+  }, []);
+
+  const handleSessionBubbleOpen = useCallback((session) => {
+    if (!session?.id) return;
+    if (hasHistorySearch) openHistorySession(session);
+    else openSession(session.id);
+  }, [hasHistorySearch, openHistorySession, openSession]);
+
+  const handleLoadArchivedSessions = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const r = await fetch(`/api/projects/${projectId}/chat/sessions?includeArchived=true`);
+      const data = await r.json();
+      if (data.sessions) setSessions(prev => mergeSessionLists(prev, data.sessions));
+    } catch {}
+  }, [projectId]);
+
+  const sessionBubbleDock = (
+    <SessionBubbleDock
+      sessions={displayedHistorySessions}
+      activeSessionId={activeSessionId}
+      editingSessionId={editingSessionId}
+      editingName={editingName}
+      editInputRef={editInputRef}
+      onEditingNameChange={setEditingName}
+      onFinishEditing={finishEditing}
+      onCancelEditing={cancelEditing}
+      onOpenSession={handleSessionBubbleOpen}
+      onCollapseSession={closeTab}
+      onTogglePin={togglePin}
+      onStartEditing={startEditing}
+      onDeleteSession={deleteSession}
+      onNewThread={clearActiveSession}
+      historySearch={historySearch}
+      onHistorySearchChange={setHistorySearch}
+      historySearchLoading={historySearchLoading}
+      hasHistorySearch={hasHistorySearch}
+      onLoadArchived={handleLoadArchivedSessions}
+    />
+  );
 
   if (!projectId) {
     return (
@@ -2403,8 +2761,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
-      {/* Collapsible session sections */}
-      <div className="flex items-center border-b border-surface-700/50 bg-surface-850/60 pt-10 sm:pt-0" style={{ flexShrink: 0 }}>
+      {/* Legacy tab controls are kept mounted for now but hidden; session navigation is rendered as chat bubbles near the composer. */}
+      <div className="hidden" style={{ flexShrink: 0 }}>
         <div className="flex-1 flex items-center overflow-x-auto scrollbar-none min-w-0">
           {sortedSessions.map((s) => {
             const expanded = openTabs.includes(s.id);
@@ -2774,12 +3132,14 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                   onInitialMessageHandled={handleInitialMessageHandled}
                   isSelected={activeSessionId === tabId}
                   onChangedFilesChange={handleChangedFilesChange}
+                  sessionBubbleDock={tabVisible ? sessionBubbleDock : null}
                 />
               )}
             </div>
           );
         })}
       </div>
+      {allCollapsed && sessionBubbleDock}
       {allCollapsed && (
         <div className="border-t border-surface-700/50 bg-surface-900">
           <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-surface-500">New message creates a new session</div>
