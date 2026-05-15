@@ -10,7 +10,6 @@ import {
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import SystemHealth from './SystemHealth';
-import ModeToggle from './ModeToggle';
 import LLMSettingsPanel from './LLMSettingsPanel';
 import WelcomeGuide from './WelcomeGuide';
 import SlackSetupPanel from './SlackSetupPanel';
@@ -22,8 +21,6 @@ export default function TopBar({
   planRunning,
   planSteps,
   planCurrentStep,
-  agentMode,
-  onModeChange,
   selectedTool,
   onToolChange,
   onProjectUpdated,
@@ -87,11 +84,6 @@ export default function TopBar({
             {currentBranch.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" title="Uncommitted changes" />}
           </div>
         )}
-
-        <div className="w-px h-4 bg-surface-700" />
-
-        {/* Mode toggle */}
-        <ModeToggle mode={agentMode} onChange={onModeChange} />
 
         <div className="w-px h-4 bg-surface-700" />
 

@@ -5,6 +5,7 @@ import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
 import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud } from 'lucide-react';
+import ModeToggle from './ModeToggle';
 import {
   CLI_TOOLS,
   getToolConfig,
@@ -58,6 +59,30 @@ function mergeChangedFiles(current = [], incoming = []) {
     if (file?.path) byPath.set(file.path, { path: file.path, status: file.status || 'M' });
   }
   return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path)).slice(0, 80);
+}
+
+function getSessionMode(session, fallback = 'agent') {
+  return session?.mode || fallback || 'agent';
+}
+
+function getSessionStatus(session, { expanded = false, active = false } = {}) {
+  if (session?.pending) return { label: 'Starting', color: 'bg-surface-500', text: 'text-surface-300', pulse: true };
+  if (session?.busy || session?.working) return { label: 'Working', color: 'bg-blue-400', text: 'text-blue-300', pulse: true };
+  if (session?.waitingForInput || session?.needsInput) return { label: 'Waiting', color: 'bg-amber-400', text: 'text-amber-300', pulse: true };
+  if (session?.hasUnread) return { label: 'Done', color: 'bg-primary-400', text: 'text-primary-300', pulse: true };
+  if (active && expanded) return { label: 'Ready', color: 'bg-green-400', text: 'text-green-300', pulse: false };
+  if (expanded) return { label: 'Open', color: 'bg-sky-400', text: 'text-sky-300', pulse: false };
+  return { label: 'Stand by', color: 'bg-surface-600', text: 'text-surface-500', pulse: false };
+}
+
+function collectChangedFilesFromMessages(messages = [], liveChangedFiles = []) {
+  let files = mergeChangedFiles([], liveChangedFiles);
+  for (const message of messages) {
+    const metadata = message?.metadata || {};
+    const changedFiles = Array.isArray(metadata.changedFiles) ? metadata.changedFiles : [];
+    if (changedFiles.length > 0) files = mergeChangedFiles(files, changedFiles);
+  }
+  return files;
 }
 
 function useTypedLine(text, enabled) {
@@ -323,6 +348,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
   const rawEffort = session?.effort || '';
+  const sessionMode = getSessionMode(session);
 
   // Dynamic Ollama model loading — queries host + container, shows installed models at top
   // Also loads for OpenCode and Aider since they support ollama/ provider prefix
@@ -461,6 +487,11 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       {channel === 'assistant' && (
         <>
       <div className="flex items-center gap-1.5 min-w-0">
+        <span className="text-[10px] uppercase tracking-wide text-surface-500">Mode</span>
+        <ModeToggle mode={sessionMode} onChange={(nextMode) => onUpdate({ mode: nextMode })} compact disabled={disabled} />
+      </div>
+
+      <div className="flex items-center gap-1.5 min-w-0">
         <span className="text-[10px] uppercase tracking-wide text-surface-500">Assistant</span>
         <select
           value={effectiveTool}
@@ -553,6 +584,10 @@ function ChatSessionContent({
   project,
   containerRepos,
   onProjectUpdated,
+  initialMessage,
+  onInitialMessageHandled,
+  isSelected,
+  onChangedFilesChange,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1294,6 +1329,7 @@ function ChatSessionContent({
   const effectiveTool = session?.tool || tool || 'claude';
   const sessionModel = session?.model || '';
   const sessionEffort = session?.effort || '';
+  const sessionMode = getSessionMode(session, mode);
   const selectedRolePromptIds = useMemo(
     () => normalizeRolePromptIds(session?.activeRolePromptIds),
     [session?.activeRolePromptIds],
@@ -1392,7 +1428,7 @@ function ChatSessionContent({
       sessionId,
       role: 'user',
       content: displayContent,
-      metadata: { mode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null, activeRolePromptIds: selectedRolePromptIds },
+      metadata: { mode: sessionMode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null, activeRolePromptIds: selectedRolePromptIds },
       createdAt: new Date().toISOString(),
     };
     updateMessages(prev => [...prev, optimistic]);
@@ -1412,7 +1448,7 @@ function ChatSessionContent({
           path: a.path,
           url: a.url,
         })),
-        mode,
+        mode: sessionMode,
         tool: effectiveTool,
         model: sessionModel || null,
         effort: sessionEffort || null,
@@ -1429,7 +1465,21 @@ function ChatSessionContent({
         createdAt: new Date().toISOString(),
       }]);
     }
-  }, [projectId, sessionId, mode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions, updateMessages]);
+  }, [projectId, sessionId, sessionMode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions, updateMessages]);
+
+  useEffect(() => {
+    if (!isVisible || !initialMessage) return;
+    const text = String(initialMessage.content || '').trim();
+    if (!text) {
+      onInitialMessageHandled?.(sessionId, initialMessage.id);
+      return;
+    }
+
+    const targetChannel = initialMessage.channel || 'assistant';
+    if (targetChannel !== chatChannel) setChatChannel(targetChannel);
+    handleSend(text, initialMessage.attachments || [], { channel: targetChannel });
+    onInitialMessageHandled?.(sessionId, initialMessage.id);
+  }, [isVisible, initialMessage, sessionId, chatChannel, handleSend, onInitialMessageHandled]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -1478,7 +1528,7 @@ function ChatSessionContent({
         projectId,
         sessionId,
         intent: options.executeReviewedPlan ? 'execute-reviewed-plan' : 'retry-target',
-        mode,
+        mode: sessionMode,
         tool: effectiveTool,
         model: sessionModel || null,
         effort: sessionEffort || null,
@@ -1489,7 +1539,12 @@ function ChatSessionContent({
         executeReviewedPlan: !!options.executeReviewedPlan,
       }));
     }
-  }, [messages, projectId, sessionId, wsRef, mode, effectiveTool, sessionModel, sessionEffort, selectedRolePromptIds, rolePromptInstructions]);
+  }, [messages, projectId, sessionId, wsRef, sessionMode, effectiveTool, sessionModel, sessionEffort, selectedRolePromptIds, rolePromptInstructions]);
+
+  useEffect(() => {
+    if (!isSelected) return;
+    onChangedFilesChange?.(sessionId, collectChangedFilesFromMessages(messages, liveChangedFiles));
+  }, [isSelected, sessionId, messages, liveChangedFiles, onChangedFilesChange]);
 
   // Prepare display messages
   const sortedMessages = useMemo(() =>
@@ -1717,11 +1772,12 @@ function ChatSessionContent({
           projectId={projectId}
           onBranchChange={(branch) => onUpdateSessionConfig?.(sessionId, { branch })}
           onSessionUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
+          containerRepos={containerRepos}
         />
       )}
 
       <ChatInput
-        mode={mode}
+        mode={sessionMode}
         channel={chatChannel}
         projectId={projectId}
         onSend={handleSend}
@@ -1741,7 +1797,7 @@ function ChatSessionContent({
  * Main ChatPanel - manages sessions/tabs and renders all open sessions.
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
-export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], onProjectUpdated }) {
+export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], onProjectUpdated, onSelectedSessionFilesChange }) {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -1750,6 +1806,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const [historySearch, setHistorySearch] = useState('');
   const [historySearchResults, setHistorySearchResults] = useState([]);
   const [historySearchLoading, setHistorySearchLoading] = useState(false);
+  const [pendingInitialMessages, setPendingInitialMessages] = useState({});
+  const [activeChangedFiles, setActiveChangedFiles] = useState([]);
   const sessionListRef = useRef(null);
   const sessionsRef = useRef([]);
   const openTabsRef = useRef([]);
@@ -1798,6 +1856,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     if (isActive && activeSessionId) {
       const activeSession = sessions.find(s => s.id === activeSessionId);
       onActiveSessionChange?.(activeSessionId, activeSession?.branch || null);
+    } else if (isActive) {
+      onActiveSessionChange?.(null, null);
     }
   }, [isActive, activeSessionId, sessions, onActiveSessionChange]);
 
@@ -1948,8 +2008,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   // Session actions
   const creatingRef = useRef(false);
-  const createNewSession = useCallback(async () => {
-    if (!projectId || creatingRef.current) return;
+  const createNewSession = useCallback(async ({ initialMessage = null, channel = 'assistant', mode: requestedMode = null } = {}) => {
+    if (!projectId || creatingRef.current) return null;
     creatingRef.current = true;
     const tempId = `pending-${Date.now()}`;
     const previousActiveId = activeSessionId;
@@ -1961,6 +2021,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       manualName: false,
       status: 'open',
       tool,
+      mode: requestedMode || mode || 'agent',
       pending: true,
     };
 
@@ -1968,12 +2029,18 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     setOpenTabs(prev => (prev.includes(tempId) ? prev : [...prev, tempId]));
     setActiveSessionId(tempId);
     setShowSessionList(false);
+    if (initialMessage) {
+      setPendingInitialMessages(prev => ({
+        ...prev,
+        [tempId]: { ...initialMessage, id: initialMessage.id || `initial-${Date.now()}`, channel },
+      }));
+    }
 
     try {
       const r = await fetch(`/api/projects/${projectId}/chat/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool })
+        body: JSON.stringify({ tool, mode: requestedMode || mode || 'agent' })
       });
       if (!r.ok) throw new Error('Failed to create session');
       const session = await r.json();
@@ -1988,14 +2055,29 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       });
       setOpenTabs(prev => [...new Set(prev.map(id => (id === tempId ? session.id : id)))]);
       setActiveSessionId(prev => (prev === tempId ? session.id : prev));
+      if (initialMessage) {
+        setPendingInitialMessages(prev => {
+          const next = { ...prev };
+          next[session.id] = next[tempId] || { ...initialMessage, id: initialMessage.id || `initial-${Date.now()}`, channel };
+          delete next[tempId];
+          return next;
+        });
+      }
+      return session.id;
     } catch {
       setSessions(prev => prev.filter(s => s.id !== tempId));
       setOpenTabs(prev => prev.filter(id => id !== tempId));
       setActiveSessionId(prev => (prev === tempId ? previousActiveId : prev));
+      setPendingInitialMessages(prev => {
+        const next = { ...prev };
+        delete next[tempId];
+        return next;
+      });
+      return null;
     } finally {
       creatingRef.current = false;
     }
-  }, [projectId, tool, activeSessionId]);
+  }, [projectId, tool, mode, activeSessionId]);
 
   const deleteSession = useCallback(async (sessionId) => {
     if (!projectId) return;
@@ -2016,17 +2098,14 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
           const remainingTabs = openTabs.filter(id => id !== sessionId);
           if (remainingTabs.length > 0) {
             setActiveSessionId(remainingTabs[remainingTabs.length - 1]);
-          } else if (filtered.length > 0) {
-            setOpenTabs([filtered[0].id]);
-            setActiveSessionId(filtered[0].id);
           } else {
-            createNewSession();
+            setActiveSessionId(null);
           }
         }
         return filtered;
       });
     } catch {}
-  }, [projectId, activeSessionId, openTabs, createNewSession]);
+  }, [projectId, activeSessionId, openTabs]);
 
   const markSessionRead = useCallback((sessionId) => {
     if (!projectId || !sessionId) return;
@@ -2038,9 +2117,19 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   }, [projectId, onUnreadChange]);
 
   const switchToTab = useCallback((sessionId) => {
+    if (!openTabsRef.current.includes(sessionId)) {
+      setOpenTabs(prev => [...prev, sessionId]);
+      if (projectId) {
+        fetch(`/api/projects/${projectId}/chat/sessions/${sessionId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'open' }),
+        }).catch(() => {});
+      }
+    }
     setActiveSessionId(sessionId);
     markSessionRead(sessionId);
-  }, [markSessionRead]);
+  }, [projectId, markSessionRead]);
 
   const openSession = useCallback((sessionId) => {
     if (!openTabs.includes(sessionId)) {
@@ -2073,7 +2162,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         if (filtered.length > 0) {
           setActiveSessionId(filtered[filtered.length - 1]);
         } else {
-          createNewSession();
+          setActiveSessionId(null);
         }
       }
       return filtered;
@@ -2086,7 +2175,14 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         body: JSON.stringify({ status: 'closed' }),
       }).catch(() => {});
     }
-  }, [projectId, activeSessionId, createNewSession]);
+  }, [projectId, activeSessionId]);
+
+  const toggleSessionExpanded = useCallback((sessionId, e) => {
+    e?.stopPropagation();
+    const isOpen = openTabsRef.current.includes(sessionId);
+    if (isOpen) closeTab(sessionId, e);
+    else openSession(sessionId);
+  }, [closeTab, openSession]);
 
   // Handle session state updates from child components
   const handleSessionUpdate = useCallback((sessionId, updates) => {
@@ -2125,6 +2221,58 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       )));
     }
   }, [projectId]);
+
+  const handleGlobalSend = useCallback((content, attachments = []) => {
+    const trimmed = String(content || '').trim();
+    if (!trimmed && attachments.length === 0) return;
+    createNewSession({
+      initialMessage: { content: trimmed, attachments, id: `initial-${Date.now()}` },
+      channel: 'assistant',
+      mode,
+    });
+  }, [createNewSession, mode]);
+
+  const handleInitialMessageHandled = useCallback((sessionId, messageId) => {
+    setPendingInitialMessages(prev => {
+      if (!prev[sessionId] || prev[sessionId].id !== messageId) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
+
+  const handleChangedFilesChange = useCallback((sessionId, files) => {
+    if (sessionId === activeSessionId) setActiveChangedFiles(files || []);
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    onSelectedSessionFilesChange?.(activeSessionId, activeChangedFiles);
+  }, [isActive, activeSessionId, activeChangedFiles, onSelectedSessionFilesChange]);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      setActiveChangedFiles([]);
+      return;
+    }
+    const active = sessionsRef.current.find(s => s.id === activeSessionId);
+    if (!active) setActiveChangedFiles([]);
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    const runCommandInNewSession = (event) => {
+      const command = String(event.detail?.command || '').trim();
+      if (!command) return;
+      createNewSession({
+        initialMessage: { content: command, id: `command-${Date.now()}` },
+        channel: 'shell',
+        mode: 'agent',
+      });
+    };
+    window.addEventListener('chat-command-session', runCommandInNewSession);
+    return () => window.removeEventListener('chat-command-session', runCommandInNewSession);
+  }, [projectId, createNewSession]);
 
   // Pin/unpin a session
   const togglePin = useCallback(async (sessionId, e) => {
@@ -2208,10 +2356,10 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     [sessions]
   );
 
-  const closedSessions = sortedSessions.filter(s => !openTabs.includes(s.id));
-  const openTabSessions = openTabs.map(id => sessions.find(s => s.id === id)).filter(Boolean);
+  const expandedSessions = sortedSessions.filter(s => openTabs.includes(s.id));
   const hasHistorySearch = historySearch.trim().length >= 2;
-  const displayedHistorySessions = hasHistorySearch ? historySearchResults : closedSessions;
+  const displayedHistorySessions = hasHistorySearch ? historySearchResults : sortedSessions;
+  const allCollapsed = expandedSessions.length === 0;
   const visibleTabIds = useMemo(() => {
     const ordered = [activeSessionId, ...openTabs.filter(id => id !== activeSessionId)].filter(Boolean);
     return ordered.slice(0, Math.min(Math.max(splitCount, 1), 4));
@@ -2219,13 +2367,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   const gridStyle = useMemo(() => {
     const count = visibleTabIds.length;
-    if (count <= 1) {
-      return { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' };
-    }
-    if (count === 2) {
-      return { gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr' };
-    }
-    // 3-4 panes: 2x2 grid for readability
+    if (count <= 1) return { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' };
+    if (count === 2) return { gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr' };
     return { gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr' };
   }, [visibleTabIds.length]);
 
@@ -2242,19 +2385,25 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
-      {/* Session tabs bar */}
+      {/* Collapsible session sections */}
       <div className="flex items-center border-b border-surface-700/50 bg-surface-850/60" style={{ flexShrink: 0 }}>
         <div className="flex-1 flex items-center overflow-x-auto scrollbar-none min-w-0">
-          {openTabSessions.map((s) => (
+          {sortedSessions.map((s) => {
+            const expanded = openTabs.includes(s.id);
+            const status = getSessionStatus(s, { expanded, active: s.id === activeSessionId });
+            return (
             <div
               key={s.id}
-              onClick={() => switchToTab(s.id)}
-              className={`group flex items-center gap-1.5 px-3 py-1.5 cursor-pointer border-r border-surface-700/30 min-w-0 max-w-[200px] transition-colors ${
+              onClick={() => expanded ? switchToTab(s.id) : openSession(s.id)}
+              className={`group flex items-center gap-1.5 px-3 py-1.5 cursor-pointer border-r border-surface-700/30 min-w-0 max-w-[220px] transition-all duration-200 ${
                 s.id === activeSessionId
                   ? 'bg-surface-800 text-surface-100'
                   : 'bg-surface-850/80 text-surface-400 hover:bg-surface-800/50 hover:text-surface-200'
               }`}
             >
+              <button onClick={(e) => toggleSessionExpanded(s.id, e)} className="p-0.5 rounded text-surface-500 hover:text-surface-200 hover:bg-surface-700" title={expanded ? 'Contract session' : 'Expand session'}>
+                {expanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              </button>
               {s.pinned ? (
                 <Pin size={10} className="text-amber-400 flex-shrink-0 -rotate-45" />
               ) : (
@@ -2287,6 +2436,10 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
               {s.hasUnread && s.id !== activeSessionId && (
                 <span className="flex-shrink-0 w-1.5 h-1.5 rounded-full bg-primary-500 animate-pulse" />
               )}
+              <span className={`flex items-center gap-1 rounded-full px-1 py-0.5 text-[9px] ${status.text}`} title={status.label}>
+                <span className={`h-1.5 w-1.5 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
+                {status.label}
+              </span>
               {/* Pin button - show on hover for active tab */}
               {s.id === activeSessionId && !s.pending && (
                 <>
@@ -2320,7 +2473,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                 <X size={10} />
               </button>
             </div>
-          ))}
+          );
+          })}
 
           <button
             onClick={createNewSession}
@@ -2353,11 +2507,11 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
             <button
               onClick={() => setShowSessionList(!showSessionList)}
               className={`p-1.5 rounded transition-colors ${
-                closedSessions.length > 0
+                sortedSessions.length > 0
                   ? 'text-surface-400 hover:text-surface-200 hover:bg-surface-700/50'
                   : 'text-surface-600 hover:text-surface-400 hover:bg-surface-700/30'
               }`}
-              title={closedSessions.length > 0 ? `${closedSessions.length} closed session(s)` : 'No closed sessions'}
+              title={sortedSessions.length > 0 ? `${sortedSessions.length} session(s)` : 'No sessions'}
             >
               <MoreHorizontal size={14} />
             </button>
@@ -2365,7 +2519,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
             {showSessionList && (
               <div className="absolute top-full right-0 mt-1 w-72 bg-surface-800 border border-surface-700 rounded-lg shadow-modal z-50 overflow-hidden animate-scale-in">
                 <div className="px-3 py-2 text-[10px] text-surface-500 uppercase tracking-wider border-b border-surface-700/50 bg-surface-850/50">
-                  {hasHistorySearch ? 'History Search' : (closedSessions.length > 0 ? 'Closed Sessions' : 'All Sessions Open')}
+                  {hasHistorySearch ? 'History Search' : 'All Sessions'}
                 </div>
 
                 <div className="p-2 border-b border-surface-700/50 bg-surface-850/30">
@@ -2514,6 +2668,15 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
           ...gridStyle,
         }}
       >
+        {allCollapsed && (
+          <div className="flex h-full items-center justify-center px-6 text-center text-surface-500">
+            <div>
+              <MessageSquare size={36} className="mx-auto mb-3 opacity-25" />
+              <div className="text-sm text-surface-300">No session selected</div>
+              <div className="mt-1 text-xs text-surface-600">Send a message below to launch a new individual session.</div>
+            </div>
+          </div>
+        )}
         {openTabs.map(tabId => {
           const tabSession = sessions.find(s => s.id === tabId);
           const tabVisible = visibleTabIds.includes(tabId);
@@ -2589,12 +2752,22 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                   project={project}
                   containerRepos={containerRepos}
                   onProjectUpdated={onProjectUpdated}
+                  initialMessage={pendingInitialMessages[tabId]}
+                  onInitialMessageHandled={handleInitialMessageHandled}
+                  isSelected={activeSessionId === tabId}
+                  onChangedFilesChange={handleChangedFilesChange}
                 />
               )}
             </div>
           );
         })}
       </div>
+      {allCollapsed && (
+        <div className="border-t border-surface-700/50 bg-surface-900">
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-surface-500">New message creates a new session</div>
+          <ChatInput mode={mode} channel="assistant" projectId={projectId} onSend={handleGlobalSend} busy={creatingRef.current} isVisible={isActive} />
+        </div>
+      )}
     </div>
   );
 }

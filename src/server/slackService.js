@@ -205,7 +205,7 @@ const slackService = {
           projectId,
           sessionId,
           content: message.text || '',
-          mode: 'agent',
+          mode: 'autonomous',
           tool: settings.defaultTool || 'claude',
           source: 'slack',
         });
@@ -395,6 +395,7 @@ async function _createSessionFromSlack(projectId, message) {
   const userName = message.user ? `<@${message.user}>` : 'Slack user';
   const session = chatStore.createSession(projectId, `Slack: ${userName}`, {
     tool: _readSettings().defaultTool || 'claude',
+    mode: 'autonomous',
   });
 
   _linkSession(session.id, message.channel, message.ts);
@@ -413,6 +414,7 @@ async function _handleThreadReply(event, projectId) {
     chatStore.migrateIfNeeded(projectId);
     const session = chatStore.createSession(projectId, 'Slack (resumed)', {
       tool: _readSettings().defaultTool || 'claude',
+      mode: 'autonomous',
     });
     sessionId = session.id;
     _linkSession(sessionId, event.channel, threadTs);
@@ -424,7 +426,7 @@ async function _handleThreadReply(event, projectId) {
       projectId,
       sessionId,
       content: event.text || '',
-      mode: 'agent',
+      mode: 'autonomous',
       tool: _readSettings().defaultTool || 'claude',
       source: 'slack',
     });

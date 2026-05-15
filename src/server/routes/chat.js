@@ -61,6 +61,7 @@ router.post('/:projectId/chat/sessions', (req, res) => {
     const assistantSettings = resolveSessionAssistantSettings(req.body, {
       tool: 'claude',
     });
+    if (req.body.mode) assistantSettings.mode = String(req.body.mode);
     const session = chatStore.createSession(projectId, name || null, assistantSettings);
     res.status(201).json(session);
   } catch (error) {
@@ -93,8 +94,9 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     const wantsAssistantSettings = ['tool', 'model', 'effort'].some((field) => hasOwn(req.body, field));
     const wantsRolePrompts = hasOwn(req.body, 'activeRolePromptIds');
     const wantsStatus = hasOwn(req.body, 'status');
+    const wantsMode = hasOwn(req.body, 'mode');
 
-    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsRolePrompts && !wantsStatus) {
+    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsRolePrompts && !wantsStatus && !wantsMode) {
       return res.status(400).json({ error: 'No supported session fields were provided' });
     }
 
@@ -144,6 +146,11 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
       const valid = ['open', 'closed'];
       const status = String(req.body.status).toLowerCase();
       if (valid.includes(status)) updates.status = status;
+    }
+
+    if (wantsMode) {
+      const nextMode = String(req.body.mode).toLowerCase();
+      if (['plan', 'agent', 'autonomous'].includes(nextMode)) updates.mode = nextMode;
     }
 
     chatStore.updateSessionMeta(projectId, sessionId, updates);

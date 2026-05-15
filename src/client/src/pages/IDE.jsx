@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useProjects } from '../contexts/ProjectContext';
 import ChatPanel from '../components/ChatPanel';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
-import QuickActionsPanel from '../components/QuickActionsPanel';
 import TopBar from '../components/TopBar';
 import RightPanel from '../components/RightPanel';
 import NotificationCenter, { sendDesktopNotification } from '../components/NotificationCenter';
@@ -15,6 +14,7 @@ import {
   GitBranch,
   FolderOpen,
   Sparkles,
+  FileCode,
 } from 'lucide-react';
 
 // Storage keys
@@ -96,6 +96,7 @@ export default function IDE() {
   const [currentBranch, setCurrentBranch] = useState(null);
   // Container repos state
   const [containerRepos, setContainerRepos] = useState([]);
+  const [selectedSessionFiles, setSelectedSessionFiles] = useState([]);
 
   // Unread session IDs per project. Counts are derived so duplicate events stay idempotent.
   const [unreadSessions, setUnreadSessions] = useState({});
@@ -480,22 +481,6 @@ export default function IDE() {
                             </div>
                           )}
                         </div>
-                        {Object.keys(repo.scripts).length > 0 && (
-                          <div className="flex gap-1 mt-1 flex-wrap">
-                            {Object.keys(repo.scripts).slice(0, 4).map(s => (
-                              <button
-                                key={s}
-                                onClick={() => {
-                                  const cmd = `cd ${repo.path} && ${repo.packageManager} run ${s}\n`;
-                                  window.dispatchEvent(new CustomEvent('run-in-util', { detail: { command: cmd } }));
-                                }}
-                                className="px-1.5 py-0.5 text-[9px] bg-surface-700 text-surface-400 hover:text-surface-200 hover:bg-surface-600 rounded transition-colors"
-                              >
-                                {s}
-                              </button>
-                            ))}
-                          </div>
-                        )}
                       </div>
                     ))
                   ) : currentBranch ? (
@@ -519,12 +504,24 @@ export default function IDE() {
                 </div>
               )}
 
-              {/* Quick Actions */}
-              <div className="flex-shrink-0 overflow-hidden" style={{ minHeight: '120px', maxHeight: '40%' }}>
-                <QuickActionsPanel
-                  projectId={selectedProjectId}
-                  projectPath={selectedProject?.folderPath}
-                />
+              {/* Selected session changed files */}
+              <div className="flex-shrink-0 overflow-hidden border-t border-surface-700 bg-surface-850" style={{ minHeight: '120px', maxHeight: '40%' }}>
+                <div className="flex items-center gap-1.5 border-b border-surface-700 px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-surface-300">
+                  <FileCode className="h-3 w-3 text-primary-400" />
+                  Session Files
+                </div>
+                <div className="max-h-56 overflow-y-auto p-2">
+                  {selectedSessionFiles.length > 0 ? selectedSessionFiles.map(file => (
+                    <div key={`${file.status}:${file.path}`} className="mb-1 flex items-center gap-2 rounded border border-surface-700/50 bg-surface-900/45 px-2 py-1 font-mono text-[10px] text-surface-300">
+                      <span className="w-4 flex-shrink-0 text-primary-300">{file.status || 'M'}</span>
+                      <span className="truncate" title={file.path}>{file.path}</span>
+                    </div>
+                  )) : (
+                    <div className="rounded border border-dashed border-surface-700/60 px-3 py-4 text-center text-[11px] text-surface-500">
+                      Select a session to see files it changed.
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -586,6 +583,9 @@ export default function IDE() {
                     project={chatProject}
                     containerRepos={chatContainerRepos}
                     onProjectUpdated={(project) => setSelectedProject(project)}
+                    onSelectedSessionFilesChange={(sessionId, files) => {
+                      if (projectId === selectedProjectId) setSelectedSessionFiles(sessionId ? (files || []) : []);
+                    }}
                   />
                 </div>
               );

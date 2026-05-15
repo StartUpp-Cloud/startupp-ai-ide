@@ -663,7 +663,7 @@ class TerminalServer {
         });
         const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
         const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
-        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, activeRolePromptIds });
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, mode: payload.mode || sessionMeta?.mode || 'agent', activeRolePromptIds });
 
         // Attach client to this chat session for isolated communication
         this.attachToChatSession(ws, chatSessionId);

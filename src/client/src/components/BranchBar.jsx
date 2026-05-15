@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   GitBranch, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Check,
   GitPullRequest, GitMerge, Loader, AlertCircle, RefreshCw, X,
-  Folder, Trash2, Search, User, Users, Circle, Plus, KeyRound,
+  Folder, Trash2, Search, User, Users, Circle, Plus, KeyRound, Terminal,
 } from 'lucide-react';
 
 // PR state display config
@@ -83,7 +83,7 @@ function SectionHeader({ icon: Icon, label, count }) {
  * BranchBar — sits above ChatInput, shows current branch + working directory
  * and git quick actions.
  */
-export default function BranchBar({ containerName, session, projectId, onBranchChange, onSessionUpdate }) {
+export default function BranchBar({ containerName, session, projectId, onBranchChange, onSessionUpdate, containerRepos = [] }) {
   const sessionBranch = session?.branch || null;
   const sessionRepoPath = session?.repoPath || null;
   const [gitStatus, setGitStatus] = useState(null);
@@ -91,6 +91,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const [showSwitcher, setShowSwitcher] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showCreateBranch, setShowCreateBranch] = useState(false);
+  const [showCommands, setShowCommands] = useState(false);
   const [newBranchName, setNewBranchName] = useState('');
   const [folders, setFolders] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -106,6 +107,19 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
   const statusAbortRef = useRef(null);
   const branchAbortRef = useRef(null);
   const branchRequestRef = useRef(0);
+
+  const availableCommands = (containerRepos || []).flatMap(repo => (
+    Object.keys(repo.scripts || {}).map(script => ({
+      key: `${repo.path}:${script}`,
+      label: `${repo.name || repo.path}: ${script}`,
+      command: `cd ${repo.path} && ${repo.packageManager || 'npm'} run ${script}`,
+    }))
+  )).slice(0, 24);
+
+  const runCommandSession = (command) => {
+    window.dispatchEvent(new CustomEvent('chat-command-session', { detail: { command } }));
+    setShowCommands(false);
+  };
 
   const worktreePath = sessionBranch
     ? `/workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
@@ -844,6 +858,33 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
             {actionLoading === 'pr' ? <Loader size={11} className="animate-spin" /> : <GitPullRequest size={11} />}
             Create PR
           </button>
+        )}
+
+        {availableCommands.length > 0 && (
+          <div className="relative">
+            <button
+              onClick={() => setShowCommands(v => !v)}
+              className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-sky-400 hover:text-sky-300 hover:bg-sky-500/10 rounded transition-colors"
+              title="Run a package script in a new chat session"
+            >
+              <Terminal size={11} />
+              Commands
+            </button>
+            {showCommands && (
+              <div className="absolute bottom-full right-0 z-40 mb-1 max-h-64 w-64 overflow-y-auto rounded-lg border border-surface-700 bg-surface-850 py-1 shadow-modal">
+                {availableCommands.map(item => (
+                  <button
+                    key={item.key}
+                    onClick={() => runCommandSession(item.command)}
+                    className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-300 transition-colors hover:bg-surface-750 hover:text-surface-100"
+                    title={item.command}
+                  >
+                    <span className="block truncate">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
 
         {pr?.state === 'OPEN' && (
