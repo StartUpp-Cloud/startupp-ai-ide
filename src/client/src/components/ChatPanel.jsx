@@ -2625,8 +2625,10 @@ function ChatSessionContent({
           : null}
         sendLabel={session?.isMainThread && chatChannel === 'assistant' ? 'Send as new session' : null}
         sendVariant={session?.isMainThread && chatChannel === 'assistant' ? 'green' : null}
+        sendIconOnly={session?.isMainThread && chatChannel === 'assistant'}
         secondarySendLabel={session?.isMainThread && chatChannel === 'assistant' ? 'Ask in main thread' : null}
         secondarySendVariant="primary"
+        secondarySendIconOnly={session?.isMainThread && chatChannel === 'assistant'}
         onSecondarySend={session?.isMainThread && chatChannel === 'assistant'
           ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', directMain: true })
           : null}

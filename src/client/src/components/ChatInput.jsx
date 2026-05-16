@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Search, X, Paperclip, Upload, Image, FileText, File, Loader } from 'lucide-react';
+import { Send, Search, X, Paperclip, Upload, Image, FileText, File, Loader, MessageSquare } from 'lucide-react';
 import ContainerUploadPopover from './ContainerUploadPopover';
 
 export const ROLE_PROMPTS = [
@@ -101,8 +101,10 @@ export default function ChatInput({
   placeholderOverride = null,
   sendLabel = null,
   sendVariant = null,
+  sendIconOnly = false,
   secondarySendLabel = null,
   secondarySendVariant = 'primary',
+  secondarySendIconOnly = false,
   onSecondarySend,
 }) {
   const [text, setText] = useState('');
@@ -224,6 +226,7 @@ export default function ChatInput({
   };
 
   const buttonBaseClass = 'flex items-center justify-center gap-1.5 rounded-lg transition-colors px-3 py-2 text-xs font-medium whitespace-nowrap';
+  const iconButtonBaseClass = 'flex items-center justify-center rounded-lg p-2 transition-colors';
 
   return (
     <div className="flex-shrink-0 px-2 pt-2 pb-3 w-full sm:px-4 sm:pt-3 sm:pb-4">
@@ -381,19 +384,24 @@ export default function ChatInput({
                 type="button"
                 onClick={() => handleSend(onSecondarySend)}
                 disabled={!canSend}
-                className={`${buttonBaseClass} ${canSend ? enabledButtonClass(secondarySendVariant) : 'bg-surface-700 text-surface-600'}`}
+                className={`${secondarySendIconOnly ? iconButtonBaseClass : buttonBaseClass} ${canSend ? enabledButtonClass(secondarySendVariant) : 'bg-surface-700 text-surface-600'}`}
+                title={secondarySendLabel}
+                aria-label={secondarySendLabel}
               >
-                {secondarySendLabel}
+                {secondarySendIconOnly && <MessageSquare size={16} />}
+                {!secondarySendIconOnly && secondarySendLabel}
               </button>
             )}
             <button
               type="button"
               onClick={() => handleSend(onSend)}
               disabled={!canSend}
-              className={`${sendLabel ? buttonBaseClass : 'flex items-center justify-center rounded-lg p-2 transition-colors'} ${canSend ? enabledButtonClass(sendVariant) : 'bg-surface-700 text-surface-600'}`}
+              className={`${sendLabel && !sendIconOnly ? buttonBaseClass : iconButtonBaseClass} ${canSend ? enabledButtonClass(sendVariant) : 'bg-surface-700 text-surface-600'}`}
+              title={sendLabel || 'Send'}
+              aria-label={sendLabel || 'Send'}
             >
               <Send size={16} />
-              {sendLabel && <span>{sendLabel}</span>}
+              {sendLabel && !sendIconOnly && <span>{sendLabel}</span>}
             </button>
           </div>
 
