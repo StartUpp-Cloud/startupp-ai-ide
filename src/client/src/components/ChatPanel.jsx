@@ -4,7 +4,7 @@ import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from '
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
-import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info } from 'lucide-react';
 import ModeToggle from './ModeToggle';
 import {
   CLI_TOOLS,
@@ -710,38 +710,30 @@ function dedupeModelOptions(options) {
 
 function MainThreadHeader({ project, session }) {
   const settings = [session?.tool, session?.model, session?.effort].filter(Boolean).join(' / ');
+  const tooltip = 'Main thread is the durable project home base. Use it for project memory, summaries, coordination, and starting child sessions. Child sessions inherit these defaults unless changed.';
 
   return (
-    <div className="border-b border-surface-700/45 bg-gradient-to-r from-primary-950/35 via-surface-900 to-surface-950 px-4 py-3">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-primary-400/25 bg-primary-500/15 text-primary-300">
-              <Bot size={15} />
-            </div>
-            <div className="min-w-0">
-              <div className="truncate text-sm font-semibold text-surface-100">Main thread</div>
-              <div className="truncate text-[11px] text-surface-500">{project?.name || 'Project'} home base</div>
-            </div>
-          </div>
-          <p className="mt-2 max-w-3xl text-xs leading-relaxed text-surface-400">
-            Ask what happened across sessions, review finished work, or start the next task from here. Child sessions inherit these settings by default and can still be tuned individually.
-          </p>
+    <div className="border-b border-surface-700/45 bg-surface-950/95 px-3 py-2 sm:px-4">
+      <div className="flex min-w-0 items-center gap-2">
+        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-primary-400/25 bg-primary-500/15 text-primary-300">
+          <Bot size={14} />
         </div>
-        <div className="grid grid-cols-3 gap-2 text-center sm:min-w-[280px]">
-          <div className="rounded-xl border border-surface-700/55 bg-surface-950/45 px-3 py-2">
-            <div className="text-[10px] uppercase tracking-wide text-surface-600">Memory</div>
-            <div className="text-xs font-medium text-surface-200">Session search</div>
-          </div>
-          <div className="rounded-xl border border-surface-700/55 bg-surface-950/45 px-3 py-2">
-            <div className="text-[10px] uppercase tracking-wide text-surface-600">Review</div>
-            <div className="text-xs font-medium text-surface-200">Thread status</div>
-          </div>
-          <div className="rounded-xl border border-surface-700/55 bg-surface-950/45 px-3 py-2">
-            <div className="text-[10px] uppercase tracking-wide text-surface-600">Defaults</div>
-            <div className="truncate text-xs font-medium text-surface-200" title={settings || 'Default assistant'}>{settings || 'Default assistant'}</div>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="truncate text-sm font-semibold text-surface-100">Main thread</div>
+            <span className="truncate text-[11px] text-surface-500">{project?.name || 'Project'} home base</span>
           </div>
         </div>
+        <span className="hidden truncate text-[10px] text-surface-500 sm:inline" title={settings || 'Default assistant'}>
+          Defaults: {settings || 'Default assistant'}
+        </span>
+        <button
+          type="button"
+          className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-surface-700 bg-surface-900 text-surface-400"
+          title={tooltip}
+        >
+          <Info size={13} />
+        </button>
       </div>
     </div>
   );
@@ -1039,7 +1031,6 @@ function ChatSessionContent({
   onOpenMain,
   onCloseSession,
   onMainThreadSend,
-  onUpdateMainThreadConfig,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -2299,44 +2290,13 @@ function ChatSessionContent({
         />
       )}
 
-      {!session?.isMainThread && mainSession?.id && chatChannel === 'assistant' && (
-        <div className="border-t border-surface-700/45 bg-surface-950/90 px-2 pt-2 sm:px-4 sm:pt-3">
-          <div className="mb-2 flex items-center gap-2 px-1 text-[11px] text-surface-400">
-            <Bot size={12} className="text-primary-400" />
-            <span className="font-medium text-surface-300">Start from Main thread</span>
-            <span className="text-surface-600">Sends this as a new child session without leaving the current thread.</span>
-          </div>
-          <ChatInput
-            mode={getSessionMode(mainSession, mode)}
-            channel="assistant"
-            projectId={projectId}
-            onSend={(content, attachments) => onMainThreadSend?.(content, attachments, {
-              mode: getSessionMode(mainSession, mode),
-              tool: mainSession?.tool || tool || 'claude',
-              model: mainSession?.model || null,
-              effort: mainSession?.effort || null,
-              activeRolePromptIds: normalizeRolePromptIds(mainSession?.activeRolePromptIds),
-            })}
-            busy={false}
-            isVisible={isVisible}
-            selectedRolePromptIds={mainSession?.activeRolePromptIds || []}
-            onSelectedRolePromptIdsChange={(nextIds) => onUpdateMainThreadConfig?.(mainSession.id, { activeRolePromptIds: nextIds })}
-            placeholderOverride="Start a new session from the main thread... (Ctrl+Enter to send)"
-          />
-        </div>
-      )}
-
       {session?.isMainThread && chatChannel === 'assistant' && (
-        <div className="border-t border-surface-700/45 bg-surface-950/90 px-2 pt-2 sm:px-4 sm:pt-3">
-          <div className="flex flex-col gap-2 rounded-2xl border border-surface-800 bg-surface-900/55 p-2 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <div className="text-xs font-semibold text-surface-200">Message Main thread</div>
-              <div className="mt-0.5 text-[11px] text-surface-500">The composer below posts directly to the project home base.</div>
-            </div>
+        <div className="border-t border-surface-700/45 bg-surface-950/90 px-2 pt-1 sm:px-4">
+          <div className="flex items-center justify-end py-1">
             <button
               type="button"
               onClick={() => setShowMainSessionStarter(value => !value)}
-              className={`rounded-xl border px-3 py-1.5 text-[11px] font-medium transition-colors ${showMainSessionStarter ? 'border-green-500/45 bg-green-500/15 text-green-200' : 'border-surface-700 bg-surface-950/70 text-surface-300 hover:border-green-500/35 hover:text-green-200'}`}
+              className={`rounded-full border px-3 py-1 text-[11px] font-medium transition-colors ${showMainSessionStarter ? 'border-green-500/45 bg-green-500/15 text-green-200' : 'border-surface-700 bg-surface-950/70 text-surface-300 hover:border-green-500/35 hover:text-green-200'}`}
             >
               {showMainSessionStarter ? 'Cancel child session' : 'Start child session'}
             </button>
@@ -3537,7 +3497,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                       onOpenMain={openMainThread}
                       onCloseSession={() => closeTab(tabId)}
                       onMainThreadSend={handleGlobalSend}
-                      onUpdateMainThreadConfig={updateSessionAssistantConfig}
                     />
                   )}
                 </div>
