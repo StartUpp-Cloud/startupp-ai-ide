@@ -98,6 +98,7 @@ export default function ChatInput({
   isVisible = true,
   selectedRolePromptIds = [],
   onSelectedRolePromptIdsChange,
+  placeholderOverride = null,
 }) {
   const [text, setText] = useState('');
   const [searching, setSearching] = useState(false);
@@ -198,13 +199,13 @@ export default function ChatInput({
     }
   };
 
-  const placeholder = channel === 'shell'
+  const placeholder = placeholderOverride || (channel === 'shell'
     ? 'Run a shell command or reply to the current prompt... (Ctrl+Enter to send)'
     : busy
     ? 'Type to queue a follow-up message... (Ctrl+Enter to send)'
     : mode === 'plan'
       ? 'Describe what you want to build... (Ctrl+Enter to send)'
-      : 'Tell the agent what to do... (Ctrl+Enter to send)';
+      : 'Tell the agent what to do... (Ctrl+Enter to send)');
 
   return (
     <div className="flex-shrink-0 px-2 pt-2 pb-3 w-full sm:px-4 sm:pt-3 sm:pb-4">
