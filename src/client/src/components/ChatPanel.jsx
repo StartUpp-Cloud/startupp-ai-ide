@@ -1598,7 +1598,10 @@ function ChatSessionContent({
         if (message.role === 'user') {
           merged = merged.filter(existing => {
             const id = String(existing.id || '');
-            return !(id.startsWith('pending-') && existing.role === 'user' && existing.content === message.content);
+            return !(id.startsWith('pending-') && existing.role === 'user' && (
+              existing.content === message.content ||
+              (existing.metadata?.clientMessageId && existing.metadata.clientMessageId === message.metadata?.clientMessageId)
+            ));
           });
         }
 
@@ -1825,7 +1828,10 @@ function ChatSessionContent({
                   m.role === 'user' &&
                   typeof m.id === 'string' &&
                   m.id.startsWith('pending-') &&
-                  m.content === msg.message.content
+                  (
+                    m.content === msg.message.content ||
+                    (m.metadata?.clientMessageId && m.metadata.clientMessageId === msg.message.metadata?.clientMessageId)
+                  )
                 ) {
                   return false;
                 }
@@ -2121,6 +2127,7 @@ function ChatSessionContent({
     if (!projectId || !sessionId) return;
 
     const targetChannel = options.channel || chatChannel;
+    const clientMessageId = options.clientMessageId || `client-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     if (session?.isMainThread && targetChannel === 'assistant' && onMainThreadSend && !options.directMain && options.startSession) {
       onMainThreadSend(content, attachments, {
@@ -2210,12 +2217,12 @@ function ChatSessionContent({
     }
 
     const optimistic = {
-      id: 'pending-' + Date.now(),
+      id: `pending-${clientMessageId}`,
       projectId,
       sessionId,
       role: 'user',
       content: displayContent,
-      metadata: { mode: sessionMode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null, activeRolePromptIds: selectedRolePromptIds },
+      metadata: { mode: sessionMode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null, activeRolePromptIds: selectedRolePromptIds, clientMessageId },
       createdAt: new Date().toISOString(),
     };
     updateMessages(prev => [...prev, optimistic]);
@@ -2227,6 +2234,7 @@ function ChatSessionContent({
         projectId,
         sessionId,
         content,
+        clientMessageId,
         attachments: attachments.map(a => ({
           id: a.id,
           name: a.name,
@@ -2264,7 +2272,7 @@ function ChatSessionContent({
 
     const targetChannel = initialMessage.channel || 'assistant';
     if (targetChannel !== chatChannel) setChatChannel(targetChannel);
-    handleSend(text, initialMessage.attachments || [], { channel: targetChannel, directMain: initialMessage.directMain });
+    handleSend(text, initialMessage.attachments || [], { channel: targetChannel, directMain: initialMessage.directMain, clientMessageId: initialMessage.id });
     onInitialMessageHandled?.(sessionId, initialMessage.id);
   }, [isVisible, initialMessage, sessionId, chatChannel, handleSend, onInitialMessageHandled]);
 

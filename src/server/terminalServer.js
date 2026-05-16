@@ -689,12 +689,19 @@ class TerminalServer {
         }
 
         // Persist user message
-        const userMsg = chatStore.addMessage({
+        const clientMessageId = typeof payload.clientMessageId === 'string'
+          ? payload.clientMessageId.trim().slice(0, 160)
+          : null;
+        const existingUserMsg = clientMessageId
+          ? chatStore.getMessages(payload.projectId, { sessionId: chatSessionId, limit: 20 })
+            .find(message => message.role === 'user' && message.metadata?.clientMessageId === clientMessageId)
+          : null;
+        const userMsg = existingUserMsg || chatStore.addMessage({
           projectId: payload.projectId,
           sessionId: chatSessionId,
           role: 'user',
           content: displayContent,
-          metadata: { mode: payload.mode, attachments, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, ...assistantSettings },
+          metadata: { mode: payload.mode, attachments, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, clientMessageId, ...assistantSettings },
         });
 
         // Broadcast to all clients attached to this chat session
@@ -702,6 +709,11 @@ class TerminalServer {
 
         // Also broadcast globally for any listeners (backward compatibility)
         this.broadcast({ type: 'chat-message', message: userMsg });
+
+        if (existingUserMsg) {
+          console.log(`[terminalServer] Suppressed duplicate chat-send for clientMessageId=${clientMessageId}`);
+          break;
+        }
 
         const sharedBroadcast = (data) => {
           // Broadcast to chat session clients first (isolated)
