@@ -353,6 +353,20 @@ export default function IDE() {
     };
   }, [selectedProject?.containerName, selectedProject?.folderPath]);
 
+  const handleWorkspaceRepoSelect = useCallback((repo) => {
+    if (!selectedProjectId || !repo?.path) return;
+    window.dispatchEvent(new CustomEvent('main-thread-repo-select', {
+      detail: { projectId: selectedProjectId, repo },
+    }));
+  }, [selectedProjectId]);
+
+  const handleWorkspaceRepoAction = useCallback((action, repo) => {
+    if (!selectedProjectId || !repo?.path) return;
+    window.dispatchEvent(new CustomEvent('main-thread-repo-action', {
+      detail: { projectId: selectedProjectId, action, repo },
+    }));
+  }, [selectedProjectId]);
+
   // ── Unread counts fetching ──
 
   useEffect(() => {
@@ -410,20 +424,6 @@ export default function IDE() {
       return next;
     });
   }, []);
-
-  const handleWorkspaceRepoSelect = useCallback((repo) => {
-    if (!selectedProjectId || !repo?.path) return;
-    window.dispatchEvent(new CustomEvent('main-thread-repo-select', {
-      detail: { projectId: selectedProjectId, repo },
-    }));
-  }, [selectedProjectId]);
-
-  const handleWorkspaceRepoAction = useCallback((action, repo) => {
-    if (!selectedProjectId || !repo?.path) return;
-    window.dispatchEvent(new CustomEvent('main-thread-repo-action', {
-      detail: { projectId: selectedProjectId, action, repo },
-    }));
-  }, [selectedProjectId]);
 
   // Handle unread WebSocket events
   useEffect(() => {

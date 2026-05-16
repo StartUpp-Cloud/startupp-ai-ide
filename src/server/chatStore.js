@@ -104,7 +104,37 @@ class ChatStore {
     const rows = includeArchived
       ? this._db().prepare('SELECT * FROM chat_sessions WHERE project_id = ? ORDER BY created_at DESC').all(projectId)
       : this._db().prepare('SELECT * FROM chat_sessions WHERE project_id = ? AND archived = 0 ORDER BY created_at DESC').all(projectId);
-    return rows.map(sqliteStore.rowToSession);
+    return this._attachSessionStarters(projectId, rows.map(sqliteStore.rowToSession));
+  }
+
+  _attachSessionStarters(projectId, sessions = []) {
+    const ids = sessions.map(session => session?.id).filter(Boolean);
+    if (ids.length === 0) return sessions;
+
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this._db().prepare(`
+      SELECT session_id, content, created_at
+      FROM chat_messages
+      WHERE project_id = ? AND role = 'user' AND session_id IN (${placeholders})
+      ORDER BY created_at ASC
+    `).all(projectId, ...ids);
+
+    const starters = new Map();
+    for (const row of rows) {
+      if (!starters.has(row.session_id)) {
+        starters.set(row.session_id, { content: row.content, createdAt: row.created_at });
+      }
+    }
+
+    return sessions.map(session => {
+      const starter = starters.get(session.id);
+      if (!starter) return session;
+      return {
+        ...session,
+        starter: starter.content,
+        starterCreatedAt: starter.createdAt,
+      };
+    });
   }
 
   updateSessionMeta(projectId, sessionId, meta) {
@@ -519,10 +549,10 @@ class ChatStore {
     const bySubject = this._db().prepare(`SELECT * FROM chat_sessions WHERE project_id = ? ${archiveSql} AND name LIKE ? ORDER BY created_at DESC LIMIT ?`)
       .all(projectId, like, safeLimit)
       .map(row => ({ ...sqliteStore.rowToSession(row), matchType: 'subject', matchSnippet: row.name }));
-    if (bySubject.length >= safeLimit) return bySubject;
+    if (bySubject.length >= safeLimit) return this._attachSessionStarters(projectId, bySubject);
 
     const ftsQuery = sqliteStore.ftsQueryFromText(q);
-    if (!ftsQuery) return bySubject;
+    if (!ftsQuery) return this._attachSessionStarters(projectId, bySubject);
     const subjectIds = new Set(bySubject.map(s => s.id));
     const rows = this._db().prepare(`
       SELECT s.*, m.content AS match_content, m.role AS match_role
@@ -545,7 +575,7 @@ class ChatStore {
       });
       if (bySubject.length + byContent.length >= safeLimit) break;
     }
-    return [...bySubject, ...byContent].slice(0, safeLimit);
+    return this._attachSessionStarters(projectId, [...bySubject, ...byContent].slice(0, safeLimit));
   }
 
   search(projectId, query, { sessionId = null, limit = 20 } = {}) {

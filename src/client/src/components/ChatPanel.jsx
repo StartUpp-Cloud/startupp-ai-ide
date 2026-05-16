@@ -24,23 +24,6 @@ function chatHistorySinceIso() {
   return new Date(Date.now() - CHAT_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
 
-function useIsMobileLayout() {
-  const [isMobile, setIsMobile] = useState(() => (
-    typeof window !== 'undefined' ? window.matchMedia('(max-width: 767px)').matches : false
-  ));
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return undefined;
-    const query = window.matchMedia('(max-width: 767px)');
-    const update = () => setIsMobile(query.matches);
-    update();
-    query.addEventListener('change', update);
-    return () => query.removeEventListener('change', update);
-  }, []);
-
-  return isMobile;
-}
-
 /**
  * Format job progress for display
  */
@@ -112,6 +95,11 @@ function formatSessionTimestamp(value) {
   const sameDay = date.toDateString() === now.toDateString();
   if (sameDay) return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function getSessionStarterText(session) {
+  const value = session?.starter || session?.matchSnippet || session?.name || 'New thread';
+  return String(value).replace(/\s+/g, ' ').trim();
 }
 
 function collectChangedFilesFromMessages(messages = [], liveChangedFiles = []) {
@@ -267,6 +255,8 @@ function SessionBubble({
   const status = getSessionStatus(session, { expanded: active, active });
   const timestamp = formatSessionTimestamp(session?.createdAt || session?.updatedAt);
   const name = session?.name || 'Chat';
+  const starterText = getSessionStarterText(session);
+  const showSubject = name && name !== starterText;
 
   const handleOpen = () => {
     if (!editing) onOpen?.(session);
@@ -291,16 +281,20 @@ function SessionBubble({
           : 'border-surface-700/55 bg-surface-850/75 hover:border-surface-600 hover:bg-surface-800/80'
       }`}
     >
-      <div className="mb-1 flex min-w-0 items-center gap-2">
-        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
-        <span className={`truncate text-[10px] font-medium uppercase tracking-wide ${status.text}`}>{status.label}</span>
-        <span className="ml-auto flex-shrink-0 text-[10px] tabular-nums text-surface-500">{timestamp}</span>
-        {session?.pinned && <Pin size={11} className="flex-shrink-0 -rotate-45 text-amber-400" />}
-      </div>
-
       <div className="flex min-w-0 items-start gap-2">
-        <MessageCircle size={14} className={active ? 'mt-0.5 flex-shrink-0 text-primary-300' : 'mt-0.5 flex-shrink-0 text-surface-500'} />
+        <div className={`mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md ${active ? 'bg-primary-500/20 text-primary-200' : 'bg-surface-700/70 text-surface-300'}`}>
+          <MessageCircle size={14} />
+        </div>
         <div className="min-w-0 flex-1">
+          <div className="mb-0.5 flex min-w-0 items-center gap-2">
+            <span className="text-xs font-semibold text-surface-100">You</span>
+            <span className="flex-shrink-0 text-[10px] tabular-nums text-surface-500">{timestamp}</span>
+            <span className={`ml-auto inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${status.text}`} title={status.label}>
+              <span className={`h-1.5 w-1.5 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
+              {status.label}
+            </span>
+            {session?.pinned && <Pin size={11} className="flex-shrink-0 -rotate-45 text-amber-400" />}
+          </div>
           {editing ? (
             <input
               ref={editInputRef}
@@ -317,7 +311,10 @@ function SessionBubble({
               placeholder="Session name..."
             />
           ) : (
-            <div className="truncate text-sm font-medium text-surface-100" title={name}>{name}</div>
+            <div className="break-words text-sm leading-5 text-surface-100" title={starterText}>{starterText}</div>
+          )}
+          {showSubject && !editing && (
+            <div className="mt-1 truncate text-[11px] text-surface-500" title={name}>{name}</div>
           )}
           {session?.matchSnippet && session?.matchType === 'content' && (
             <div className="mt-1 truncate text-[11px] text-surface-500">{session.matchSnippet}</div>
@@ -325,7 +322,7 @@ function SessionBubble({
         </div>
       </div>
 
-      <div className="mt-2 flex min-w-0 items-center gap-2 pl-5 text-[10px] text-surface-500">
+      <div className="mt-2 flex min-w-0 items-center gap-2 pl-9 text-[10px] text-surface-500">
         <span>{session?.messageCount || 0} msg</span>
         {session?.branch && (
           <span className="flex min-w-0 items-center gap-0.5 rounded bg-green-500/10 px-1 py-0.5 font-mono text-[9px] text-green-400" title={`Branch: ${session.branch}`}>
@@ -399,11 +396,53 @@ function SessionBubbleDock({
   historySearchLoading,
   hasHistorySearch,
   onLoadArchived,
+  variant = 'dock',
+  scrollSignal = 0,
 }) {
   const orderedSessions = useMemo(() => [...sessions].sort(sortSessionsOldestFirst), [sessions]);
   const normalSessions = orderedSessions.filter(session => !session?.pinned);
   const pinnedSessions = orderedSessions.filter(session => session?.pinned);
   const mainStatus = getSessionStatus(mainSession, { expanded: mainSession?.id === activeSessionId, active: mainSession?.id === activeSessionId });
+  const scrollRef = useRef(null);
+  const didInitialScrollRef = useRef(false);
+  const isSidebar = variant === 'sidebar';
+  const isMain = variant === 'main';
+  const containerClass = isSidebar
+    ? 'flex max-h-64 min-h-0 w-full flex-col border-b border-surface-700/50 bg-surface-950/80 md:h-full md:max-h-none md:w-80 md:flex-shrink-0 md:border-b-0 md:border-r lg:w-96'
+    : isMain
+    ? 'flex h-full min-h-0 flex-col bg-surface-950/30 px-4 py-4'
+    : 'flex-shrink-0 border-t border-surface-700/50 px-3 py-2 shadow-[0_-10px_30px_rgba(0,0,0,0.22)]';
+  const headerClass = isSidebar
+    ? 'border-b border-surface-700/50 px-3 py-3'
+    : isMain
+    ? 'pb-3'
+    : 'mb-2 flex flex-col gap-2 sm:flex-row sm:items-center';
+  const scrollClass = isSidebar
+    ? 'min-h-0 flex-1 overflow-y-auto px-3 py-3'
+    : isMain
+    ? 'min-h-0 flex-1 overflow-y-auto pb-4'
+    : 'max-h-52 overflow-y-auto pr-1 sm:max-h-60';
+
+  useEffect(() => {
+    didInitialScrollRef.current = false;
+  }, [variant, hasHistorySearch, scrollSignal]);
+
+  useEffect(() => {
+    if (didInitialScrollRef.current || historySearchLoading || orderedSessions.length === 0) return undefined;
+    didInitialScrollRef.current = true;
+
+    const scrollToBottom = () => {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    };
+
+    const rafId = requestAnimationFrame(scrollToBottom);
+    const timeoutIds = [0, 80, 240, 600].map(delay => setTimeout(scrollToBottom, delay));
+    return () => {
+      cancelAnimationFrame(rafId);
+      timeoutIds.forEach(clearTimeout);
+    };
+  }, [orderedSessions.length, historySearchLoading, variant, hasHistorySearch, scrollSignal]);
 
   const renderBubble = (session) => (
     <SessionBubble
@@ -425,16 +464,16 @@ function SessionBubbleDock({
   );
 
   return (
-    <div className="flex-shrink-0 border-t border-surface-700/50 bg-surface-950/80 px-3 py-2 shadow-[0_-10px_30px_rgba(0,0,0,0.22)]">
+    <div className={containerClass}>
       {mainSession && (
         <button
           type="button"
           onClick={onOpenMain}
-          className={`mb-2 flex w-full items-center gap-3 rounded-2xl border px-3 py-2 text-left transition-all ${
+          className={`mx-0 mb-2 flex w-full items-center gap-3 rounded-2xl border px-3 py-2 text-left transition-all ${
             mainSession.id === activeSessionId
               ? 'border-primary-500/45 bg-primary-500/10 text-surface-100 shadow-[0_0_24px_rgba(14,165,233,0.12)]'
               : 'border-surface-700/70 bg-surface-900/70 text-surface-300 hover:border-surface-600 hover:bg-surface-850'
-          }`}
+          } ${isSidebar ? 'mt-3 md:mx-3 md:w-auto' : ''}`}
         >
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl bg-primary-500/15 text-primary-300">
             <Bot size={15} />
@@ -449,24 +488,30 @@ function SessionBubbleDock({
           </div>
         </button>
       )}
-      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center">
-        <div className="flex min-w-0 items-center gap-2">
-          <MessageSquare size={13} className="text-primary-400" />
+      <div className={headerClass}>
+        <div className={`${isSidebar || isMain ? 'mb-2' : ''} flex min-w-0 items-center gap-2`}>
+          <MessageSquare size={isMain ? 16 : 13} className="text-primary-400" />
           <span className="text-[11px] font-medium uppercase tracking-wide text-surface-400">Thread sessions</span>
           <span className="text-[10px] text-surface-600">oldest to newest</span>
         </div>
-        <div className="flex min-w-0 flex-1 items-center gap-2 sm:ml-auto sm:max-w-md">
+        {isMain && (
+          <div className="mb-3 rounded-2xl border border-surface-800 bg-surface-900/40 px-4 py-3">
+            <div className="text-sm font-medium text-surface-200">Main chat</div>
+            <div className="mt-1 text-xs leading-5 text-surface-500">Send from here to start a new session. Open any thread below to continue that session on the right.</div>
+          </div>
+        )}
+        <div className={`flex min-w-0 items-center gap-2 ${isSidebar ? 'flex-col sm:flex-row md:flex-col lg:flex-row' : 'flex-1 sm:ml-auto sm:max-w-md'}`}>
           <input
             type="text"
             value={historySearch}
             onChange={(event) => onHistorySearchChange?.(event.target.value)}
             placeholder="Search sessions..."
-            className="min-w-0 flex-1 rounded-full border border-surface-700 bg-surface-900 px-3 py-1 text-[11px] text-surface-200 outline-none placeholder:text-surface-600 focus:border-primary-500/60"
+            className={`min-w-0 flex-1 rounded-full border border-surface-700 bg-surface-900 px-3 py-1 text-[11px] text-surface-200 outline-none placeholder:text-surface-600 focus:border-primary-500/60 ${isSidebar ? 'w-full' : ''}`}
           />
         </div>
       </div>
 
-      <div className="max-h-52 overflow-y-auto pr-1 sm:max-h-60">
+      <div ref={scrollRef} className={scrollClass}>
         {historySearchLoading ? (
           <div className="flex items-center justify-center gap-2 rounded-xl border border-surface-800 bg-surface-900/50 px-3 py-4 text-xs text-surface-500">
             <Loader size={13} className="animate-spin" />
@@ -500,7 +545,7 @@ function SessionBubbleDock({
       <button
         type="button"
         onClick={onLoadArchived}
-        className="mt-2 w-full rounded-lg border border-surface-800 px-3 py-1.5 text-center text-[10px] text-surface-500 transition-colors hover:border-surface-700 hover:bg-surface-900 hover:text-surface-300"
+        className={`${isSidebar ? 'mx-3 mb-3 w-auto' : 'mt-2 w-full'} rounded-lg border border-surface-800 px-3 py-1.5 text-center text-[10px] text-surface-500 transition-colors hover:border-surface-700 hover:bg-surface-900 hover:text-surface-300`}
       >
         Load older sessions
       </button>
@@ -982,7 +1027,6 @@ function ChatSessionContent({
   onDirectMainMessageHandled,
   isSelected,
   onChangedFilesChange,
-  sessionBubbleDock,
   mainSession,
   onOpenMain,
   onMainThreadSend,
@@ -2244,7 +2288,31 @@ function ChatSessionContent({
         />
       )}
 
-      {sessionBubbleDock}
+      {!session?.isMainThread && mainSession?.id && chatChannel === 'assistant' && (
+        <div className="border-t border-surface-700/45 bg-surface-950/90 px-2 pt-2 sm:px-4 sm:pt-3">
+          <div className="mb-2 flex items-center gap-2 px-1 text-[11px] text-surface-400">
+            <Bot size={12} className="text-primary-400" />
+            <span className="font-medium text-surface-300">Start from Main thread</span>
+            <span className="text-surface-600">Sends this as a new child session without leaving the current thread.</span>
+          </div>
+          <ChatInput
+            mode={getSessionMode(mainSession, mode)}
+            channel="assistant"
+            projectId={projectId}
+            onSend={(content, attachments) => onMainThreadSend?.(content, attachments, {
+              mode: getSessionMode(mainSession, mode),
+              tool: mainSession?.tool || tool || 'claude',
+              model: mainSession?.model || null,
+              effort: mainSession?.effort || null,
+              activeRolePromptIds: normalizeRolePromptIds(mainSession?.activeRolePromptIds),
+            })}
+            busy={false}
+            isVisible={isVisible}
+            selectedRolePromptIds={mainSession?.activeRolePromptIds || []}
+            onSelectedRolePromptIdsChange={(nextIds) => onUpdateMainThreadConfig?.(mainSession.id, { activeRolePromptIds: nextIds })}
+          />
+        </div>
+      )}
 
       {!session?.isMainThread && mainSession?.id && chatChannel === 'assistant' && (
         <div className="border-t border-surface-700/45 bg-surface-950/90 px-2 pt-2 sm:px-4 sm:pt-3">
@@ -2294,7 +2362,6 @@ function ChatSessionContent({
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
 export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], onProjectUpdated, onSelectedSessionFilesChange }) {
-  const isMobileLayout = useIsMobileLayout();
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -2372,7 +2439,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   useEffect(() => {
     const query = historySearch.trim();
-    if (!showSessionList || !projectId || query.length < 2) {
+    if (!projectId || query.length < 2) {
       setHistorySearchResults([]);
       setHistorySearchLoading(false);
       return;
@@ -2396,7 +2463,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [historySearch, showSessionList, projectId]);
+  }, [historySearch, projectId]);
 
   // Load sessions when project changes
   useEffect(() => {
@@ -2675,6 +2742,12 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   const closeTab = useCallback((sessionId, e) => {
     e?.stopPropagation();
+    const session = sessionsRef.current.find(item => item.id === sessionId);
+    if (session?.isMainThread) {
+      setOpenTabs(getTabsWithMain(sessionId));
+      setActiveSessionId(sessionId);
+      return;
+    }
     setOpenTabs(prev => {
       const filtered = prev.filter(id => id !== sessionId);
       if (sessionId === activeSessionId) {
@@ -2693,12 +2766,14 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   }, [projectId, activeSessionId, getTabsWithMain]);
 
   const clearActiveSession = useCallback(() => {
-    if (activeSessionId) {
+    const mainId = getTabsWithMain(null)[0] || null;
+    if (activeSessionId && activeSessionId !== mainId) {
       closeTab(activeSessionId);
       return;
     }
-    setOpenTabs([]);
-  }, [activeSessionId, closeTab]);
+    setOpenTabs(mainId ? [mainId] : []);
+    setActiveSessionId(mainId);
+  }, [activeSessionId, closeTab, getTabsWithMain]);
 
   const toggleSessionExpanded = useCallback((sessionId, e) => {
     e?.stopPropagation();
@@ -3013,30 +3088,32 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     } catch {}
   }, [projectId]);
 
-  const sessionBubbleDock = (
-    <SessionBubbleDock
-      sessions={displayedHistorySessions}
-      mainSession={mainSession}
-      activeSessionId={activeSessionId}
-      editingSessionId={editingSessionId}
-      editingName={editingName}
-      editInputRef={editInputRef}
-      onEditingNameChange={setEditingName}
-      onFinishEditing={finishEditing}
-      onCancelEditing={cancelEditing}
-      onOpenSession={handleSessionBubbleOpen}
-      onOpenMain={openMainThread}
-      onCollapseSession={closeTab}
-      onTogglePin={togglePin}
-      onStartEditing={startEditing}
-      onDeleteSession={deleteSession}
-      historySearch={historySearch}
-      onHistorySearchChange={setHistorySearch}
-      historySearchLoading={historySearchLoading}
-      hasHistorySearch={hasHistorySearch}
-      onLoadArchived={handleLoadArchivedSessions}
-    />
-  );
+  const sessionListProps = {
+    sessions: displayedHistorySessions,
+    mainSession,
+    activeSessionId,
+    editingSessionId,
+    editingName,
+    editInputRef,
+    onEditingNameChange: setEditingName,
+    onFinishEditing: finishEditing,
+    onCancelEditing: cancelEditing,
+    onOpenSession: handleSessionBubbleOpen,
+    onOpenMain: openMainThread,
+    onCollapseSession: closeTab,
+    onTogglePin: togglePin,
+    onStartEditing: startEditing,
+    onDeleteSession: deleteSession,
+    historySearch,
+    onHistorySearchChange: setHistorySearch,
+    historySearchLoading,
+    hasHistorySearch,
+    onLoadArchived: handleLoadArchivedSessions,
+    scrollSignal: projectSwitchKey,
+  };
+
+  const mainSessionList = <SessionBubbleDock {...sessionListProps} variant="main" />;
+  const sidebarSessionList = <SessionBubbleDock {...sessionListProps} variant="sidebar" />;
 
   if (!projectId) {
     return (
@@ -3321,125 +3398,97 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         </div>
       </div>
 
-      {/* Render ALL open sessions; visible ones in split grid, hidden ones stay mounted */}
-      <div
-        style={{
-          position: 'relative',
-          flex: '1 1 0%',
-          minHeight: 0,
-          overflow: 'hidden',
-          display: 'grid',
-          gap: visibleTabIds.length > 1 ? 8 : 0,
-          padding: visibleTabIds.length > 1 ? 8 : 0,
-          ...gridStyle,
-        }}
-      >
-        {allCollapsed && (
-          <div className="flex h-full items-center justify-center px-6 text-center text-surface-500">
-            <div>
-              <MessageSquare size={36} className="mx-auto mb-3 opacity-25" />
-              <div className="text-sm text-surface-300">Main thread is loading</div>
-              <div className="mt-1 text-xs text-surface-600">Once ready, it becomes the project home base.</div>
-            </div>
+      {allCollapsed ? (
+        <>
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {mainSessionList}
           </div>
-        )}
-        {openTabs.map(tabId => {
-          const tabSession = sessions.find(s => s.id === tabId);
-          const tabVisible = visibleTabIds.includes(tabId);
+          <div className="border-t border-surface-700/50 bg-surface-900">
+            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-surface-500">Fallback composer</div>
+            <ChatInput mode={mode} channel="assistant" projectId={projectId} onSend={handleGlobalSend} busy={creatingRef.current} isVisible={isActive} />
+          </div>
+        </>
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+          {sidebarSessionList}
+          <div
+            className="min-w-0 flex-1"
+            style={{
+              position: 'relative',
+              minHeight: 0,
+              overflow: 'hidden',
+              display: 'grid',
+              gap: visibleTabIds.length > 1 ? 8 : 0,
+              padding: visibleTabIds.length > 1 ? 8 : 0,
+              ...gridStyle,
+            }}
+          >
+            {openTabs.map(tabId => {
+              const tabSession = sessions.find(s => s.id === tabId);
+              const tabVisible = visibleTabIds.includes(tabId);
 
-          return (
-            <div
-              key={tabId}
-              style={{
-                position: tabVisible ? 'relative' : 'absolute',
-                top: tabVisible ? 'auto' : 0,
-                left: tabVisible ? 'auto' : 0,
-                right: tabVisible ? 'auto' : 0,
-                bottom: tabVisible ? 'auto' : 0,
-                width: tabVisible ? 'auto' : 0,
-                height: tabVisible ? 'auto' : 0,
-                display: 'flex',
-                flexDirection: 'column',
-                overflow: 'hidden',
-                visibility: tabVisible ? 'visible' : 'hidden',
-                pointerEvents: tabVisible ? 'auto' : 'none',
-                zIndex: tabVisible ? 1 : 0,
-                backgroundColor: '#0d1117',
-                minHeight: 0,
-                border: visibleTabIds.length > 1 ? '1px solid rgba(71,85,105,0.35)' : 'none',
-                borderRadius: visibleTabIds.length > 1 ? 8 : 0,
-              }}
-            >
-              {visibleTabIds.length > 1 && tabVisible && (
-                <div className="px-2 py-1 border-b border-surface-700/40 bg-surface-850/70 text-[11px] text-surface-300 flex items-center gap-1.5 group/pane-hdr">
-                  <MessageCircle size={10} className="text-primary-400 flex-shrink-0" />
-                  <span className="truncate flex-1">{tabSession?.name || 'Chat'}</span>
-                  {tabSession?.branch && (
-                    <span className="flex items-center gap-0.5 px-1 py-0.5 rounded bg-green-500/10 text-green-400 text-[9px] font-mono flex-shrink-0">
-                      <GitBranch size={8} />
-                      {tabSession.branch}
-                    </span>
-                  )}
-                  {!tabSession?.pending && (
-                    <button
-                      onClick={(e) => togglePin(tabId, e)}
-                      className={`p-0.5 rounded flex-shrink-0 transition-all opacity-0 group-hover/pane-hdr:opacity-100 ${
-                        tabSession?.pinned
-                          ? 'text-amber-400 opacity-100'
-                          : 'text-surface-500 hover:text-amber-400'
-                      }`}
-                      title={tabSession?.pinned ? 'Unpin session' : 'Pin session'}
-                    >
-                      <Pin size={9} className={tabSession?.pinned ? '-rotate-45' : ''} />
-                    </button>
+              return (
+                <div
+                  key={tabId}
+                  style={{
+                    position: tabVisible ? 'relative' : 'absolute',
+                    top: tabVisible ? 'auto' : 0,
+                    left: tabVisible ? 'auto' : 0,
+                    right: tabVisible ? 'auto' : 0,
+                    bottom: tabVisible ? 'auto' : 0,
+                    width: tabVisible ? 'auto' : 0,
+                    height: tabVisible ? 'auto' : 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden',
+                    visibility: tabVisible ? 'visible' : 'hidden',
+                    pointerEvents: tabVisible ? 'auto' : 'none',
+                    zIndex: tabVisible ? 1 : 0,
+                    backgroundColor: '#0d1117',
+                    minHeight: 0,
+                    border: 'none',
+                    borderRadius: 0,
+                  }}
+                >
+                  {tabSession?.pending ? (
+                    <div className="flex-1 min-h-0 flex items-center justify-center text-surface-500 text-sm gap-2">
+                      <Loader size={16} className="animate-spin" />
+                      Creating session...
+                    </div>
+                  ) : (
+                    <ChatSessionContent
+                      projectId={projectId}
+                      sessionId={tabId}
+                      wsRef={wsRef}
+                      wsConnectionVersion={wsConnectionVersion}
+                      mode={mode}
+                      tool={tool}
+                      session={tabSession}
+                      isVisible={isActive && tabVisible}
+                      projectSwitchKey={projectSwitchKey}
+                      onSessionUpdate={handleSessionUpdate}
+                      onUnreadChange={onUnreadChange}
+                      onUpdateSessionConfig={updateSessionAssistantConfig}
+                      containerName={containerName}
+                      project={project}
+                      containerRepos={containerRepos}
+                      onProjectUpdated={onProjectUpdated}
+                      initialMessage={pendingInitialMessages[tabId]}
+                      directMainMessage={pendingDirectMainMessages[tabId]}
+                      onInitialMessageHandled={handleInitialMessageHandled}
+                      onDirectMainMessageHandled={handleDirectMainMessageHandled}
+                      isSelected={activeSessionId === tabId}
+                      onChangedFilesChange={handleChangedFilesChange}
+                      mainSession={mainSession}
+                      onOpenMain={openMainThread}
+                      onMainThreadSend={handleGlobalSend}
+                      onUpdateMainThreadConfig={updateSessionAssistantConfig}
+                    />
                   )}
                 </div>
-              )}
-              {tabSession?.pending ? (
-                <div className="flex-1 min-h-0 flex items-center justify-center text-surface-500 text-sm gap-2">
-                  <Loader size={16} className="animate-spin" />
-                  Creating session...
-                </div>
-              ) : (
-                <ChatSessionContent
-                  projectId={projectId}
-                  sessionId={tabId}
-                  wsRef={wsRef}
-                  wsConnectionVersion={wsConnectionVersion}
-                  mode={mode}
-                  tool={tool}
-                  session={tabSession}
-                  isVisible={isActive && tabVisible}
-                  projectSwitchKey={projectSwitchKey}
-                  onSessionUpdate={handleSessionUpdate}
-                  onUnreadChange={onUnreadChange}
-                  onUpdateSessionConfig={updateSessionAssistantConfig}
-                  containerName={containerName}
-                  project={project}
-                  containerRepos={containerRepos}
-                  onProjectUpdated={onProjectUpdated}
-                  initialMessage={pendingInitialMessages[tabId]}
-                  directMainMessage={pendingDirectMainMessages[tabId]}
-                  onInitialMessageHandled={handleInitialMessageHandled}
-                  onDirectMainMessageHandled={handleDirectMainMessageHandled}
-                  isSelected={activeSessionId === tabId}
-                  onChangedFilesChange={handleChangedFilesChange}
-                  sessionBubbleDock={tabVisible ? sessionBubbleDock : null}
-                  mainSession={mainSession}
-                  onOpenMain={openMainThread}
-                  onMainThreadSend={handleGlobalSend}
-                  onUpdateMainThreadConfig={updateSessionAssistantConfig}
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {allCollapsed && sessionBubbleDock}
-      {allCollapsed && (
-        <div className="border-t border-surface-700/50 bg-surface-900">
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-surface-500">Fallback composer</div>
-          <ChatInput mode={mode} channel="assistant" projectId={projectId} onSend={handleGlobalSend} busy={creatingRef.current} isVisible={isActive} />
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
