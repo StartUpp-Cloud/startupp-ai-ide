@@ -465,7 +465,7 @@ function SessionBubbleDock({
 
   return (
     <div className={containerClass}>
-      {mainSession && (
+      {mainSession && !isSidebar && (
         <button
           type="button"
           onClick={onOpenMain}
@@ -747,7 +747,7 @@ function MainThreadHeader({ project, session }) {
   );
 }
 
-function ChildThreadHeader({ project, session, mainSession, onOpenMain }) {
+function ChildThreadHeader({ project, session, mainSession, onOpenMain, onCloseSession }) {
   const status = getSessionStatus(session, { expanded: true, active: true });
   const sessionName = session?.name || 'Thread';
 
@@ -775,6 +775,15 @@ function ChildThreadHeader({ project, session, mainSession, onOpenMain }) {
             {project?.name || 'Project'} child session
           </div>
         </div>
+        <button
+          type="button"
+          onClick={onCloseSession}
+          className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-full border border-surface-700 bg-surface-900 px-2.5 py-1.5 text-[11px] font-medium text-surface-300 transition-colors hover:border-red-500/45 hover:bg-red-500/10 hover:text-red-200"
+          title="Close this child session"
+        >
+          <X size={13} />
+          <span className="hidden sm:inline">Close</span>
+        </button>
       </div>
     </div>
   );
@@ -1028,6 +1037,7 @@ function ChatSessionContent({
   onChangedFilesChange,
   mainSession,
   onOpenMain,
+  onCloseSession,
   onMainThreadSend,
   onUpdateMainThreadConfig,
 }) {
@@ -2131,7 +2141,7 @@ function ChatSessionContent({
       {session?.isMainThread ? (
         <MainThreadHeader project={project} session={session} />
       ) : (
-        <ChildThreadHeader project={project} session={session} mainSession={mainSession} onOpenMain={onOpenMain} />
+        <ChildThreadHeader project={project} session={session} mainSession={mainSession} onOpenMain={onOpenMain} onCloseSession={onCloseSession} />
       )}
 
       <SessionAssistantControls
@@ -3080,14 +3090,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     ? historySearchResults.filter(session => !session?.isMainThread)
     : childSessions;
   const allCollapsed = !activeSessionId;
-  const visibleTabIds = useMemo(() => {
-    return activeSessionId ? [activeSessionId] : [];
-  }, [activeSessionId]);
   const activeIsMainThread = activeSessionId === mainSession?.id;
-
-  const gridStyle = useMemo(() => {
-    return { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' };
-  }, []);
+  const activeChildSessionId = mainSession?.id && activeSessionId && activeSessionId !== mainSession.id ? activeSessionId : null;
 
   const handleSessionBubbleOpen = useCallback((session) => {
     if (!session?.id) return;
@@ -3473,43 +3477,26 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
             <div className="hidden min-h-0 md:flex">{sidebarSessionList}</div>
             <div
-              className="min-w-0 flex-1"
-              style={{
-                position: 'relative',
-                minHeight: 0,
-                overflow: 'hidden',
-                display: 'grid',
-                gap: visibleTabIds.length > 1 ? 8 : 0,
-                padding: visibleTabIds.length > 1 ? 8 : 0,
-                ...gridStyle,
-              }}
+              className={`grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden ${activeChildSessionId ? 'md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] md:gap-2 md:p-2' : ''}`}
             >
               {openTabs.map(tabId => {
                 const tabSession = sessions.find(s => s.id === tabId);
-                const tabVisible = visibleTabIds.includes(tabId);
+                const isMainTab = tabId === mainSession?.id;
+                const isActiveChildTab = tabId === activeChildSessionId;
+                const tabVisible = isMainTab || isActiveChildTab;
+                const visibilityClass = isMainTab
+                  ? (activeChildSessionId ? 'hidden md:flex' : 'flex')
+                  : isActiveChildTab
+                    ? 'flex'
+                    : 'hidden';
+                const paneFrameClass = activeChildSessionId
+                  ? 'md:rounded-2xl md:border md:border-surface-800 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)]'
+                  : '';
 
               return (
                 <div
                   key={tabId}
-                  style={{
-                    position: tabVisible ? 'relative' : 'absolute',
-                    top: tabVisible ? 'auto' : 0,
-                    left: tabVisible ? 'auto' : 0,
-                    right: tabVisible ? 'auto' : 0,
-                    bottom: tabVisible ? 'auto' : 0,
-                    width: tabVisible ? 'auto' : 0,
-                    height: tabVisible ? 'auto' : 0,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    overflow: 'hidden',
-                    visibility: tabVisible ? 'visible' : 'hidden',
-                    pointerEvents: tabVisible ? 'auto' : 'none',
-                    zIndex: tabVisible ? 1 : 0,
-                    backgroundColor: '#0d1117',
-                    minHeight: 0,
-                    border: 'none',
-                    borderRadius: 0,
-                  }}
+                  className={`${visibilityClass} ${paneFrameClass} min-h-0 flex-col overflow-hidden bg-[#0d1117]`}
                 >
                   {tabSession?.pending ? (
                     <div className="flex-1 min-h-0 flex items-center justify-center text-surface-500 text-sm gap-2">
@@ -3542,6 +3529,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                       onChangedFilesChange={handleChangedFilesChange}
                       mainSession={mainSession}
                       onOpenMain={openMainThread}
+                      onCloseSession={() => closeTab(tabId)}
                       onMainThreadSend={handleGlobalSend}
                       onUpdateMainThreadConfig={updateSessionAssistantConfig}
                     />
