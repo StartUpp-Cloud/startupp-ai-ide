@@ -22,6 +22,21 @@ function normalizeRolePromptIds(value) {
   return [...new Set(value.filter(id => typeof id === 'string' && ROLE_PROMPT_IDS.has(id)))];
 }
 
+function normalizeOptionalPath(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!trimmed.startsWith('/workspace')) return null;
+  return trimmed.slice(0, 240);
+}
+
+function normalizeOptionalBranch(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 180);
+}
+
 // GET /api/projects/:projectId/chat/sessions — List sessions
 // Query: ?includeArchived=true to include old sessions
 router.get('/:projectId/chat/sessions', (req, res) => {
@@ -78,9 +93,21 @@ router.post('/:projectId/chat/sessions', (req, res) => {
       tool: 'claude',
     });
     if (req.body.mode) assistantSettings.mode = String(req.body.mode);
+    const workspaceSettings = {
+      branch: normalizeOptionalBranch(req.body.branch),
+      repoPath: normalizeOptionalPath(req.body.repoPath),
+      worktreePath: normalizeOptionalPath(req.body.worktreePath),
+    };
+    Object.keys(workspaceSettings).forEach(key => {
+      if (workspaceSettings[key] == null) delete workspaceSettings[key];
+    });
     const session = isMainThread
       ? chatStore.getMainThreadSession(projectId, assistantSettings)
       : chatStore.createSession(projectId, name || null, assistantSettings);
+    if (!isMainThread && Object.keys(workspaceSettings).length > 0) {
+      chatStore.updateSessionMeta(projectId, session.id, workspaceSettings);
+      return res.status(201).json(chatStore.getSession(projectId, session.id));
+    }
     res.status(201).json(session);
   } catch (error) {
     res.status(500).json({ error: error.message });

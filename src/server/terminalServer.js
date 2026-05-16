@@ -2398,6 +2398,11 @@ class TerminalServer {
       const content = lastAssistant.content || '';
       console.log(`[terminalServer] Checking last message (${lastAssistant.role}): "${content.slice(0, 80)}..."`);
 
+      if (!lastAssistant.metadata?.recoveryPending && !lastAssistant.metadata?.interrupted) {
+        console.log('[terminalServer] Last message is finalized; skipping heuristic auto-resume');
+        return null;
+      }
+
       // Patterns that indicate an incomplete response (waiting for background work)
       const incompletePatterns = [
         /waiting (on|for).*(agent|task|background)/i,

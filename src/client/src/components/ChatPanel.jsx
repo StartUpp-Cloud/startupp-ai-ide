@@ -2859,6 +2859,9 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       tool: settings.tool || mainSession?.tool || tool,
       model: settings.model !== undefined ? settings.model : (mainSession?.model || null),
       effort: settings.effort !== undefined ? settings.effort : (mainSession?.effort || null),
+      branch: settings.branch !== undefined ? settings.branch : (mainSession?.branch || null),
+      repoPath: settings.repoPath !== undefined ? settings.repoPath : (mainSession?.repoPath || null),
+      worktreePath: settings.worktreePath !== undefined ? settings.worktreePath : (mainSession?.worktreePath || null),
       activeRolePromptIds: settings.activeRolePromptIds !== undefined
         ? normalizeRolePromptIds(settings.activeRolePromptIds)
         : (mainSession?.activeRolePromptIds || []),
@@ -3157,6 +3160,9 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         tool: options.tool,
         model: options.model,
         effort: options.effort,
+        branch: options.branch,
+        repoPath: options.repoPath,
+        worktreePath: options.worktreePath,
         activeRolePromptIds: options.activeRolePromptIds,
       },
     });
