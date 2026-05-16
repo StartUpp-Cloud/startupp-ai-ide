@@ -6,6 +6,7 @@ import {
   Terminal,
   PlugZap,
 } from "lucide-react";
+import VersionBadge from "./VersionBadge";
 
 const Layout = ({ children }) => {
   const location = useLocation();
@@ -33,6 +34,7 @@ const Layout = ({ children }) => {
               <span className="font-display font-semibold text-[15px] text-surface-100 tracking-tight">
                 StartUpp AI IDE
               </span>
+              <VersionBadge className="hidden sm:inline-flex" />
             </Link>
 
             {/* Nav */}

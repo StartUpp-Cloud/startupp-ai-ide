@@ -13,6 +13,7 @@ import SystemHealth from './SystemHealth';
 import LLMSettingsPanel from './LLMSettingsPanel';
 import WelcomeGuide from './WelcomeGuide';
 import SlackSetupPanel from './SlackSetupPanel';
+import VersionBadge from './VersionBadge';
 import { CLI_TOOLS } from '../utils/sessionAssistantOptions';
 
 export default function TopBar({
@@ -68,6 +69,7 @@ export default function TopBar({
             <span className="text-surface-950 font-display font-bold text-[10px]">P</span>
           </div>
           <span className="text-[11px] font-medium text-surface-400 tracking-tight hidden sm:inline">IDE</span>
+          <VersionBadge />
           {selectedProject && (
             <>
               <span className="text-surface-600 text-[11px] hidden sm:inline">/</span>

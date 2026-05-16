@@ -1,9 +1,43 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "../..");
+
+function gitValue(command, fallback) {
+  try {
+    return execSync(command, { cwd: repoRoot, encoding: "utf8" }).trim() || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function packageVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+    return pkg.version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+const commitCount = gitValue("git rev-list --count HEAD", "0");
+const gitSha = gitValue("git rev-parse --short=7 HEAD", "local");
+const releaseVersion = process.env.VITE_APP_RELEASE || `${packageVersion()}.${commitCount}`;
+const buildTime = new Date().toISOString();
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  define: {
+    "import.meta.env.VITE_APP_RELEASE": JSON.stringify(releaseVersion),
+    "import.meta.env.VITE_GIT_SHA": JSON.stringify(gitSha),
+    "import.meta.env.VITE_BUILD_TIME": JSON.stringify(buildTime),
+  },
   build: {
     rollupOptions: {
       output: {
