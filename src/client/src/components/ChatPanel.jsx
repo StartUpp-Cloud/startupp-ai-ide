@@ -3142,7 +3142,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   };
 
   const mainSessionList = <SessionBubbleDock {...sessionListProps} variant="main" />;
-  const sidebarSessionList = <SessionBubbleDock {...sessionListProps} variant="sidebar" />;
 
   if (!projectId) {
     return (
@@ -3428,7 +3427,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       </div>
 
       {showMobileThreadList && (
-        <div className="absolute inset-0 z-40 flex flex-col bg-surface-950 md:hidden">
+        <div className="absolute inset-0 z-40 flex flex-col bg-surface-950 shadow-2xl md:inset-y-0 md:left-0 md:right-auto md:w-[min(420px,45vw)] md:border-r md:border-surface-700">
           <div className="flex items-center justify-between border-b border-surface-700 px-3 py-2">
             <div>
               <div className="text-sm font-semibold text-surface-100">Thread sessions</div>
@@ -3459,23 +3458,30 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         </>
       ) : (
         <>
-          {activeIsMainThread && childSessions.length > 0 && (
-            <div className="flex flex-shrink-0 items-center justify-between border-b border-surface-700 bg-surface-950/95 px-3 py-2 md:hidden">
+          {mainSession && (
+            <div className="flex flex-shrink-0 items-center justify-between border-b border-surface-700 bg-surface-950/95 px-3 py-2">
               <div className="min-w-0">
-                <div className="truncate text-xs font-semibold text-surface-200">Main thread</div>
-                <div className="text-[11px] text-surface-500">{childSessions.length} child session{childSessions.length === 1 ? '' : 's'}</div>
+                <div className="truncate text-xs font-semibold text-surface-200">
+                  {activeChildSessionId ? 'Main thread + active session' : 'Main thread'}
+                </div>
+                <div className="text-[11px] text-surface-500">
+                  {childSessions.length === 0
+                    ? 'No child sessions yet'
+                    : activeIsMainThread
+                    ? `${childSessions.length} child session${childSessions.length === 1 ? '' : 's'} available`
+                    : 'Main stays open beside the selected child session'}
+                </div>
               </div>
               <button
                 type="button"
                 onClick={() => setShowMobileThreadList(true)}
                 className="rounded-full border border-surface-700 bg-surface-900 px-3 py-1.5 text-[11px] font-medium text-surface-200"
               >
-                Threads
+                Open sessions
               </button>
             </div>
           )}
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
-            <div className="hidden min-h-0 md:flex">{sidebarSessionList}</div>
             <div
               className={`grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden ${activeChildSessionId ? 'md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] md:gap-2 md:p-2' : ''}`}
             >
