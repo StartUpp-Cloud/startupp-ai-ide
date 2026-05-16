@@ -1035,7 +1035,7 @@ function ChatSessionContent({
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
   const [chatChannel, setChatChannel] = useState('assistant');
-  const [mainComposerTarget, setMainComposerTarget] = useState('main');
+  const [showMainSessionStarter, setShowMainSessionStarter] = useState(false);
   const [queuedShellCommand, setQueuedShellCommand] = useState(null);
   const [searchResults, setSearchResults] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
@@ -1814,7 +1814,7 @@ function ChatSessionContent({
 
     const targetChannel = options.channel || chatChannel;
 
-    if (session?.isMainThread && targetChannel === 'assistant' && onMainThreadSend && !options.directMain && (options.startSession || mainComposerTarget === 'session')) {
+    if (session?.isMainThread && targetChannel === 'assistant' && onMainThreadSend && !options.directMain && options.startSession) {
       onMainThreadSend(content, attachments, {
         mode: sessionMode,
         tool: effectiveTool,
@@ -1822,7 +1822,7 @@ function ChatSessionContent({
         effort: sessionEffort || null,
         activeRolePromptIds: selectedRolePromptIds,
       });
-      setMainComposerTarget('main');
+      setShowMainSessionStarter(false);
       return;
     }
 
@@ -1945,7 +1945,7 @@ function ChatSessionContent({
         createdAt: new Date().toISOString(),
       }]);
     }
-  }, [projectId, sessionId, session?.isMainThread, sessionMode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, mainComposerTarget, selectedRolePromptIds, rolePromptInstructions, updateMessages, onMainThreadSend]);
+  }, [projectId, sessionId, session?.isMainThread, sessionMode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions, updateMessages, onMainThreadSend]);
 
   useEffect(() => {
     if (!isVisible || !initialMessage) return;
@@ -2319,28 +2319,37 @@ function ChatSessionContent({
       {session?.isMainThread && chatChannel === 'assistant' && (
         <div className="border-t border-surface-700/45 bg-surface-950/90 px-2 pt-2 sm:px-4 sm:pt-3">
           <div className="flex flex-col gap-2 rounded-2xl border border-surface-800 bg-surface-900/55 p-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="inline-flex rounded-xl border border-surface-700 bg-surface-950/70 p-0.5">
-              <button
-                type="button"
-                onClick={() => setMainComposerTarget('main')}
-                className={`rounded-lg px-3 py-1.5 text-[11px] font-medium transition-colors ${mainComposerTarget === 'main' ? 'bg-primary-500/20 text-primary-200' : 'text-surface-500 hover:text-surface-300'}`}
-              >
-                Message main
-              </button>
-              <button
-                type="button"
-                onClick={() => setMainComposerTarget('session')}
-                className={`rounded-lg px-3 py-1.5 text-[11px] font-medium transition-colors ${mainComposerTarget === 'session' ? 'bg-green-500/20 text-green-200' : 'text-surface-500 hover:text-surface-300'}`}
-              >
-                Start session
-              </button>
+            <div>
+              <div className="text-xs font-semibold text-surface-200">Message Main thread</div>
+              <div className="mt-0.5 text-[11px] text-surface-500">The composer below posts directly to the project home base.</div>
             </div>
-            <div className="text-[11px] text-surface-500">
-              {mainComposerTarget === 'main'
-                ? 'Send into the project knowledge base.'
-                : 'Create a child session using the main thread defaults.'}
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowMainSessionStarter(value => !value)}
+              className={`rounded-xl border px-3 py-1.5 text-[11px] font-medium transition-colors ${showMainSessionStarter ? 'border-green-500/45 bg-green-500/15 text-green-200' : 'border-surface-700 bg-surface-950/70 text-surface-300 hover:border-green-500/35 hover:text-green-200'}`}
+            >
+              {showMainSessionStarter ? 'Cancel child session' : 'Start child session'}
+            </button>
           </div>
+          {showMainSessionStarter && (
+            <div className="mt-2 rounded-2xl border border-green-500/25 bg-green-500/10 p-2">
+              <div className="px-1 pb-1 text-[11px] text-green-100">
+                This creates a separate child session and keeps Main thread available as the home base.
+              </div>
+              <ChatInput
+                mode={sessionMode}
+                channel="assistant"
+                projectId={projectId}
+                onSend={(content, attachments) => handleSend(content, attachments, { channel: 'assistant', startSession: true })}
+                busy={false}
+                isVisible={isVisible}
+                selectedRolePromptIds={selectedRolePromptIds}
+                onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
+                placeholderOverride="Describe the child session to start... (Ctrl+Enter to send)"
+                sendLabel="Start session"
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -2355,10 +2364,9 @@ function ChatSessionContent({
         selectedRolePromptIds={selectedRolePromptIds}
         onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
         placeholderOverride={session?.isMainThread && chatChannel === 'assistant'
-          ? mainComposerTarget === 'session'
-            ? 'Describe the child session to start... (Ctrl+Enter to send)'
-            : 'Message the main thread... (Ctrl+Enter to send)'
+          ? 'Message the main thread... (Ctrl+Enter to send)'
           : null}
+        sendLabel={session?.isMainThread && chatChannel === 'assistant' ? 'Send to main' : null}
       />
         </>
       )}

@@ -99,6 +99,7 @@ export default function ChatInput({
   selectedRolePromptIds = [],
   onSelectedRolePromptIdsChange,
   placeholderOverride = null,
+  sendLabel = null,
 }) {
   const [text, setText] = useState('');
   const [searching, setSearching] = useState(false);
@@ -360,7 +361,7 @@ export default function ChatInput({
           <button
             onClick={handleSend}
             disabled={(!text.trim() && attachments.length === 0) || disabled}
-            className={`p-2 rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 rounded-lg transition-colors ${sendLabel ? 'px-3 py-2 text-xs font-medium' : 'p-2'} ${
               (text.trim() || attachments.length > 0) && !disabled
                 ? channel === 'shell'
                   ? 'bg-amber-600 hover:bg-amber-500 text-white'
@@ -371,6 +372,7 @@ export default function ChatInput({
             }`}
           >
             <Send size={16} />
+            {sendLabel && <span>{sendLabel}</span>}
           </button>
 
           {/* Container upload popover */}
