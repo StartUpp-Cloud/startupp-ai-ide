@@ -7,8 +7,51 @@ import express from 'express';
 import { execSync } from 'child_process';
 import { contextBuilder } from '../contextBuilder.js';
 import { findProjectById } from '../models/Project.js';
+import { getProjectContextOverview, buildContextPackFromOverview } from '../projectContextService.js';
 
 const router = express.Router();
+
+/**
+ * GET /api/context/:projectId/overview - Human-visible project context dashboard data
+ */
+router.get('/:projectId/overview', (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const overview = getProjectContextOverview(projectId, {
+      goal: req.query.goal || '',
+      memoryLimit: req.query.memoryLimit,
+      handoffLimit: req.query.handoffLimit,
+    });
+    res.json(overview);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to build project context overview' });
+  }
+});
+
+/**
+ * GET /api/context/:projectId/pack - Compact handoff prompt for fresh AI sessions
+ */
+router.get('/:projectId/pack', (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const overview = getProjectContextOverview(projectId, {
+      goal: req.query.goal || '',
+      sessionId: req.query.sessionId || null,
+      memoryLimit: req.query.memoryLimit,
+      handoffLimit: req.query.handoffLimit,
+    });
+    res.json({
+      contextPack: buildContextPackFromOverview(overview, {
+        goal: req.query.goal || '',
+        sessionId: req.query.sessionId || null,
+      }),
+      generatedAt: overview.generatedAt,
+      status: overview.status,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to build context pack' });
+  }
+});
 
 /**
  * GET /api/context/:projectId - Build and return full project context

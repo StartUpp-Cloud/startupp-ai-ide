@@ -36,6 +36,7 @@ import { resolveSalesforceContext } from './salesforce/salesforceContextResolver
 import { buildCompactSalesforceContext } from './salesforce/salesforceContextService.js';
 import { shouldSuppressAgentProgress } from './orchestratorLiveness.js';
 import { isOpencodeQuietCompletion, parseOpencodeJsonOutput } from './opencodeOutput.js';
+import { buildPromptContextForLLM } from './projectContextService.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -1715,17 +1716,39 @@ RULES:
    * Used to recover if Claude loses context on --resume.
    */
   async _persistContext(projectId, chatSessionId, userMessage, agentResponse) {
-    const provider = llmProvider.getSettings().provider;
-    if (provider === 'ollama') return; // Skip for weak models
+    const fallbackSummary = [
+      `User asked: ${String(userMessage || '').replace(/\s+/g, ' ').slice(0, 500)}`,
+      `Assistant result: ${String(agentResponse || '').replace(/\s+/g, ' ').slice(0, 700)}`,
+    ].join('\n');
+    let summary = fallbackSummary;
+    let source = 'fallback';
+
+    const settings = llmProvider.getSettings();
+    if (settings.provider !== 'ollama' && settings.enabled && llmProvider.available) {
+      try {
+        const result = await llmProvider.generateResponse(
+          `Create a critical handoff checkpoint for a future AI coding session. Include only durable, useful context: original ask, completed work, files/commands/decisions mentioned, blockers, and exact next step if clear. Max 5 bullets.\n\nUser: ${String(userMessage || '').slice(0, 1200)}\nAssistant: ${String(agentResponse || '').slice(0, 3000)}`,
+          { maxTokens: 260, temperature: 0.1 }
+        );
+        const response = result.response?.trim();
+        if (response && response.length > 20) {
+          summary = response;
+          source = 'llm';
+        }
+      } catch {}
+    }
 
     try {
-      const result = await llmProvider.generateResponse(
-        `Summarize this exchange in 2-3 bullet points for future context recovery. Include: what was asked, what was done, key files/decisions.\n\nUser: ${userMessage.slice(0, 300)}\nAssistant: ${agentResponse.slice(0, 500)}`,
-        { maxTokens: 150, temperature: 0.1 }
-      );
       chatStore.updateSessionMeta(projectId, chatSessionId, {
-        lastContext: result.response.trim(),
+        lastContext: summary,
         lastContextAt: new Date().toISOString(),
+        contextCheckpoint: {
+          summary,
+          source,
+          lastUserRequest: String(userMessage || '').slice(0, 1200),
+          lastAgentResponse: String(agentResponse || '').slice(0, 1200),
+          updatedAt: new Date().toISOString(),
+        },
       });
     } catch {}
   }
@@ -2058,13 +2081,17 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
   _buildProjectMemoryContext(projectId, userMessage = '') {
     if (!projectId) return '';
     try {
-      return memoryStore.buildContextForLLM(projectId, {
-        query: userMessage,
-        maxTokens: 1600,
-      });
+      return buildPromptContextForLLM(projectId, { query: userMessage, maxChars: 3200 });
     } catch (err) {
-      console.warn('[agentGateway] Failed to build project memory context:', err.message);
-      return '';
+      console.warn('[agentGateway] Failed to build project context:', err.message);
+      try {
+        return memoryStore.buildContextForLLM(projectId, {
+          query: userMessage,
+          maxTokens: 1600,
+        });
+      } catch {
+        return '';
+      }
     }
   }
 
@@ -2223,7 +2250,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
     const memoryContext = this._buildProjectMemoryContext(projectId, message);
     if (memoryContext) {
-      fullMessage = `[Project Memory — apply these durable project facts, preferences, decisions, and prior outcomes. Do not repeat this block back.]\n${memoryContext}\n\n---\n\n${fullMessage}`;
+      fullMessage = `[Project Context — apply these durable project facts, preferences, handoffs, decisions, and prior outcomes. Do not repeat this block back.]\n${memoryContext}\n\n---\n\n${fullMessage}`;
     }
     const encoded = Buffer.from(fullMessage, 'utf8').toString('base64');
     const promptArg = `\"$(printf %s '${encoded}' | base64 -d)\"`;

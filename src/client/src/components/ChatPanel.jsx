@@ -4,7 +4,7 @@ import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from '
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
-import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy } from 'lucide-react';
 import ModeToggle from './ModeToggle';
 import {
   CLI_TOOLS,
@@ -626,6 +626,215 @@ function MainThreadSessionBubbles({
   );
 }
 
+function ProjectContextPanel({ projectId, project, onClose, onStartSession }) {
+  const [overview, setOverview] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  const loadOverview = useCallback(async () => {
+    if (!projectId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/context/${projectId}/overview?memoryLimit=50&handoffLimit=20`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to load project context');
+      setOverview(data);
+    } catch (err) {
+      setError(err.message || 'Failed to load project context');
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    loadOverview();
+  }, [loadOverview]);
+
+  const contextPack = overview?.contextPack || '';
+  const status = overview?.status || { level: 'building', label: 'Building', reason: 'Context is still being collected.' };
+  const statusClass = status.level === 'ready'
+    ? 'border-green-500/30 bg-green-500/10 text-green-200'
+    : status.level === 'partial'
+      ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+      : 'border-surface-700 bg-surface-900 text-surface-300';
+  const memoryItems = overview?.memories || [];
+  const handoffs = overview?.handoffs || [];
+  const rules = overview?.project?.rules || [];
+  const build = overview?.buildSystem;
+  const scripts = build?.scripts ? Object.keys(build.scripts).slice(0, 8) : [];
+
+  const copyPack = useCallback(async () => {
+    if (!contextPack) return;
+    try {
+      await navigator.clipboard.writeText(contextPack);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  }, [contextPack]);
+
+  const startContextSession = useCallback(() => {
+    if (!contextPack) return;
+    onStartSession?.(`${contextPack}\n\n[User Request]\nUse this context as the handoff for a fresh AI coding session. Briefly confirm the current project state and ask what to tackle next if no clear next step is listed.`);
+  }, [contextPack, onStartSession]);
+
+  return (
+    <div className="absolute inset-0 z-50 flex bg-surface-950/80 backdrop-blur-sm">
+      <div className="ml-auto flex h-full w-full max-w-3xl flex-col border-l border-surface-700 bg-surface-950 shadow-2xl">
+        <div className="flex items-center gap-3 border-b border-surface-700 px-4 py-3">
+          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-primary-400/25 bg-primary-500/10 text-primary-300">
+            <BookOpen size={17} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold text-surface-100">Project Context</div>
+            <div className="truncate text-xs text-surface-500">{project?.name || overview?.project?.name || 'Project'} knowledge, memory, and handoff pack</div>
+          </div>
+          <button
+            type="button"
+            onClick={loadOverview}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-full border border-surface-700 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-300 transition-colors hover:border-surface-600 hover:text-surface-100 disabled:opacity-50"
+          >
+            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-surface-700 bg-surface-900 p-2 text-surface-400 transition-colors hover:text-surface-100"
+            title="Close project context"
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          {loading ? (
+            <div className="flex h-full items-center justify-center gap-2 text-sm text-surface-500">
+              <Loader size={16} className="animate-spin" />
+              Loading project context...
+            </div>
+          ) : error ? (
+            <div className="rounded-2xl border border-red-500/25 bg-red-500/10 p-4 text-sm text-red-200">{error}</div>
+          ) : (
+            <div className="space-y-4">
+              <div className={`rounded-2xl border px-4 py-3 ${statusClass}`}>
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <span>{status.label}</span>
+                  <span className="text-[11px] font-normal opacity-80">generated {overview?.generatedAt ? new Date(overview.generatedAt).toLocaleString() : 'now'}</span>
+                </div>
+                <div className="mt-1 text-xs leading-5 opacity-90">{status.reason}</div>
+              </div>
+
+              <section className="rounded-2xl border border-surface-800 bg-surface-900/45 p-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-surface-400">What This Project Is</div>
+                <p className="text-sm leading-6 text-surface-200">
+                  {overview?.project?.description || 'No project description has been captured yet. The context will improve as main thread and child sessions complete work.'}
+                </p>
+                <div className="mt-3 grid gap-2 text-xs text-surface-500 sm:grid-cols-2">
+                  <div>Stack: <span className="text-surface-300">{overview?.project?.stack || 'generic'}</span></div>
+                  <div>Sessions: <span className="text-surface-300">{overview?.sessions?.childCount || 0} child / {overview?.sessions?.total || 0} total</span></div>
+                  {overview?.project?.containerName && <div>Container: <span className="text-surface-300">{overview.project.containerName}</span></div>}
+                  {overview?.project?.repos?.length > 0 && <div>Repos: <span className="text-surface-300">{overview.project.repos.length}</span></div>}
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-surface-800 bg-surface-900/45 p-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-surface-400">Build And Tooling</div>
+                {build ? (
+                  <div className="space-y-1 text-sm text-surface-300">
+                    <div>{[build.language, build.framework, build.testRunner].filter(Boolean).join(' / ') || 'No build details detected'}</div>
+                    <div className="text-xs text-surface-500">Package manager: {build.packageManager || 'unknown'}</div>
+                    {scripts.length > 0 && <div className="text-xs text-surface-500">Scripts: {scripts.join(', ')}</div>}
+                  </div>
+                ) : (
+                  <div className="text-sm text-surface-500">Build details are not available yet for this project.</div>
+                )}
+              </section>
+
+              <section className="rounded-2xl border border-surface-800 bg-surface-900/45 p-4">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-surface-400">Durable Memory</div>
+                  <span className="text-[11px] text-surface-600">{memoryItems.length} item{memoryItems.length === 1 ? '' : 's'}</span>
+                </div>
+                {memoryItems.length > 0 ? (
+                  <div className="space-y-2">
+                    {memoryItems.slice(0, 10).map(memory => (
+                      <div key={memory.id} className="rounded-xl border border-surface-800 bg-surface-950/50 px-3 py-2">
+                        <div className="text-[10px] uppercase tracking-wide text-primary-300">{memory.type} / {memory.category}</div>
+                        <div className="mt-1 text-sm leading-5 text-surface-200">{memory.content}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-surface-700 px-3 py-3 text-sm text-surface-500">No durable memory yet. Completed sessions will slowly populate this.</div>
+                )}
+              </section>
+
+              <section className="rounded-2xl border border-surface-800 bg-surface-900/45 p-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-surface-400">Recent Session Handoffs</div>
+                {handoffs.length > 0 ? (
+                  <div className="space-y-2">
+                    {handoffs.slice(0, 8).map(handoff => (
+                      <div key={handoff.id} className="rounded-xl border border-surface-800 bg-surface-950/50 px-3 py-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <div className="truncate text-sm font-medium text-surface-100">{handoff.name}</div>
+                          {handoff.tool && <span className="rounded bg-surface-800 px-1.5 py-0.5 text-[10px] text-surface-400">{handoff.tool}</span>}
+                          {handoff.branch && <span className="rounded bg-green-500/10 px-1.5 py-0.5 text-[10px] text-green-300">{handoff.branch}</span>}
+                        </div>
+                        <div className="mt-1 text-xs leading-5 text-surface-400">{handoff.summary || handoff.starter || 'No handoff summary captured yet.'}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-surface-700 px-3 py-3 text-sm text-surface-500">No child session handoffs yet.</div>
+                )}
+              </section>
+
+              {rules.length > 0 && (
+                <section className="rounded-2xl border border-surface-800 bg-surface-900/45 p-4">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-surface-400">Project Rules</div>
+                  <div className="space-y-1 text-sm text-surface-300">
+                    {rules.slice(0, 8).map((rule, index) => <div key={`${index}-${rule}`}>{index + 1}. {rule}</div>)}
+                  </div>
+                </section>
+              )}
+
+              <section className="rounded-2xl border border-surface-800 bg-surface-900/45 p-4">
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <div className="mr-auto text-xs font-semibold uppercase tracking-wide text-surface-400">Context Pack</div>
+                  <button
+                    type="button"
+                    onClick={copyPack}
+                    disabled={!contextPack}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-surface-700 bg-surface-950 px-3 py-1.5 text-[11px] text-surface-300 transition-colors hover:border-surface-600 hover:text-surface-100 disabled:opacity-50"
+                  >
+                    <Copy size={12} />
+                    {copied ? 'Copied' : 'Copy'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={startContextSession}
+                    disabled={!contextPack || !onStartSession}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-green-600 px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-green-500 disabled:opacity-50"
+                  >
+                    <Plus size={12} />
+                    Start handoff session
+                  </button>
+                </div>
+                <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-xl border border-surface-800 bg-surface-950/70 p-3 text-[11px] leading-5 text-surface-300">{contextPack || 'No context pack available yet.'}</pre>
+              </section>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Working indicator with live timer and stop button.
  */
@@ -854,7 +1063,7 @@ function ChildThreadHeader({ project, session, mainSession, onOpenMain, onCloseS
   );
 }
 
-function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange, project }) {
+function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange, project, onOpenProjectContext }) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
   const rawEffort = session?.effort || '';
@@ -994,6 +1203,18 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
         )}
       </div>
 
+      {onOpenProjectContext && (
+        <button
+          type="button"
+          onClick={onOpenProjectContext}
+          className="inline-flex items-center gap-1.5 rounded-md border border-surface-700 bg-surface-900/70 px-2 py-1 text-[11px] text-surface-300 transition-colors hover:border-primary-500/40 hover:bg-primary-500/10 hover:text-primary-200"
+          title="View collected project context and handoff pack"
+        >
+          <BookOpen size={12} />
+          <span>Project Context</span>
+        </button>
+      )}
+
       {channel === 'assistant' && (
         <>
       <div className="flex items-center gap-1.5 min-w-0">
@@ -1110,6 +1331,7 @@ function ChatSessionContent({
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
   const [chatChannel, setChatChannel] = useState('assistant');
+  const [showProjectContext, setShowProjectContext] = useState(false);
   const [queuedShellCommand, setQueuedShellCommand] = useState(null);
   const [searchResults, setSearchResults] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
@@ -1882,6 +2104,18 @@ function ChatSessionContent({
   );
   const settingsDisabled = agentBusy || Boolean(streamingMessage) || recoveryStatus.active;
 
+  const handleStartProjectContextSession = useCallback((contextPrompt) => {
+    if (!contextPrompt || !onMainThreadSend) return;
+    onMainThreadSend(contextPrompt, [], {
+      mode: sessionMode,
+      tool: effectiveTool,
+      model: sessionModel || null,
+      effort: sessionEffort || null,
+      activeRolePromptIds: selectedRolePromptIds,
+    });
+    setShowProjectContext(false);
+  }, [onMainThreadSend, sessionMode, effectiveTool, sessionModel, sessionEffort, selectedRolePromptIds]);
+
   // Send message handler
   const handleSend = useCallback((content, attachments = [], options = {}) => {
     if (!projectId || !sessionId) return;
@@ -2193,8 +2427,18 @@ function ChatSessionContent({
         overflow: 'hidden',
         width: '100%',
         height: '100%',
+        position: 'relative',
       }}
     >
+      {showProjectContext && session?.isMainThread && (
+        <ProjectContextPanel
+          projectId={projectId}
+          project={project}
+          onClose={() => setShowProjectContext(false)}
+          onStartSession={handleStartProjectContextSession}
+        />
+      )}
+
       {/* Search result indicator */}
       {searchResults && (
         <div className="px-3 py-1 text-[10px] text-surface-500 bg-surface-850/30 border-b border-surface-700/30">
@@ -2215,6 +2459,7 @@ function ChatSessionContent({
         channel={chatChannel}
         onChannelChange={setChatChannel}
         project={project}
+        onOpenProjectContext={session?.isMainThread ? () => setShowProjectContext(true) : null}
       />
 
       {chatChannel === 'shell' ? (
