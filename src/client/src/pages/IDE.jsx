@@ -17,6 +17,9 @@ import {
   FolderOpen,
   Sparkles,
   FileCode,
+  ArrowUpFromLine,
+  Rocket,
+  PackageCheck,
 } from 'lucide-react';
 
 // Storage keys
@@ -54,6 +57,92 @@ function normalizeUnreadSessions(value) {
     if (ids.length > 0) normalized[projectId] = ids;
   }
   return normalized;
+}
+
+function getDeployCapability(repo) {
+  const scripts = repo?.scripts || {};
+  const deployScripts = Array.isArray(repo?.deployScripts) ? repo.deployScripts : [];
+  const script = deployScripts[0] || ['deploy', 'release', 'publish'].find(name => scripts[name]);
+  if (script) return { label: script, reason: `${repo.packageManager || 'npm'} run ${script}` };
+  if (repo?.hasVercel) return { label: 'vercel', reason: 'vercel.json' };
+  if (repo?.hasNetlify) return { label: 'netlify', reason: 'netlify.toml' };
+  if (repo?.hasCompose) return { label: 'compose', reason: 'compose file' };
+  if (repo?.hasDockerfile) return { label: 'docker', reason: 'Dockerfile' };
+  return null;
+}
+
+function WorkspaceProjectsList({ repos, currentBranch, onSelectRepo, onRepoAction }) {
+  const visibleRepos = repos.length > 0
+    ? repos
+    : currentBranch
+      ? [{ path: '/workspace', name: 'workspace', isGitRepo: true, branch: currentBranch.branch, hasChanges: currentBranch.hasChanges }]
+      : [];
+
+  if (visibleRepos.length === 0) return null;
+
+  return (
+    <div className="flex-shrink-0 border-y border-surface-700 bg-surface-800/50 px-2 py-2">
+      <div className="mb-1.5 flex items-center gap-1.5 px-1 text-[10px] font-medium uppercase tracking-wide text-surface-500">
+        <PackageCheck className="h-3 w-3 text-primary-400" />
+        Workspace Projects
+      </div>
+      <div className="max-h-48 space-y-1 overflow-y-auto">
+        {visibleRepos.map(repo => {
+          const deploy = getDeployCapability(repo);
+          const branchIsMain = ['main', 'master'].includes(repo.branch);
+          return (
+            <div
+              key={repo.path}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelectRepo?.(repo)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onSelectRepo?.(repo);
+                }
+              }}
+              className="group w-full rounded-lg border border-surface-700/50 bg-surface-850 px-2 py-1.5 text-left transition-colors hover:border-primary-500/35 hover:bg-surface-800"
+              title={`Use ${repo.path} as the main thread folder`}
+            >
+              <div className="flex min-w-0 items-center gap-1.5">
+                <FolderOpen className="h-3 w-3 flex-shrink-0 text-surface-500 group-hover:text-primary-400" />
+                <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-surface-200">{repo.name}</span>
+                {repo.isGitRepo && repo.branch && (
+                  <span className={`flex max-w-24 flex-shrink-0 items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] ${branchIsMain ? 'bg-yellow-500/10 text-yellow-300' : 'bg-green-500/10 text-green-300'}`}>
+                    <GitBranch className="h-2.5 w-2.5" />
+                    <span className="truncate">{repo.branch}</span>
+                    {repo.hasChanges && <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />}
+                  </span>
+                )}
+              </div>
+              <div className="mt-1.5 flex items-center gap-1 pl-4">
+                <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-surface-600">{repo.path}</span>
+                <button
+                  type="button"
+                  onClick={(event) => { event.stopPropagation(); onRepoAction?.('push', repo); }}
+                  disabled={!repo.isGitRepo}
+                  className="rounded-md p-1 text-surface-500 transition-colors hover:bg-green-500/10 hover:text-green-300 disabled:cursor-not-allowed disabled:opacity-30"
+                  title={repo.isGitRepo ? 'Ask main thread to push this project' : 'No git repository detected'}
+                >
+                  <ArrowUpFromLine className="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={(event) => { event.stopPropagation(); onRepoAction?.('deploy', repo); }}
+                  disabled={!deploy}
+                  className="rounded-md p-1 text-surface-500 transition-colors hover:bg-purple-500/10 hover:text-purple-300 disabled:cursor-not-allowed disabled:opacity-30"
+                  title={deploy ? `Ask main thread to deploy via ${deploy.reason}` : 'No deploy signal detected'}
+                >
+                  <Rocket className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 export default function IDE() {
@@ -322,6 +411,20 @@ export default function IDE() {
     });
   }, []);
 
+  const handleWorkspaceRepoSelect = useCallback((repo) => {
+    if (!selectedProjectId || !repo?.path) return;
+    window.dispatchEvent(new CustomEvent('main-thread-repo-select', {
+      detail: { projectId: selectedProjectId, repo },
+    }));
+  }, [selectedProjectId]);
+
+  const handleWorkspaceRepoAction = useCallback((action, repo) => {
+    if (!selectedProjectId || !repo?.path) return;
+    window.dispatchEvent(new CustomEvent('main-thread-repo-action', {
+      detail: { projectId: selectedProjectId, action, repo },
+    }));
+  }, [selectedProjectId]);
+
   // Handle unread WebSocket events
   useEffect(() => {
     const ws = chatWsRef.current;
@@ -439,38 +542,18 @@ export default function IDE() {
         />
       </div>
 
-      {/* Repos + Branches */}
+      {/* Workspace projects */}
+      {selectedProject && (
+        <WorkspaceProjectsList
+          repos={containerRepos}
+          currentBranch={currentBranch}
+          onSelectRepo={handleWorkspaceRepoSelect}
+          onRepoAction={handleWorkspaceRepoAction}
+        />
+      )}
+
       {selectedProject && (containerRepos.length > 0 || currentBranch) && (
-        <div className="flex-shrink-0 px-2 py-2 bg-surface-800/50 border-y border-surface-700 space-y-1 max-h-48 overflow-y-auto">
-          {containerRepos.length > 0 ? (
-            containerRepos.map(repo => (
-              <div key={repo.path} className="px-2 py-1.5 rounded-md bg-surface-850 border border-surface-700/50">
-                <div className="flex items-center gap-1.5">
-                  <FolderOpen className="w-3 h-3 text-surface-500 flex-shrink-0" />
-                  <span className="text-[11px] font-medium text-surface-200 truncate">{repo.name}</span>
-                  {repo.isGitRepo && repo.branch && (
-                    <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono ml-auto flex-shrink-0 ${
-                      ['main','master'].includes(repo.branch) ? 'bg-yellow-500/10 text-yellow-300' : 'bg-green-500/10 text-green-300'
-                    }`}>
-                      <GitBranch className="w-2.5 h-2.5" />
-                      <span className="truncate max-w-20">{repo.branch}</span>
-                      {repo.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))
-          ) : currentBranch ? (
-            <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md ${
-              currentBranch.isMainBranch ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-green-500/10 border border-green-500/20'
-            }`}>
-              <GitBranch className={`w-3.5 h-3.5 ${currentBranch.isMainBranch ? 'text-yellow-400' : 'text-green-400'}`} />
-              <span className={`text-[11px] font-mono font-semibold truncate ${currentBranch.isMainBranch ? 'text-yellow-300' : 'text-green-300'}`}>
-                {currentBranch.branch}
-              </span>
-              {currentBranch.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
-            </div>
-          ) : null}
+        <div className="flex-shrink-0 border-b border-surface-700 bg-surface-800/40 px-2 pb-2">
           <button
             onClick={() => window.open('/branch-review', '_blank')}
             className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[10px] font-medium text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors"

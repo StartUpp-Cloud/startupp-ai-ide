@@ -124,6 +124,27 @@ function collectChangedFilesFromMessages(messages = [], liveChangedFiles = []) {
   return files;
 }
 
+function getRepoDeployHint(repo) {
+  const scripts = repo?.scripts || {};
+  const deployScripts = Array.isArray(repo?.deployScripts) ? repo.deployScripts : [];
+  const script = deployScripts[0] || ['deploy', 'release', 'publish'].find(name => scripts[name]);
+  if (script) return `${repo.packageManager || 'npm'} run ${script}`;
+  if (repo?.hasVercel) return 'Vercel project detected via vercel.json';
+  if (repo?.hasNetlify) return 'Netlify project detected via netlify.toml';
+  if (repo?.hasCompose) return 'Docker Compose project detected';
+  if (repo?.hasDockerfile) return 'Dockerfile detected';
+  return 'No deploy signal was detected; inspect the stack before choosing a deploy path.';
+}
+
+function buildMainThreadRepoActionMessage(action, repo) {
+  const path = repo?.path || '/workspace';
+  const name = repo?.name || path.split('/').pop() || 'workspace';
+  if (action === 'deploy') {
+    return `Deploy ${name} from ${path}. Use the existing project conventions and detected deployment signal: ${getRepoDeployHint(repo)}. Confirm the target command before running anything destructive, execute the safest production deployment flow available, then summarize the result here in the main thread.`;
+  }
+  return `Push ${name} from ${path}. Inspect git status, commit any relevant completed changes if needed, push to the tracked remote without force pushing, and summarize the result here in the main thread.`;
+}
+
 function useTypedLine(text, enabled) {
   const fullText = String(text || '');
   const [typedText, setTypedText] = useState(enabled ? '' : fullText);
@@ -956,12 +977,16 @@ function ChatSessionContent({
   containerRepos,
   onProjectUpdated,
   initialMessage,
+  directMainMessage,
   onInitialMessageHandled,
+  onDirectMainMessageHandled,
   isSelected,
   onChangedFilesChange,
   sessionBubbleDock,
   mainSession,
   onOpenMain,
+  onMainThreadSend,
+  onUpdateMainThreadConfig,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1168,7 +1193,7 @@ function ChatSessionContent({
     if (!isVisible) return undefined;
 
     let rafId = null;
-    const timeoutIds = [80, 240].map(delay => setTimeout(scrollToBottom, delay));
+    const timeoutIds = [0, 80, 240, 600].map(delay => setTimeout(scrollToBottom, delay));
     rafId = requestAnimationFrame(() => {
       scrollToBottom();
       rafId = requestAnimationFrame(scrollToBottom);
@@ -1179,6 +1204,22 @@ function ChatSessionContent({
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, [isVisible, scrollToBottom]);
+
+  useEffect(() => {
+    messagesLoadedRef.current = false;
+    isInitialLoadRef.current = true;
+    prevMessageCountRef.current = 0;
+    knownIdsRef.current = new Set();
+    historySinceRef.current = chatHistorySinceIso();
+    historyCursorRef.current = null;
+    suppressNextAutoScrollRef.current = false;
+    setMessages([]);
+    setLoading(true);
+    setSearchResults(null);
+    setHasMoreHistory(false);
+    setShowJumpBottom(false);
+    setShowJumpTop(false);
+  }, [projectId, sessionId]);
 
   const scrollToTop = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -1729,6 +1770,17 @@ function ChatSessionContent({
 
     const targetChannel = options.channel || chatChannel;
 
+    if (session?.isMainThread && targetChannel === 'assistant' && onMainThreadSend && !options.directMain) {
+      onMainThreadSend(content, attachments, {
+        mode: sessionMode,
+        tool: effectiveTool,
+        model: sessionModel || null,
+        effort: sessionEffort || null,
+        activeRolePromptIds: selectedRolePromptIds,
+      });
+      return;
+    }
+
     if (targetChannel === 'shell') {
       const shellContent = (content || '').trim();
       if (!shellContent) return;
@@ -1848,7 +1900,7 @@ function ChatSessionContent({
         createdAt: new Date().toISOString(),
       }]);
     }
-  }, [projectId, sessionId, sessionMode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions, updateMessages]);
+  }, [projectId, sessionId, session?.isMainThread, sessionMode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions, updateMessages, onMainThreadSend]);
 
   useEffect(() => {
     if (!isVisible || !initialMessage) return;
@@ -1860,9 +1912,21 @@ function ChatSessionContent({
 
     const targetChannel = initialMessage.channel || 'assistant';
     if (targetChannel !== chatChannel) setChatChannel(targetChannel);
-    handleSend(text, initialMessage.attachments || [], { channel: targetChannel });
+    handleSend(text, initialMessage.attachments || [], { channel: targetChannel, directMain: initialMessage.directMain });
     onInitialMessageHandled?.(sessionId, initialMessage.id);
   }, [isVisible, initialMessage, sessionId, chatChannel, handleSend, onInitialMessageHandled]);
+
+  useEffect(() => {
+    if (!isVisible || !directMainMessage || !session?.isMainThread) return;
+    const text = String(directMainMessage.content || '').trim();
+    if (!text) {
+      onDirectMainMessageHandled?.(sessionId, directMainMessage.id);
+      return;
+    }
+    setChatChannel('assistant');
+    handleSend(text, [], { channel: 'assistant', directMain: true });
+    onDirectMainMessageHandled?.(sessionId, directMainMessage.id);
+  }, [isVisible, directMainMessage, session?.isMainThread, sessionId, handleSend, onDirectMainMessageHandled]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -2086,6 +2150,7 @@ function ChatSessionContent({
               onSend={handleSend}
               onRetry={handleRetryMessage}
               animateContent={typingMessageIds.has(msg.id)}
+              threadKind={session?.isMainThread ? 'main' : 'session'}
             />
           ))
         )}
@@ -2135,6 +2200,7 @@ function ChatSessionContent({
             wsRef={wsRef}
             projectId={projectId}
             onSend={handleSend}
+            threadKind={session?.isMainThread ? 'main' : 'session'}
           />
         )}
 
@@ -2180,6 +2246,32 @@ function ChatSessionContent({
 
       {sessionBubbleDock}
 
+      {!session?.isMainThread && mainSession?.id && chatChannel === 'assistant' && (
+        <div className="border-t border-surface-700/45 bg-surface-950/90 px-2 pt-2 sm:px-4 sm:pt-3">
+          <div className="mb-2 flex items-center gap-2 px-1 text-[11px] text-surface-400">
+            <Bot size={12} className="text-primary-400" />
+            <span className="font-medium text-surface-300">Start from Main thread</span>
+            <span className="text-surface-600">Sends this as a new child session without leaving the current thread.</span>
+          </div>
+          <ChatInput
+            mode={getSessionMode(mainSession, mode)}
+            channel="assistant"
+            projectId={projectId}
+            onSend={(content, attachments) => onMainThreadSend?.(content, attachments, {
+              mode: getSessionMode(mainSession, mode),
+              tool: mainSession?.tool || tool || 'claude',
+              model: mainSession?.model || null,
+              effort: mainSession?.effort || null,
+              activeRolePromptIds: normalizeRolePromptIds(mainSession?.activeRolePromptIds),
+            })}
+            busy={false}
+            isVisible={isVisible}
+            selectedRolePromptIds={mainSession?.activeRolePromptIds || []}
+            onSelectedRolePromptIdsChange={(nextIds) => onUpdateMainThreadConfig?.(mainSession.id, { activeRolePromptIds: nextIds })}
+          />
+        </div>
+      )}
+
       <ChatInput
         mode={sessionMode}
         channel={chatChannel}
@@ -2212,6 +2304,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const [historySearchResults, setHistorySearchResults] = useState([]);
   const [historySearchLoading, setHistorySearchLoading] = useState(false);
   const [pendingInitialMessages, setPendingInitialMessages] = useState({});
+  const [pendingDirectMainMessages, setPendingDirectMainMessages] = useState({});
   const [activeChangedFiles, setActiveChangedFiles] = useState([]);
   const sessionListRef = useRef(null);
   const sessionsRef = useRef([]);
@@ -2407,17 +2500,19 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     return [mainId, sessionId];
   }, []);
 
-  const createNewSession = useCallback(async ({ initialMessage = null, channel = 'assistant', mode: requestedMode = null } = {}) => {
+  const createNewSession = useCallback(async ({ initialMessage = null, channel = 'assistant', mode: requestedMode = null, settings = {} } = {}) => {
     if (!projectId || creatingRef.current) return null;
     creatingRef.current = true;
     const tempId = `pending-${Date.now()}`;
     const previousActiveId = activeSessionId;
     const mainSession = sessionsRef.current.find(session => session?.isMainThread);
     const inheritedSettings = {
-      tool: mainSession?.tool || tool,
-      model: mainSession?.model || null,
-      effort: mainSession?.effort || null,
-      activeRolePromptIds: mainSession?.activeRolePromptIds || [],
+      tool: settings.tool || mainSession?.tool || tool,
+      model: settings.model !== undefined ? settings.model : (mainSession?.model || null),
+      effort: settings.effort !== undefined ? settings.effort : (mainSession?.effort || null),
+      activeRolePromptIds: settings.activeRolePromptIds !== undefined
+        ? normalizeRolePromptIds(settings.activeRolePromptIds)
+        : (mainSession?.activeRolePromptIds || []),
     };
     const optimisticSession = {
       id: tempId,
@@ -2694,13 +2789,19 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     }
   }, [projectId]);
 
-  const handleGlobalSend = useCallback((content, attachments = []) => {
+  const handleGlobalSend = useCallback((content, attachments = [], options = {}) => {
     const trimmed = String(content || '').trim();
     if (!trimmed && attachments.length === 0) return;
     createNewSession({
       initialMessage: { content: trimmed, attachments, id: `initial-${Date.now()}` },
       channel: 'assistant',
-      mode,
+      mode: options.mode || mode,
+      settings: {
+        tool: options.tool,
+        model: options.model,
+        effort: options.effort,
+        activeRolePromptIds: options.activeRolePromptIds,
+      },
     });
   }, [createNewSession, mode]);
 
@@ -2712,6 +2813,53 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       return next;
     });
   }, []);
+
+  const handleDirectMainMessageHandled = useCallback((sessionId, messageId) => {
+    setPendingDirectMainMessages(prev => {
+      if (!prev[sessionId] || prev[sessionId].id !== messageId) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!projectId) return undefined;
+
+    const selectRepo = (event) => {
+      if (event.detail?.projectId !== projectId) return;
+      const repo = event.detail?.repo;
+      const main = sessionsRef.current.find(session => session?.isMainThread);
+      if (!main?.id || !repo?.path) return;
+      updateSessionAssistantConfig(main.id, { repoPath: repo.path });
+      openSession(main.id);
+    };
+
+    const requestAction = (event) => {
+      if (event.detail?.projectId !== projectId) return;
+      const repo = event.detail?.repo;
+      const action = event.detail?.action === 'deploy' ? 'deploy' : 'push';
+      const main = sessionsRef.current.find(session => session?.isMainThread);
+      if (!main?.id || !repo?.path) return;
+      updateSessionAssistantConfig(main.id, { repoPath: repo.path });
+      openSession(main.id);
+      setPendingDirectMainMessages(prev => ({
+        ...prev,
+        [main.id]: {
+          id: `repo-action-${Date.now()}`,
+          content: buildMainThreadRepoActionMessage(action, repo),
+          directMain: true,
+        },
+      }));
+    };
+
+    window.addEventListener('main-thread-repo-select', selectRepo);
+    window.addEventListener('main-thread-repo-action', requestAction);
+    return () => {
+      window.removeEventListener('main-thread-repo-select', selectRepo);
+      window.removeEventListener('main-thread-repo-action', requestAction);
+    };
+  }, [projectId, openSession, updateSessionAssistantConfig]);
 
   const handleChangedFilesChange = useCallback((sessionId, files) => {
     if (sessionId === activeSessionId) setActiveChangedFiles(files || []);
@@ -3271,12 +3419,16 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                   containerRepos={containerRepos}
                   onProjectUpdated={onProjectUpdated}
                   initialMessage={pendingInitialMessages[tabId]}
+                  directMainMessage={pendingDirectMainMessages[tabId]}
                   onInitialMessageHandled={handleInitialMessageHandled}
+                  onDirectMainMessageHandled={handleDirectMainMessageHandled}
                   isSelected={activeSessionId === tabId}
                   onChangedFilesChange={handleChangedFilesChange}
                   sessionBubbleDock={tabVisible ? sessionBubbleDock : null}
                   mainSession={mainSession}
                   onOpenMain={openMainThread}
+                  onMainThreadSend={handleGlobalSend}
+                  onUpdateMainThreadConfig={updateSessionAssistantConfig}
                 />
               )}
             </div>

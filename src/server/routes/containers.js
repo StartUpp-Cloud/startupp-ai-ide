@@ -88,6 +88,64 @@ function isRefreshRequest(req) {
   return req.query.refresh === "1" || req.query.refresh === "true";
 }
 
+async function describeWorkspaceRepo(containerName, dir) {
+  const folderName = dir === "/workspace" ? "workspace" : dir.split("/").pop();
+
+  const [isGitRaw, pkgContent, hasPnpmRaw, hasYarnRaw, hasDockerfileRaw, hasComposeRaw, hasVercelRaw, hasNetlifyRaw] = await Promise.all([
+    containerManager.execInContainerAsync(containerName, `test -e '${dir}/.git' && echo yes`),
+    containerManager.execInContainerAsync(containerName, `cat '${dir}/package.json' 2>/dev/null`),
+    containerManager.execInContainerAsync(containerName, `test -f '${dir}/pnpm-lock.yaml' && echo yes`),
+    containerManager.execInContainerAsync(containerName, `test -f '${dir}/yarn.lock' && echo yes`),
+    containerManager.execInContainerAsync(containerName, `test -f '${dir}/Dockerfile' && echo yes`),
+    containerManager.execInContainerAsync(containerName, `test -f '${dir}/docker-compose.yml' -o -f '${dir}/compose.yml' && echo yes`),
+    containerManager.execInContainerAsync(containerName, `test -f '${dir}/vercel.json' && echo yes`),
+    containerManager.execInContainerAsync(containerName, `test -f '${dir}/netlify.toml' && echo yes`),
+  ]);
+
+  const isGit = isGitRaw === "yes";
+  let branch = null;
+  let hasChanges = false;
+
+  if (isGit) {
+    const [branchRaw, gitStatus] = await Promise.all([
+      containerManager.execInContainerAsync(containerName, `cd '${dir}' && git branch --show-current 2>/dev/null`),
+      containerManager.execInContainerAsync(containerName, `cd '${dir}' && git status --porcelain 2>/dev/null`),
+    ]);
+    branch = branchRaw || null;
+    hasChanges = !!(gitStatus && gitStatus.trim());
+  }
+
+  let scripts = {};
+  try {
+    if (pkgContent) {
+      const pkg = JSON.parse(pkgContent);
+      scripts = pkg.scripts || {};
+    }
+  } catch { /* invalid package.json */ }
+
+  let packageManager = "npm";
+  if (hasPnpmRaw === "yes") packageManager = "pnpm";
+  else if (hasYarnRaw === "yes") packageManager = "yarn";
+
+  const deployScripts = Object.keys(scripts).filter(script => /^(deploy|release|publish|ship)(:|$)|deploy|release/i.test(script));
+
+  return {
+    path: dir,
+    name: folderName,
+    isGitRepo: isGit,
+    branch,
+    hasChanges,
+    scripts,
+    packageManager,
+    hasPackageJson: !!pkgContent,
+    hasDockerfile: hasDockerfileRaw === "yes",
+    hasCompose: hasComposeRaw === "yes",
+    hasVercel: hasVercelRaw === "yes",
+    hasNetlify: hasNetlifyRaw === "yes",
+    deployScripts,
+  };
+}
+
 /**
  * GET /api/containers/status
  * Check Docker availability and dev image status
@@ -356,49 +414,16 @@ router.get("/:name/repos", async (req, res) => {
       containerCacheKey(name, "repos"),
       CACHE_TTLS.repos,
       async () => {
+        const workspaceRepo = await describeWorkspaceRepo(name, "/workspace");
+        if (workspaceRepo.isGitRepo || workspaceRepo.hasPackageJson) return [workspaceRepo];
+
         // List directories in /workspace
         const dirsOutput = await containerManager.execInContainerAsync(name, "ls -d /workspace/*/ 2>/dev/null");
         if (!dirsOutput) return [];
 
         const dirs = dirsOutput.split("\n").filter(Boolean).map(d => d.replace(/\/$/, ""));
 
-        return mapLimit(dirs, 4, async (dir) => {
-          const folderName = dir.split("/").pop();
-
-          const [isGitRaw, pkgContent, hasPnpmRaw, hasYarnRaw] = await Promise.all([
-            containerManager.execInContainerAsync(name, `test -e '${dir}/.git' && echo yes`),
-            containerManager.execInContainerAsync(name, `cat '${dir}/package.json' 2>/dev/null`),
-            containerManager.execInContainerAsync(name, `test -f '${dir}/pnpm-lock.yaml' && echo yes`),
-            containerManager.execInContainerAsync(name, `test -f '${dir}/yarn.lock' && echo yes`),
-          ]);
-
-          const isGit = isGitRaw === "yes";
-          let branch = null;
-          let hasChanges = false;
-
-          if (isGit) {
-            const [branchRaw, gitStatus] = await Promise.all([
-              containerManager.execInContainerAsync(name, `cd '${dir}' && git branch --show-current 2>/dev/null`),
-              containerManager.execInContainerAsync(name, `cd '${dir}' && git status --porcelain 2>/dev/null`),
-            ]);
-            branch = branchRaw || null;
-            hasChanges = !!(gitStatus && gitStatus.trim());
-          }
-
-          let scripts = {};
-          try {
-            if (pkgContent) {
-              const pkg = JSON.parse(pkgContent);
-              scripts = pkg.scripts || {};
-            }
-          } catch { /* invalid package.json */ }
-
-          let packageManager = "npm";
-          if (hasPnpmRaw === "yes") packageManager = "pnpm";
-          else if (hasYarnRaw === "yes") packageManager = "yarn";
-
-          return { path: dir, name: folderName, isGitRepo: isGit, branch, hasChanges, scripts, packageManager };
-        });
+        return mapLimit(dirs, 4, async (dir) => describeWorkspaceRepo(name, dir));
       },
       { force: isRefreshRequest(req) },
     );

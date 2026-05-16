@@ -345,7 +345,7 @@ export default function ChatInput({
                       title={`${role.title}\n${role.description}`}
                     >
                       <span className={`relative h-3 w-5 rounded-full transition-colors ${active ? 'bg-primary-500/70' : 'bg-surface-700'}`}>
-                        <span className={`absolute top-0.5 h-2 w-2 rounded-full bg-white/90 transition-transform ${active ? 'translate-x-2.5' : 'translate-x-0.5'}`} />
+                        <span className={`absolute left-0.5 top-0.5 h-2 w-2 rounded-full bg-white/90 transition-transform ${active ? 'translate-x-2' : 'translate-x-0'}`} />
                       </span>
                       <span className="hidden min-[390px]:inline">{role.shortLabel}</span>
                     </button>
