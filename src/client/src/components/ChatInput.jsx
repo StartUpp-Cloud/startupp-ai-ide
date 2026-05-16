@@ -100,6 +100,10 @@ export default function ChatInput({
   onSelectedRolePromptIdsChange,
   placeholderOverride = null,
   sendLabel = null,
+  sendVariant = null,
+  secondarySendLabel = null,
+  secondarySendVariant = 'primary',
+  onSecondarySend,
 }) {
   const [text, setText] = useState('');
   const [searching, setSearching] = useState(false);
@@ -132,9 +136,11 @@ export default function ChatInput({
     return () => observer.disconnect();
   }, [isVisible]);
 
-  const handleSend = () => {
+  const canSend = (text.trim() || attachments.length > 0) && !disabled;
+
+  const handleSend = (sender = onSend) => {
     if ((!text.trim() && attachments.length === 0) || disabled) return;
-    onSend(text.trim(), attachments);
+    sender?.(text.trim(), attachments);
     setText('');
     setAttachments([]);
   };
@@ -207,6 +213,17 @@ export default function ChatInput({
     : mode === 'plan'
       ? 'Describe what you want to build... (Ctrl+Enter to send)'
       : 'Tell the agent what to do... (Ctrl+Enter to send)');
+
+  const enabledButtonClass = (variant) => {
+    if (variant === 'primary') return 'bg-primary-600 hover:bg-primary-500 text-white';
+    if (variant === 'green') return 'bg-green-600 hover:bg-green-500 text-white';
+    if (variant === 'surface') return 'bg-surface-700 hover:bg-surface-600 text-surface-100';
+    if (channel === 'shell') return 'bg-amber-600 hover:bg-amber-500 text-white';
+    if (mode === 'plan') return 'bg-purple-600 hover:bg-purple-500 text-white';
+    return 'bg-green-600 hover:bg-green-500 text-white';
+  };
+
+  const buttonBaseClass = 'flex items-center justify-center gap-1.5 rounded-lg transition-colors px-3 py-2 text-xs font-medium whitespace-nowrap';
 
   return (
     <div className="flex-shrink-0 px-2 pt-2 pb-3 w-full sm:px-4 sm:pt-3 sm:pb-4">
@@ -357,23 +374,28 @@ export default function ChatInput({
             )}
           </div>
 
-          {/* Send button */}
-          <button
-            onClick={handleSend}
-            disabled={(!text.trim() && attachments.length === 0) || disabled}
-            className={`flex items-center gap-1.5 rounded-lg transition-colors ${sendLabel ? 'px-3 py-2 text-xs font-medium' : 'p-2'} ${
-              (text.trim() || attachments.length > 0) && !disabled
-                ? channel === 'shell'
-                  ? 'bg-amber-600 hover:bg-amber-500 text-white'
-                  : mode === 'plan'
-                  ? 'bg-purple-600 hover:bg-purple-500 text-white'
-                  : 'bg-green-600 hover:bg-green-500 text-white'
-                : 'bg-surface-700 text-surface-600'
-            }`}
-          >
-            <Send size={16} />
-            {sendLabel && <span>{sendLabel}</span>}
-          </button>
+          {/* Send button(s) */}
+          <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-1.5">
+            {onSecondarySend && secondarySendLabel && (
+              <button
+                type="button"
+                onClick={() => handleSend(onSecondarySend)}
+                disabled={!canSend}
+                className={`${buttonBaseClass} ${canSend ? enabledButtonClass(secondarySendVariant) : 'bg-surface-700 text-surface-600'}`}
+              >
+                {secondarySendLabel}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => handleSend(onSend)}
+              disabled={!canSend}
+              className={`${sendLabel ? buttonBaseClass : 'flex items-center justify-center rounded-lg p-2 transition-colors'} ${canSend ? enabledButtonClass(sendVariant) : 'bg-surface-700 text-surface-600'}`}
+            >
+              <Send size={16} />
+              {sendLabel && <span>{sendLabel}</span>}
+            </button>
+          </div>
 
           {/* Container upload popover */}
           {showUploadPopover && projectId && (

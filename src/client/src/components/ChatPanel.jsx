@@ -553,6 +553,79 @@ function SessionBubbleDock({
   );
 }
 
+function MainThreadSessionBubbles({
+  sessions,
+  activeSessionId,
+  editingSessionId,
+  editingName,
+  editInputRef,
+  onEditingNameChange,
+  onFinishEditing,
+  onCancelEditing,
+  onOpenSession,
+  onCollapseSession,
+  onTogglePin,
+  onStartEditing,
+  onDeleteSession,
+  onLoadArchived,
+}) {
+  const orderedSessions = useMemo(() => [...sessions].sort(sortSessionsOldestFirst), [sessions]);
+  const normalSessions = orderedSessions.filter(session => !session?.pinned);
+  const pinnedSessions = orderedSessions.filter(session => session?.pinned);
+
+  if (orderedSessions.length === 0) return null;
+
+  const renderBubble = (session) => (
+    <SessionBubble
+      key={session.id}
+      session={session}
+      active={session.id === activeSessionId}
+      editing={editingSessionId === session.id}
+      editingName={editingName}
+      editInputRef={editInputRef}
+      onEditingNameChange={onEditingNameChange}
+      onFinishEditing={onFinishEditing}
+      onCancelEditing={onCancelEditing}
+      onOpen={onOpenSession}
+      onCollapse={onCollapseSession}
+      onTogglePin={onTogglePin}
+      onStartEditing={onStartEditing}
+      onDelete={onDeleteSession}
+    />
+  );
+
+  return (
+    <div className="mx-3 my-4 border-t border-surface-800/80 pt-3">
+      <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-wide text-surface-500">
+        <MessageSquare size={12} className="text-primary-400" />
+        <span>Threads</span>
+        <span className="text-surface-600">open a session bubble to continue it</span>
+      </div>
+      <div className="space-y-2">
+        {normalSessions.map(renderBubble)}
+        {pinnedSessions.length > 0 && (
+          <div className="border-t border-surface-800/80 pt-2">
+            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-amber-300/80">
+              <Pin size={10} className="-rotate-45" />
+              Pinned threads
+            </div>
+            <div className="space-y-2">{pinnedSessions.map(renderBubble)}</div>
+          </div>
+        )}
+      </div>
+      {onLoadArchived && (
+        <button
+          type="button"
+          onClick={onLoadArchived}
+          className="mt-2 rounded-lg border border-surface-800 px-3 py-1.5 text-[10px] text-surface-500 transition-colors hover:border-surface-700 hover:bg-surface-900 hover:text-surface-300"
+        >
+          Load older sessions
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * Working indicator with live timer and stop button.
  */
@@ -713,9 +786,9 @@ function MainThreadHeader({ project, session }) {
   const tooltip = 'Main thread is the durable project home base. Use it for project memory, summaries, coordination, and starting child sessions. Child sessions inherit these defaults unless changed.';
 
   return (
-    <div className="border-b border-surface-700/45 bg-surface-950/95 px-3 py-2 sm:px-4">
+    <div className="border-b border-surface-700/45 px-3 py-2 sm:px-4">
       <div className="flex min-w-0 items-center gap-2">
-        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-primary-400/25 bg-primary-500/15 text-primary-300">
+        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-primary-400/25 text-primary-300">
           <Bot size={14} />
         </div>
         <div className="min-w-0 flex-1">
@@ -1031,12 +1104,12 @@ function ChatSessionContent({
   onOpenMain,
   onCloseSession,
   onMainThreadSend,
+  mainThreadSessionBubbles,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
   const [chatChannel, setChatChannel] = useState('assistant');
-  const [showMainSessionStarter, setShowMainSessionStarter] = useState(false);
   const [queuedShellCommand, setQueuedShellCommand] = useState(null);
   const [searchResults, setSearchResults] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
@@ -1823,7 +1896,6 @@ function ChatSessionContent({
         effort: sessionEffort || null,
         activeRolePromptIds: selectedRolePromptIds,
       });
-      setShowMainSessionStarter(false);
       return;
     }
 
@@ -2109,6 +2181,7 @@ function ChatSessionContent({
   }, [isVisible, progressTranscriptEntries.length, scheduleScrollToBottom]);
 
   const displayMessages = searchResults || filteredMessages;
+  const showMainThreadSessionBubbles = session?.isMainThread && !searchResults && mainThreadSessionBubbles;
 
   return (
     <div
@@ -2129,9 +2202,7 @@ function ChatSessionContent({
         </div>
       )}
 
-      {session?.isMainThread ? (
-        <MainThreadHeader project={project} session={session} />
-      ) : (
+      {!session?.isMainThread && (
         <ChildThreadHeader project={project} session={session} mainSession={mainSession} onOpenMain={onOpenMain} onCloseSession={onCloseSession} />
       )}
 
@@ -2183,7 +2254,7 @@ function ChatSessionContent({
             <Loader size={22} className="animate-spin text-surface-600" />
           </div>
         ) : displayMessages.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-surface-500 text-sm">
+          <div className={`${showMainThreadSessionBubbles ? 'px-3 py-6 text-center' : 'flex h-full items-center justify-center'} text-surface-500 text-sm`}>
             {searchResults ? 'No results found' : (session?.isMainThread ? 'Message the main thread to coordinate this project...' : 'Start a conversation...')}
           </div>
         ) : (
@@ -2200,6 +2271,8 @@ function ChatSessionContent({
             />
           ))
         )}
+
+        {showMainThreadSessionBubbles}
 
         {progressTranscriptEntries.length > 0 && (
           <ProgressTranscriptBubble
@@ -2290,53 +2363,28 @@ function ChatSessionContent({
         />
       )}
 
-      {session?.isMainThread && chatChannel === 'assistant' && (
-        <div className="border-t border-surface-700/45 bg-surface-950/90 px-2 pt-1 sm:px-4">
-          <div className="flex items-center justify-end py-1">
-            <button
-              type="button"
-              onClick={() => setShowMainSessionStarter(value => !value)}
-              className={`rounded-full border px-3 py-1 text-[11px] font-medium transition-colors ${showMainSessionStarter ? 'border-green-500/45 bg-green-500/15 text-green-200' : 'border-surface-700 bg-surface-950/70 text-surface-300 hover:border-green-500/35 hover:text-green-200'}`}
-            >
-              {showMainSessionStarter ? 'Cancel child session' : 'Start child session'}
-            </button>
-          </div>
-          {showMainSessionStarter && (
-            <div className="mt-2 rounded-2xl border border-green-500/25 bg-green-500/10 p-2">
-              <div className="px-1 pb-1 text-[11px] text-green-100">
-                This creates a separate child session and keeps Main thread available as the home base.
-              </div>
-              <ChatInput
-                mode={sessionMode}
-                channel="assistant"
-                projectId={projectId}
-                onSend={(content, attachments) => handleSend(content, attachments, { channel: 'assistant', startSession: true })}
-                busy={false}
-                isVisible={isVisible}
-                selectedRolePromptIds={selectedRolePromptIds}
-                onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
-                placeholderOverride="Describe the child session to start... (Ctrl+Enter to send)"
-                sendLabel="Start session"
-              />
-            </div>
-          )}
-        </div>
-      )}
-
       <ChatInput
         mode={sessionMode}
         channel={chatChannel}
         projectId={projectId}
-        onSend={handleSend}
+        onSend={session?.isMainThread && chatChannel === 'assistant'
+          ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', startSession: true })
+          : handleSend}
         onSearch={handleSearch}
         busy={agentBusy}
         isVisible={isVisible}
         selectedRolePromptIds={selectedRolePromptIds}
         onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
         placeholderOverride={session?.isMainThread && chatChannel === 'assistant'
-          ? 'Message the main thread... (Ctrl+Enter to send)'
+          ? 'Write in Main, then choose where to send... (Ctrl+Enter starts a new session)'
           : null}
-        sendLabel={session?.isMainThread && chatChannel === 'assistant' ? 'Send to main' : null}
+        sendLabel={session?.isMainThread && chatChannel === 'assistant' ? 'Send as new session' : null}
+        sendVariant={session?.isMainThread && chatChannel === 'assistant' ? 'green' : null}
+        secondarySendLabel={session?.isMainThread && chatChannel === 'assistant' ? 'Ask in main thread' : null}
+        secondarySendVariant="primary"
+        onSecondarySend={session?.isMainThread && chatChannel === 'assistant'
+          ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', directMain: true })
+          : null}
       />
         </>
       )}
@@ -2354,7 +2402,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const [openTabs, setOpenTabs] = useState([]);
   const [splitCount, setSplitCount] = useState(1);
   const [showSessionList, setShowSessionList] = useState(false);
-  const [showMobileThreadList, setShowMobileThreadList] = useState(false);
   const [historySearch, setHistorySearch] = useState('');
   const [historySearchResults, setHistorySearchResults] = useState([]);
   const [historySearchLoading, setHistorySearchLoading] = useState(false);
@@ -2705,7 +2752,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     setOpenTabs(nextTabs);
     setActiveSessionId(sessionId);
     setShowSessionList(false);
-    setShowMobileThreadList(false);
     markSessionRead(sessionId);
     if (projectId) {
       for (const id of previouslyOpen) {
@@ -3077,31 +3123,24 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     } catch {}
   }, [projectId]);
 
-  const sessionListProps = {
-    sessions: displayedHistorySessions,
-    mainSession,
-    activeSessionId,
-    editingSessionId,
-    editingName,
-    editInputRef,
-    onEditingNameChange: setEditingName,
-    onFinishEditing: finishEditing,
-    onCancelEditing: cancelEditing,
-    onOpenSession: handleSessionBubbleOpen,
-    onOpenMain: openMainThread,
-    onCollapseSession: closeTab,
-    onTogglePin: togglePin,
-    onStartEditing: startEditing,
-    onDeleteSession: deleteSession,
-    historySearch,
-    onHistorySearchChange: setHistorySearch,
-    historySearchLoading,
-    hasHistorySearch,
-    onLoadArchived: handleLoadArchivedSessions,
-    scrollSignal: projectSwitchKey,
-  };
-
-  const mainSessionList = <SessionBubbleDock {...sessionListProps} variant="main" />;
+  const mainThreadSessionBubbles = (
+    <MainThreadSessionBubbles
+      sessions={childSessions}
+      activeSessionId={activeSessionId}
+      editingSessionId={editingSessionId}
+      editingName={editingName}
+      editInputRef={editInputRef}
+      onEditingNameChange={setEditingName}
+      onFinishEditing={finishEditing}
+      onCancelEditing={cancelEditing}
+      onOpenSession={handleSessionBubbleOpen}
+      onCollapseSession={closeTab}
+      onTogglePin={togglePin}
+      onStartEditing={startEditing}
+      onDeleteSession={deleteSession}
+      onLoadArchived={handleLoadArchivedSessions}
+    />
+  );
 
   if (!projectId) {
     return (
@@ -3386,61 +3425,11 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
         </div>
       </div>
 
-      {showMobileThreadList && (
-        <div className="absolute inset-0 z-40 flex flex-col bg-surface-950 shadow-2xl md:inset-y-0 md:left-0 md:right-auto md:w-[min(420px,45vw)] md:border-r md:border-surface-700">
-          <div className="flex items-center justify-between border-b border-surface-700 px-3 py-2">
-            <div>
-              <div className="text-sm font-semibold text-surface-100">Thread sessions</div>
-              <div className="text-[11px] text-surface-500">Open a child session or return to main</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowMobileThreadList(false)}
-              className="rounded-full border border-surface-700 bg-surface-900 p-2 text-surface-400 hover:text-surface-100"
-              title="Close threads"
-            >
-              <X size={14} />
-            </button>
-          </div>
-          <div className="min-h-0 flex-1 overflow-hidden">{mainSessionList}</div>
-        </div>
-      )}
-
       {allCollapsed ? (
-        <>
-          <div className="min-h-0 flex-1 overflow-hidden">
-            {mainSessionList}
-          </div>
-          <div className="border-t border-surface-700/50 bg-surface-900">
-            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-surface-500">Fallback composer</div>
-            <ChatInput mode={mode} channel="assistant" projectId={projectId} onSend={handleGlobalSend} busy={creatingRef.current} isVisible={isActive} />
-          </div>
-        </>
+        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-surface-500">
+          Loading main thread...
+        </div>
       ) : (
-        <>
-          {mainSession && (
-            <div className="flex flex-shrink-0 items-center justify-between border-b border-surface-700 bg-surface-950/95 px-3 py-2">
-              <div className="min-w-0">
-                <div className="truncate text-xs font-semibold text-surface-200">
-                  {activeChildSessionId ? 'Main thread + active session' : 'Main thread'}
-                </div>
-                <div className="text-[11px] text-surface-500">
-                  {childSessions.length === 0
-                    ? 'No child sessions yet'
-                    : activeIsMainThread
-                    ? `${childSessions.length} child session${childSessions.length === 1 ? '' : 's'} available`
-                    : 'Main stays open beside the selected child session'}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowMobileThreadList(true)}
-                className="rounded-full border border-surface-700 bg-surface-900 px-3 py-1.5 text-[11px] font-medium text-surface-200"
-              >
-                Open sessions
-              </button>
-            </div>
-          )}
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
             <div
               className={`grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden ${activeChildSessionId ? 'md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] md:gap-2 md:p-2' : ''}`}
@@ -3497,6 +3486,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                       onOpenMain={openMainThread}
                       onCloseSession={() => closeTab(tabId)}
                       onMainThreadSend={handleGlobalSend}
+                      mainThreadSessionBubbles={mainThreadSessionBubbles}
                     />
                   )}
                 </div>
@@ -3504,7 +3494,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
             })}
           </div>
         </div>
-        </>
       )}
     </div>
   );
