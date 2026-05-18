@@ -3429,8 +3429,9 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
 
   useEffect(() => {
     if (!isActive || !mainSession?.id) return;
-    openSession(mainSession.id);
-  }, [isActive, projectId, mainSession?.id, openSession]);
+    const activeSessionStillExists = activeSessionId && sessions.some(session => session.id === activeSessionId);
+    if (!activeSessionStillExists) openSession(mainSession.id);
+  }, [isActive, projectId, mainSession?.id, activeSessionId, sessions, openSession]);
 
   const handleLoadArchivedSessions = useCallback(async () => {
     if (!projectId) return;
