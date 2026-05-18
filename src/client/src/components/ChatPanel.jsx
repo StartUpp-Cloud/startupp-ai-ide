@@ -251,6 +251,7 @@ function SessionBubble({
   onTogglePin,
   onStartEditing,
   onDelete,
+  compactPreview = false,
 }) {
   const status = getSessionStatus(session, { expanded: active, active });
   const timestamp = formatSessionTimestamp(session?.createdAt || session?.updatedAt);
@@ -311,7 +312,7 @@ function SessionBubble({
               placeholder="Session name..."
             />
           ) : (
-            <div className="break-words text-sm leading-5 text-surface-100" title={starterText}>{starterText}</div>
+            <div className={`break-words text-sm leading-5 text-surface-100 ${compactPreview ? 'line-clamp-2' : ''}`} title={starterText}>{starterText}</div>
           )}
           {showSubject && !editing && (
             <div className="mt-1 truncate text-[11px] text-surface-500" title={name}>{name}</div>
@@ -460,6 +461,7 @@ function SessionBubbleDock({
       onTogglePin={onTogglePin}
       onStartEditing={onStartEditing}
       onDelete={onDeleteSession}
+      compactPreview={variant === 'main'}
     />
   );
 
@@ -591,6 +593,7 @@ function MainThreadSessionBubbles({
       onTogglePin={onTogglePin}
       onStartEditing={onStartEditing}
       onDelete={onDeleteSession}
+      compactPreview
     />
   );
 
