@@ -99,6 +99,7 @@ export default function ChatInput({
   selectedRolePromptIds = [],
   onSelectedRolePromptIdsChange,
   hideRolePrompts = false,
+  focusSignal = 0,
   placeholderOverride = null,
   sendLabel = null,
   sendVariant = null,
@@ -138,6 +139,11 @@ export default function ChatInput({
 
     return () => observer.disconnect();
   }, [isVisible]);
+
+  useEffect(() => {
+    if (!focusSignal || !isVisible) return;
+    requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }));
+  }, [focusSignal, isVisible]);
 
   const canSend = (text.trim() || attachments.length > 0) && !disabled;
 

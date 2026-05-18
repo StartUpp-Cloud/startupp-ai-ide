@@ -275,7 +275,7 @@ function SessionBubble({
           handleOpen();
         }
       }}
-      className={`group max-w-full cursor-pointer rounded-2xl border px-3 text-left shadow-sm transition-all duration-500 ${collapsed ? 'py-1.5' : 'py-2'} ${
+      className={`group max-w-full cursor-pointer rounded-2xl border text-left shadow-sm transition-all duration-500 ${collapsed ? 'px-2 py-1.5' : 'px-3 py-2'} ${
         active
           ? 'border-primary-500/45 bg-primary-500/10 ring-1 ring-primary-500/20'
           : session?.pinned
@@ -327,7 +327,7 @@ function SessionBubble({
         </div>
       </div>
 
-      <div className={`${collapsed ? 'mt-1' : 'mt-2'} flex min-w-0 items-center gap-2 pl-9 text-[10px] text-surface-500 transition-all duration-500`}>
+      <div className={`${collapsed ? 'mt-1 pl-8' : 'mt-2 pl-9'} flex min-w-0 items-center gap-2 text-[10px] text-surface-500 transition-all duration-500`}>
         <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 ${collapsed ? 'text-[8px]' : 'text-[9px]'} ${status.text}`} title={status.label}>
           <span className={`h-1.5 w-1.5 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
           {status.label}
@@ -609,7 +609,7 @@ function MainThreadSessionBubbles({
   );
 
   return (
-    <div className="mx-3 my-4 border-t border-surface-800/80 pt-3">
+    <div className={`${collapsed ? 'mx-2' : 'mx-3'} my-4 border-t border-surface-800/80 pt-3 transition-all duration-500`}>
       <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-wide text-surface-500">
         <MessageSquare size={12} className="text-primary-400" />
         <span>Threads</span>
@@ -1341,6 +1341,7 @@ function ChatSessionContent({
   onMainThreadSend,
   mainThreadSessionBubbles,
   anchorScrollSignal,
+  focusInputSignal = 0,
   contracted = false,
 }) {
   const [messages, setMessages] = useState([]);
@@ -2665,6 +2666,7 @@ function ChatSessionContent({
           onSearch={handleSearch}
           busy={agentBusy}
           isVisible={isVisible}
+          focusSignal={focusInputSignal}
           selectedRolePromptIds={selectedRolePromptIds}
           onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
           hideRolePrompts={contracted}
@@ -2706,6 +2708,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const [activeChangedFiles, setActiveChangedFiles] = useState([]);
   const [mainThreadPaneHovered, setMainThreadPaneHovered] = useState(false);
   const [mainThreadPaneFocused, setMainThreadPaneFocused] = useState(false);
+  const [mainThreadHoverSuppressed, setMainThreadHoverSuppressed] = useState(false);
+  const [sessionInputFocusSignal, setSessionInputFocusSignal] = useState(0);
   const sessionListRef = useRef(null);
   const sessionsRef = useRef([]);
   const openTabsRef = useRef([]);
@@ -3401,16 +3405,20 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     : childSessions;
   const allCollapsed = !activeSessionId;
   const activeChildSessionId = mainSession?.id && activeSessionId && activeSessionId !== mainSession.id ? activeSessionId : null;
-  const mainThreadPaneExpanded = !activeChildSessionId || mainThreadPaneHovered || mainThreadPaneFocused;
+  const mainThreadPaneExpanded = !activeChildSessionId || (!mainThreadHoverSuppressed && (mainThreadPaneHovered || mainThreadPaneFocused));
   const mainThreadAnchorScrollSignal = activeChildSessionId
     ? `${activeChildSessionId}:${mainThreadPaneExpanded ? 'expanded' : 'collapsed'}`
     : '';
   const splitGridClass = activeChildSessionId
-    ? 'md:grid-cols-[minmax(12rem,18rem)_minmax(0,1fr)] md:gap-2 md:p-2'
+    ? 'md:grid-cols-[minmax(10.75rem,16.75rem)_minmax(0,1fr)] md:gap-2 md:p-2'
     : '';
 
   const handleSessionBubbleOpen = useCallback((session) => {
     if (!session?.id) return;
+    setMainThreadPaneHovered(false);
+    setMainThreadPaneFocused(false);
+    setMainThreadHoverSuppressed(true);
+    setSessionInputFocusSignal(Date.now());
     if (hasHistorySearch) openHistorySession(session);
     else openSession(session.id);
   }, [hasHistorySearch, openHistorySession, openSession]);
@@ -3759,16 +3767,23 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                     : 'hidden';
                 const paneFrameClass = activeChildSessionId
                   ? isMainTab
-                    ? `md:justify-self-start md:rounded-2xl md:border md:shadow-[0_14px_40px_rgba(0,0,0,0.22)] md:transition-all md:duration-500 ${mainThreadPaneCollapsed ? 'md:w-full md:border-primary-500/20' : 'md:z-30 md:w-[min(56rem,calc(100vw-2rem))] md:border-primary-500/35 md:shadow-[0_20px_70px_rgba(0,0,0,0.45)]'}`
+                    ? `md:justify-self-start md:rounded-2xl md:border md:border-surface-700/55 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)] md:transition-all md:duration-500 ${mainThreadPaneCollapsed ? 'md:w-full' : 'md:z-30 md:w-[min(56rem,calc(100vw-2rem))] md:shadow-[0_20px_70px_rgba(0,0,0,0.45)]'}`
                     : 'md:rounded-2xl md:border md:border-surface-800 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)]'
                   : '';
 
               return (
                 <div
                   key={tabId}
-                  onMouseEnter={isMainTab ? () => setMainThreadPaneHovered(true) : undefined}
-                  onMouseLeave={isMainTab ? () => setMainThreadPaneHovered(false) : undefined}
-                  onFocusCapture={isMainTab ? () => setMainThreadPaneFocused(true) : undefined}
+                  onMouseEnter={isMainTab ? () => {
+                    if (!mainThreadHoverSuppressed) setMainThreadPaneHovered(true);
+                  } : undefined}
+                  onMouseLeave={isMainTab ? () => {
+                    setMainThreadPaneHovered(false);
+                    setMainThreadHoverSuppressed(false);
+                  } : undefined}
+                  onFocusCapture={isMainTab ? () => {
+                    if (!mainThreadHoverSuppressed) setMainThreadPaneFocused(true);
+                  } : undefined}
                   onBlurCapture={isMainTab ? (event) => {
                     if (!event.currentTarget.contains(event.relatedTarget)) setMainThreadPaneFocused(false);
                   } : undefined}
@@ -3810,6 +3825,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                         onMainThreadSend={handleGlobalSend}
                         mainThreadSessionBubbles={mainThreadSessionBubbles}
                         anchorScrollSignal={isMainTab ? mainThreadAnchorScrollSignal : ''}
+                        focusInputSignal={isActiveChildTab ? sessionInputFocusSignal : 0}
                         contracted={mainThreadPaneCollapsed}
                       />
                     )}
