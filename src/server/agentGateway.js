@@ -130,11 +130,11 @@ class AgentGateway extends EventEmitter {
     this.resetSession(sessionId);
   }
 
-  _storeToolSession(projectId, chatSessionId, tool, cliSessionId) {
+  _storeToolSession(projectId, chatSessionId, tool, cliSessionId, workDir = null) {
     if (!projectId || !chatSessionId || !tool || !cliSessionId) return;
     const session = chatStore.getSession(projectId, chatSessionId);
     const toolSessions = { ...(session?.toolSessions || {}) };
-    toolSessions[tool] = { ...(toolSessions[tool] || {}), cliSessionId, updatedAt: new Date().toISOString() };
+    toolSessions[tool] = { ...(toolSessions[tool] || {}), cliSessionId, workDir: workDir || null, updatedAt: new Date().toISOString() };
     chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId, cliSessionTool: tool, toolSessions });
   }
 
@@ -1385,9 +1385,9 @@ RULES:
       if (parsed.sessionId && !parsed.isError) {
         // Preserve lastSkillHash so skill-change detection works across messages
         const prevState = this._getCliState(chatSessionId, tool);
-        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
+        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1, workDir: worktreeOverride || null };
         this._setCliState(chatSessionId, tool, newState);
-        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId);
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
       }
       if (parsed.isIncomplete) {
         return { success: false, retry: true, retryReason: 'Claude stopped before a final answer', retryType: 'incomplete-output', displayOutput, cleanOutput };
@@ -1435,9 +1435,9 @@ RULES:
       if (parsed.sessionId) {
         // Preserve lastSkillHash so skill-change detection works across messages
         const prevState = this._getCliState(chatSessionId, tool);
-        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
+        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1, workDir: worktreeOverride || null };
         this._setCliState(chatSessionId, tool, newState);
-        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId);
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
       }
       // Context limit: retryable with continuation context
       if (parsed.finishReason === 'length' || parsed.finishReason === 'max_tokens') {
@@ -1458,9 +1458,9 @@ RULES:
       displayOutput = parsed.text;
       if (parsed.sessionId) {
         const prevState = this._getCliState(chatSessionId, tool);
-        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1 };
+        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1, workDir: worktreeOverride || null };
         this._setCliState(chatSessionId, tool, newState);
-        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId);
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
       }
       if (parsed.isError) {
         // Codex auth/rate-limit errors are often transient (retry usually works),
@@ -2179,15 +2179,33 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
   }
 
   _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}, distilledContext = null, salesforceContext = '') {
+    const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
+    const workContext = this._sessionWorkContext(projectId, sessionMeta);
+    const currentWorkDir = workContext?.workDir || null;
+    const workspaceScoped = !!(sessionMeta?.branch || sessionMeta?.repoPath || sessionMeta?.worktreePath);
     let cliState = this._getCliState(chatSessionId, tool);
+
+    if (cliState?.cliSessionId && currentWorkDir && cliState.workDir && cliState.workDir !== currentWorkDir) {
+      this._clearCliState(chatSessionId, tool);
+      cliState = null;
+    }
+
     if (!cliState?.cliSessionId && chatSessionId && projectId) {
       const stored = chatStore.getSession(projectId, chatSessionId);
-      const storedToolSessionId = stored?.toolSessions?.[tool]?.cliSessionId
+      const storedToolSession = stored?.toolSessions?.[tool] || null;
+      const storedToolSessionId = storedToolSession?.cliSessionId
         || (stored?.cliSessionTool === tool ? stored.cliSessionId : null);
-      if (storedToolSessionId) {
-        cliState = { cliSessionId: storedToolSessionId, messageCount: stored.messageCount || 1 };
+      const storedWorkDir = storedToolSession?.workDir || null;
+      const staleWorkDir = currentWorkDir && storedWorkDir && storedWorkDir !== currentWorkDir;
+      const missingScopedWorkDir = workspaceScoped && currentWorkDir && !storedWorkDir;
+
+      if (storedToolSessionId && !staleWorkDir && !missingScopedWorkDir) {
+        cliState = { cliSessionId: storedToolSessionId, messageCount: stored.messageCount || 1, workDir: storedWorkDir || currentWorkDir || null };
         this._setCliState(chatSessionId, tool, cliState);
         console.log(`[agentGateway] Restored ${tool} CLI session from disk: ${storedToolSessionId}`);
+      } else if (storedToolSessionId && (staleWorkDir || missingScopedWorkDir)) {
+        this._clearStoredToolSession(projectId, chatSessionId, tool);
+        console.log(`[agentGateway] Ignored stale ${tool} CLI session for ${chatSessionId}: stored workDir ${storedWorkDir || '(none)'}; current ${currentWorkDir || '(none)'}`);
       }
     }
 
@@ -2201,10 +2219,6 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     const skillHash = skillContext
       ? String(skillContext.length) + '|' + skillContext.slice(0, 64)
       : '';
-
-    // Look up session branch for worktree context (used by all tools + follow-ups)
-    const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
-    const workContext = this._sessionWorkContext(projectId, sessionMeta);
 
     // Build a short branch context reminder for follow-ups and Aider
     const branchReminder = workContext?.reminder || '';
@@ -2225,7 +2239,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       const preamble = this._buildFirstMessagePreamble(tool, projectId, mode, assistantSettings, sessionMeta);
       fullMessage = preamble + '\n\n---\n\n' + message;
       // Record the skill hash so we can detect changes on future messages
-      this._setCliState(chatSessionId, tool, { ...(cliState || {}), lastSkillHash: skillHash });
+      this._setCliState(chatSessionId, tool, { ...(cliState || {}), lastSkillHash: skillHash, workDir: currentWorkDir });
     } else if (skillContext && cliState?.lastSkillHash !== skillHash) {
       // Skills changed since the session started — re-inject them before the user's message
       fullMessage = `[Note: Your active skills have been updated. Apply the following going forward:]\n${skillContext}\n\n---\n\n${message}`;

@@ -136,12 +136,14 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     const wantsName = hasOwn(req.body, 'name');
     const wantsBranch = hasOwn(req.body, 'branch');
     const wantsRepoPath = hasOwn(req.body, 'repoPath');
+    const wantsWorktreePath = hasOwn(req.body, 'worktreePath');
     const wantsAssistantSettings = ['tool', 'model', 'effort'].some((field) => hasOwn(req.body, field));
     const wantsRolePrompts = hasOwn(req.body, 'activeRolePromptIds');
     const wantsStatus = hasOwn(req.body, 'status');
     const wantsMode = hasOwn(req.body, 'mode');
+    let shouldResetCliSession = false;
 
-    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsRolePrompts && !wantsStatus && !wantsMode) {
+    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsWorktreePath && !wantsRolePrompts && !wantsStatus && !wantsMode) {
       return res.status(400).json({ error: 'No supported session fields were provided' });
     }
 
@@ -155,25 +157,32 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
       const newBranch = req.body.branch?.trim() || null;
       const previousBranch = session.branch || null;
       updates.branch = newBranch;
-      // Reset CLI session when branch changes so the AI starts fresh in the new worktree
-      if (newBranch !== previousBranch && session.cliSessionId) {
-        updates.cliSessionId = null;
-        updates.cliSessionTool = null;
-        updates.toolSessions = {};
-        agentGateway.resetSession(sessionId);
-      }
+      // Reset CLI sessions when workspace context changes so AI tools do not
+      // resume a stale conversation rooted in a previous folder/worktree.
+      if (newBranch !== previousBranch) shouldResetCliSession = true;
     }
 
     if (wantsRepoPath) {
       const newRepoPath = req.body.repoPath?.trim() || null;
       const previousRepoPath = session.repoPath || null;
       updates.repoPath = newRepoPath;
-      if (newRepoPath !== previousRepoPath && session.cliSessionId) {
+      if (newRepoPath !== previousRepoPath) shouldResetCliSession = true;
+    }
+
+    if (wantsWorktreePath) {
+      const newWorktreePath = normalizeOptionalPath(req.body.worktreePath);
+      const previousWorktreePath = session.worktreePath || null;
+      updates.worktreePath = newWorktreePath;
+      if (newWorktreePath !== previousWorktreePath) shouldResetCliSession = true;
+    }
+
+    if (shouldResetCliSession) {
+      if (session.cliSessionId || session.cliSessionTool || session.toolSessions) {
         updates.cliSessionId = null;
         updates.cliSessionTool = null;
         updates.toolSessions = {};
-        agentGateway.resetSession(sessionId);
       }
+      agentGateway.resetSession(sessionId);
     }
 
     if (wantsAssistantSettings) {

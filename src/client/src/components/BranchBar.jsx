@@ -86,6 +86,7 @@ function SectionHeader({ icon: Icon, label, count }) {
 export default function BranchBar({ containerName, session, projectId, onBranchChange, onSessionUpdate, containerRepos = [] }) {
   const sessionBranch = session?.branch || null;
   const sessionRepoPath = session?.repoPath || null;
+  const sessionWorktreePath = session?.worktreePath || null;
   const [gitStatus, setGitStatus] = useState(null);
   const [branchData, setBranchData] = useState(null);
   const [showSwitcher, setShowSwitcher] = useState(false);
@@ -121,9 +122,10 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
     setShowCommands(false);
   };
 
-  const worktreePath = sessionBranch
+  const derivedWorktreePath = sessionBranch
     ? `/workspace/.worktrees/${sessionBranch.replace(/[^a-zA-Z0-9._-]/g, '-')}`
     : null;
+  const worktreePath = sessionWorktreePath || derivedWorktreePath;
   // Priority: worktree > explicit user selection > workspace root.
   // Do not auto-detect a repo for the default state; multi-repo workspaces must
   // stay at /workspace until the user selects a folder or branch.
@@ -396,11 +398,8 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
       setGitStatus(null);
       setBranchData(null);
       setBranchLoadError(null);
-      const sessionUpdates = { branch: name };
+      const sessionUpdates = { branch: name, worktreePath: data.worktreePath || null };
       if (data.repoPath && data.repoPath !== '/workspace') sessionUpdates.repoPath = data.repoPath;
-      if (data.worktreePath && !data.worktreePath.includes('.worktrees')) {
-        sessionUpdates.repoPath = data.worktreePath;
-      }
       if (onSessionUpdate) {
         onSessionUpdate(sessionUpdates);
       } else {
@@ -421,7 +420,7 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
       setBranchData(null);
       setBranchLoadError(null);
       if (onSessionUpdate) {
-        onSessionUpdate({ branch: null, repoPath: '/workspace' });
+        onSessionUpdate({ branch: null, repoPath: '/workspace', worktreePath: null });
       } else {
         onBranchChange?.(null);
       }
@@ -442,14 +441,9 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
         return;
       }
       const data = await res.json();
-      // If the branch is checked out at a non-standard location (e.g. main repo),
-      // also update the session repoPath so the folder picker reflects it
-      const sessionUpdates = { branch };
+      const sessionUpdates = { branch, worktreePath: data.worktreePath || null };
       if (data.repoPath && data.repoPath !== '/workspace') sessionUpdates.repoPath = data.repoPath;
-      if (data.reused && data.worktreePath && !data.worktreePath.includes('.worktrees')) {
-        sessionUpdates.repoPath = data.worktreePath;
-      }
-      if (Object.keys(sessionUpdates).length > 1 && onSessionUpdate) {
+      if (onSessionUpdate) {
         setGitStatus(null);
         setBranchData(null);
         setBranchLoadError(null);
