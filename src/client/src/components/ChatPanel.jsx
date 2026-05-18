@@ -252,6 +252,7 @@ function SessionBubble({
   onStartEditing,
   onDelete,
   compactPreview = false,
+  collapsed = false,
 }) {
   const status = getSessionStatus(session, { expanded: active, active });
   const timestamp = formatSessionTimestamp(session?.createdAt || session?.updatedAt);
@@ -274,7 +275,7 @@ function SessionBubble({
           handleOpen();
         }
       }}
-      className={`group max-w-full cursor-pointer rounded-2xl border px-3 py-2 text-left shadow-sm transition-all ${
+      className={`group max-w-full cursor-pointer rounded-2xl border px-3 py-2 text-left shadow-sm transition-all duration-500 ${
         active
           ? 'border-primary-500/45 bg-primary-500/10 ring-1 ring-primary-500/20'
           : session?.pinned
@@ -284,17 +285,12 @@ function SessionBubble({
     >
       <div className="flex min-w-0 items-start gap-2">
         <div className={`mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md ${active ? 'bg-primary-500/20 text-primary-200' : 'bg-surface-700/70 text-surface-300'}`}>
-          <MessageCircle size={14} />
+          <MessageCircle size={collapsed ? 12 : 14} />
         </div>
         <div className="min-w-0 flex-1">
           <div className="mb-0.5 flex min-w-0 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-surface-100" title={name}>{name}</span>
-            <span className="flex-shrink-0 text-[10px] tabular-nums text-surface-500">{timestamp}</span>
-            <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${status.text}`} title={status.label}>
-              <span className={`h-1.5 w-1.5 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
-              {status.label}
-            </span>
-            {session?.pinned && <Pin size={11} className="flex-shrink-0 -rotate-45 text-amber-400" />}
+            <span className={`min-w-0 flex-1 truncate font-semibold text-surface-100 transition-all duration-500 ${collapsed ? 'text-[11px]' : 'text-sm'}`} title={name}>{name}</span>
+            <span className={`flex-shrink-0 text-[10px] tabular-nums text-surface-500 transition-opacity duration-500 ${collapsed ? 'hidden' : ''}`}>{timestamp}</span>
           </div>
           {editing ? (
             <input
@@ -311,25 +307,41 @@ function SessionBubble({
               className="w-full rounded border border-surface-600 bg-surface-900 px-2 py-1 text-xs text-surface-100 outline-none focus:border-primary-500"
               placeholder="Session name..."
             />
-          ) : showStarterPreview ? (
-            <div className={`mt-1 break-words text-xs leading-5 text-surface-400 ${compactPreview ? 'line-clamp-2' : ''}`} title={starterText}>{starterText}</div>
-          ) : null}
+          ) : (
+            <div
+              className={`mt-1 h-10 overflow-hidden break-words transition-colors duration-500 ${
+                collapsed ? 'text-[11px] leading-4 text-surface-500' : 'text-xs leading-5 text-surface-400'
+              }`}
+              title={starterText}
+            >
+              {showStarterPreview ? (
+                <div className={collapsed ? 'line-clamp-1' : (compactPreview ? 'line-clamp-2' : '')}>{starterText}</div>
+              ) : (
+                <span className="text-surface-700">&nbsp;</span>
+              )}
+            </div>
+          )}
           {session?.matchSnippet && session?.matchType === 'content' && (
-            <div className="mt-1 truncate text-[11px] text-surface-500">{session.matchSnippet}</div>
+            <div className={`mt-1 truncate text-[11px] text-surface-500 transition-opacity duration-500 ${collapsed ? 'pointer-events-none opacity-0' : 'opacity-100'}`}>{session.matchSnippet}</div>
           )}
         </div>
       </div>
 
       <div className="mt-2 flex min-w-0 items-center gap-2 pl-9 text-[10px] text-surface-500">
-        <span>{session?.messageCount || 0} msg</span>
+        <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 ${collapsed ? 'text-[8px]' : 'text-[9px]'} ${status.text}`} title={status.label}>
+          <span className={`h-1.5 w-1.5 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
+          {status.label}
+        </span>
+        {session?.pinned && <Pin size={collapsed ? 9 : 11} className="flex-shrink-0 -rotate-45 text-amber-400" />}
         {session?.branch && (
-          <span className="flex min-w-0 items-center gap-0.5 rounded bg-green-500/10 px-1 py-0.5 font-mono text-[9px] text-green-400" title={`Branch: ${session.branch}`}>
+          <span className={`flex min-w-0 items-center gap-0.5 rounded bg-green-500/10 px-1 py-0.5 font-mono text-[9px] text-green-400 ${collapsed ? 'max-w-[6.5rem]' : 'max-w-[12rem]'}`} title={`Branch: ${session.branch}`}>
             <GitBranch size={8} />
             <span className="truncate">{session.branch}</span>
           </span>
         )}
+        <span className={`transition-opacity duration-500 ${collapsed ? 'hidden' : ''}`}>{session?.messageCount || 0} msg</span>
         {session?.hasUnread && !active && <span className="rounded-full bg-primary-500/15 px-1.5 py-0.5 text-primary-300">new</span>}
-        {!session?.pending && (
+        {!session?.pending && !collapsed && (
           <div className="ml-auto flex items-center gap-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
             <button
               type="button"
@@ -567,6 +579,7 @@ function MainThreadSessionBubbles({
   onStartEditing,
   onDeleteSession,
   onLoadArchived,
+  collapsed = false,
 }) {
   const orderedSessions = useMemo(() => [...sessions].sort(sortSessionsOldestFirst), [sessions]);
   const normalSessions = orderedSessions.filter(session => !session?.pinned);
@@ -591,6 +604,7 @@ function MainThreadSessionBubbles({
       onStartEditing={onStartEditing}
       onDelete={onDeleteSession}
       compactPreview
+      collapsed={collapsed}
     />
   );
 
@@ -599,7 +613,7 @@ function MainThreadSessionBubbles({
       <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-wide text-surface-500">
         <MessageSquare size={12} className="text-primary-400" />
         <span>Threads</span>
-        <span className="text-surface-600">open a session bubble to continue it</span>
+        <span className={`text-surface-600 transition-opacity duration-500 ${collapsed ? 'opacity-0' : 'opacity-100'}`}>open a session bubble to continue it</span>
       </div>
       <div className="space-y-2">
         {normalSessions.map(renderBubble)}
@@ -617,7 +631,7 @@ function MainThreadSessionBubbles({
         <button
           type="button"
           onClick={onLoadArchived}
-          className="mt-2 rounded-lg border border-surface-800 px-3 py-1.5 text-[10px] text-surface-500 transition-colors hover:border-surface-700 hover:bg-surface-900 hover:text-surface-300"
+          className={`mt-2 rounded-lg border border-surface-800 px-3 py-1.5 text-[10px] text-surface-500 transition-all duration-500 hover:border-surface-700 hover:bg-surface-900 hover:text-surface-300 ${collapsed ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
         >
           Load older sessions
         </button>
@@ -1326,6 +1340,8 @@ function ChatSessionContent({
   onCloseSession,
   onMainThreadSend,
   mainThreadSessionBubbles,
+  anchorScrollSignal,
+  contracted = false,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1544,6 +1560,24 @@ function ChatSessionContent({
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, [isVisible, scrollToBottom]);
+
+  useEffect(() => {
+    if (!isVisible || !anchorScrollSignal) return undefined;
+
+    const endAt = Date.now() + 650;
+    let rafId = null;
+    const keepAnchored = () => {
+      scrollToBottom();
+      if (Date.now() < endAt) rafId = requestAnimationFrame(keepAnchored);
+    };
+
+    rafId = requestAnimationFrame(keepAnchored);
+    const timeoutId = setTimeout(scrollToBottom, 700);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      clearTimeout(timeoutId);
+    };
+  }, [isVisible, anchorScrollSignal, scrollToBottom]);
 
   useEffect(() => {
     messagesLoadedRef.current = false;
@@ -2424,6 +2458,7 @@ function ChatSessionContent({
 
   const displayMessages = searchResults || filteredMessages;
   const showMainThreadSessionBubbles = session?.isMainThread && !searchResults && mainThreadSessionBubbles;
+  const renderedChatChannel = contracted ? 'assistant' : chatChannel;
 
   return (
     <div
@@ -2458,19 +2493,21 @@ function ChatSessionContent({
         <ChildThreadHeader project={project} session={session} mainSession={mainSession} onOpenMain={onOpenMain} onCloseSession={onCloseSession} />
       )}
 
-      <SessionAssistantControls
-        session={session}
-        defaultTool={tool}
-        disabled={settingsDisabled}
-        projectId={projectId}
-        onUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
-        channel={chatChannel}
-        onChannelChange={setChatChannel}
-        project={project}
-        onOpenProjectContext={session?.isMainThread ? () => setShowProjectContext(true) : null}
-      />
+      {!contracted && (
+        <SessionAssistantControls
+          session={session}
+          defaultTool={tool}
+          disabled={settingsDisabled}
+          projectId={projectId}
+          onUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
+          channel={chatChannel}
+          onChannelChange={setChatChannel}
+          project={project}
+          onOpenProjectContext={session?.isMainThread ? () => setShowProjectContext(true) : null}
+        />
+      )}
 
-      {chatChannel === 'shell' ? (
+      {renderedChatChannel === 'shell' ? (
         <InternalConsole
           projectId={projectId}
           chatWsRef={wsRef}
@@ -2480,7 +2517,7 @@ function ChatSessionContent({
           queuedCommand={queuedShellCommand}
           onQueuedCommandHandled={() => setQueuedShellCommand(null)}
         />
-      ) : chatChannel === 'salesforce' ? (
+      ) : renderedChatChannel === 'salesforce' ? (
         <SalesforceInlineWorkspace projectId={projectId} />
       ) : (
         <>
@@ -2605,7 +2642,7 @@ function ChatSessionContent({
         )}
       </div>
 
-      {isVisible && containerName && (
+      {isVisible && containerName && !contracted && (
         <BranchBar
           containerName={containerName}
           session={session}
@@ -2618,9 +2655,9 @@ function ChatSessionContent({
 
       <ChatInput
         mode={sessionMode}
-        channel={chatChannel}
+        channel={renderedChatChannel}
         projectId={projectId}
-        onSend={session?.isMainThread && chatChannel === 'assistant'
+        onSend={session?.isMainThread && renderedChatChannel === 'assistant'
           ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', startSession: true })
           : handleSend}
         onSearch={handleSearch}
@@ -2628,16 +2665,17 @@ function ChatSessionContent({
         isVisible={isVisible}
         selectedRolePromptIds={selectedRolePromptIds}
         onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
-        placeholderOverride={session?.isMainThread && chatChannel === 'assistant'
+        hideRolePrompts={contracted}
+        placeholderOverride={session?.isMainThread && renderedChatChannel === 'assistant'
           ? 'Write in Main, then choose where to send... (Ctrl+Enter starts a new session)'
           : null}
-        sendLabel={session?.isMainThread && chatChannel === 'assistant' ? 'Send as new session' : null}
-        sendVariant={session?.isMainThread && chatChannel === 'assistant' ? 'green' : null}
-        sendIconOnly={session?.isMainThread && chatChannel === 'assistant'}
-        secondarySendLabel={session?.isMainThread && chatChannel === 'assistant' ? 'Ask in main thread' : null}
+        sendLabel={session?.isMainThread && renderedChatChannel === 'assistant' ? 'Send as new session' : null}
+        sendVariant={session?.isMainThread && renderedChatChannel === 'assistant' ? 'green' : null}
+        sendIconOnly={session?.isMainThread && renderedChatChannel === 'assistant'}
+        secondarySendLabel={session?.isMainThread && renderedChatChannel === 'assistant' ? 'Ask in main thread' : null}
         secondarySendVariant="primary"
-        secondarySendIconOnly={session?.isMainThread && chatChannel === 'assistant'}
-        onSecondarySend={session?.isMainThread && chatChannel === 'assistant'
+        secondarySendIconOnly={session?.isMainThread && renderedChatChannel === 'assistant'}
+        onSecondarySend={session?.isMainThread && renderedChatChannel === 'assistant'
           ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', directMain: true })
           : null}
       />
@@ -2663,6 +2701,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const [pendingInitialMessages, setPendingInitialMessages] = useState({});
   const [pendingDirectMainMessages, setPendingDirectMainMessages] = useState({});
   const [activeChangedFiles, setActiveChangedFiles] = useState([]);
+  const [mainThreadPaneHovered, setMainThreadPaneHovered] = useState(false);
+  const [mainThreadPaneFocused, setMainThreadPaneFocused] = useState(false);
   const sessionListRef = useRef(null);
   const sessionsRef = useRef([]);
   const openTabsRef = useRef([]);
@@ -3357,8 +3397,16 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     ? historySearchResults.filter(session => !session?.isMainThread)
     : childSessions;
   const allCollapsed = !activeSessionId;
-  const activeIsMainThread = activeSessionId === mainSession?.id;
   const activeChildSessionId = mainSession?.id && activeSessionId && activeSessionId !== mainSession.id ? activeSessionId : null;
+  const mainThreadPaneExpanded = !activeChildSessionId || mainThreadPaneHovered || mainThreadPaneFocused;
+  const mainThreadAnchorScrollSignal = activeChildSessionId
+    ? `${activeChildSessionId}:${mainThreadPaneExpanded ? 'expanded' : 'collapsed'}`
+    : '';
+  const splitGridClass = activeChildSessionId
+    ? mainThreadPaneExpanded
+      ? 'md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] md:gap-2 md:p-2 md:transition-all md:duration-500 md:ease-out'
+      : 'md:grid-cols-[minmax(12rem,18rem)_minmax(0,1fr)] md:gap-2 md:p-2 md:transition-all md:duration-500 md:ease-out'
+    : '';
 
   const handleSessionBubbleOpen = useCallback((session) => {
     if (!session?.id) return;
@@ -3400,6 +3448,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       onStartEditing={startEditing}
       onDeleteSession={deleteSession}
       onLoadArchived={handleLoadArchivedSessions}
+      collapsed={Boolean(activeChildSessionId && !mainThreadPaneExpanded)}
     />
   );
 
@@ -3693,63 +3742,75 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       ) : (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
             <div
-              className={`grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden ${activeChildSessionId ? 'md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] md:gap-2 md:p-2' : ''}`}
+              className={`grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden ${splitGridClass}`}
             >
               {openTabs.map(tabId => {
                 const tabSession = sessions.find(s => s.id === tabId);
                 const isMainTab = tabId === mainSession?.id;
                 const isActiveChildTab = tabId === activeChildSessionId;
                 const tabVisible = isMainTab || isActiveChildTab;
+                const mainThreadRailActive = isMainTab && activeChildSessionId;
+                const mainThreadPaneCollapsed = mainThreadRailActive && !mainThreadPaneExpanded;
                 const visibilityClass = isMainTab
                   ? (activeChildSessionId ? 'hidden md:flex' : 'flex')
                   : isActiveChildTab
                     ? 'flex'
                     : 'hidden';
                 const paneFrameClass = activeChildSessionId
-                  ? 'md:rounded-2xl md:border md:border-surface-800 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)]'
+                  ? `md:rounded-2xl md:border md:shadow-[0_14px_40px_rgba(0,0,0,0.22)] md:transition-colors md:duration-500 ${mainThreadPaneCollapsed ? 'md:border-primary-500/20' : 'md:border-surface-800'}`
                   : '';
 
               return (
                 <div
                   key={tabId}
-                  className={`${visibilityClass} ${paneFrameClass} min-h-0 flex-col overflow-hidden bg-[#0d1117]`}
+                  onMouseEnter={isMainTab ? () => setMainThreadPaneHovered(true) : undefined}
+                  onMouseLeave={isMainTab ? () => setMainThreadPaneHovered(false) : undefined}
+                  onFocusCapture={isMainTab ? () => setMainThreadPaneFocused(true) : undefined}
+                  onBlurCapture={isMainTab ? (event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget)) setMainThreadPaneFocused(false);
+                  } : undefined}
+                  className={`${visibilityClass} ${paneFrameClass} relative min-h-0 flex-col overflow-hidden bg-[#0d1117]`}
                 >
-                  {tabSession?.pending ? (
-                    <div className="flex-1 min-h-0 flex items-center justify-center text-surface-500 text-sm gap-2">
-                      <Loader size={16} className="animate-spin" />
-                      Creating session...
-                    </div>
-                  ) : (
-                    <ChatSessionContent
-                      projectId={projectId}
-                      sessionId={tabId}
-                      wsRef={wsRef}
-                      wsConnectionVersion={wsConnectionVersion}
-                      mode={mode}
-                      tool={tool}
-                      session={tabSession}
-                      isVisible={isActive && tabVisible}
-                      projectSwitchKey={projectSwitchKey}
-                      onSessionUpdate={handleSessionUpdate}
-                      onUnreadChange={onUnreadChange}
-                      onUpdateSessionConfig={updateSessionAssistantConfig}
-                      containerName={containerName}
-                      project={project}
-                      containerRepos={containerRepos}
-                      onProjectUpdated={onProjectUpdated}
-                      initialMessage={pendingInitialMessages[tabId]}
-                      directMainMessage={pendingDirectMainMessages[tabId]}
-                      onInitialMessageHandled={handleInitialMessageHandled}
-                      onDirectMainMessageHandled={handleDirectMainMessageHandled}
-                      isSelected={activeSessionId === tabId}
-                      onChangedFilesChange={handleChangedFilesChange}
-                      mainSession={mainSession}
-                      onOpenMain={openMainThread}
-                      onCloseSession={() => closeTab(tabId)}
-                      onMainThreadSend={handleGlobalSend}
-                      mainThreadSessionBubbles={mainThreadSessionBubbles}
-                    />
-                  )}
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    {tabSession?.pending ? (
+                      <div className="flex-1 min-h-0 flex items-center justify-center text-surface-500 text-sm gap-2">
+                        <Loader size={16} className="animate-spin" />
+                        Creating session...
+                      </div>
+                    ) : (
+                      <ChatSessionContent
+                        projectId={projectId}
+                        sessionId={tabId}
+                        wsRef={wsRef}
+                        wsConnectionVersion={wsConnectionVersion}
+                        mode={mode}
+                        tool={tool}
+                        session={tabSession}
+                        isVisible={isActive && tabVisible}
+                        projectSwitchKey={projectSwitchKey}
+                        onSessionUpdate={handleSessionUpdate}
+                        onUnreadChange={onUnreadChange}
+                        onUpdateSessionConfig={updateSessionAssistantConfig}
+                        containerName={containerName}
+                        project={project}
+                        containerRepos={containerRepos}
+                        onProjectUpdated={onProjectUpdated}
+                        initialMessage={pendingInitialMessages[tabId]}
+                        directMainMessage={pendingDirectMainMessages[tabId]}
+                        onInitialMessageHandled={handleInitialMessageHandled}
+                        onDirectMainMessageHandled={handleDirectMainMessageHandled}
+                        isSelected={activeSessionId === tabId}
+                        onChangedFilesChange={handleChangedFilesChange}
+                        mainSession={mainSession}
+                        onOpenMain={openMainThread}
+                        onCloseSession={() => closeTab(tabId)}
+                        onMainThreadSend={handleGlobalSend}
+                        mainThreadSessionBubbles={mainThreadSessionBubbles}
+                        anchorScrollSignal={isMainTab ? mainThreadAnchorScrollSignal : ''}
+                        contracted={mainThreadPaneCollapsed}
+                      />
+                    )}
+                  </div>
                 </div>
               );
             })}

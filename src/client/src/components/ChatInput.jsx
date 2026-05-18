@@ -98,6 +98,7 @@ export default function ChatInput({
   isVisible = true,
   selectedRolePromptIds = [],
   onSelectedRolePromptIdsChange,
+  hideRolePrompts = false,
   placeholderOverride = null,
   sendLabel = null,
   sendVariant = null,
@@ -349,7 +350,7 @@ export default function ChatInput({
               <Upload size={16} />
             </button>
 
-            {channel !== 'shell' && (
+            {channel !== 'shell' && !hideRolePrompts && (
               <div className="ml-1 flex max-w-full flex-wrap items-center gap-1 border-l border-surface-700/50 pl-2">
                 {ROLE_PROMPTS.map(role => {
                   const active = activeRolePromptIds.includes(role.id);
