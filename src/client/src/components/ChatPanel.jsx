@@ -257,7 +257,7 @@ function SessionBubble({
   const timestamp = formatSessionTimestamp(session?.createdAt || session?.updatedAt);
   const name = session?.name || 'Chat';
   const starterText = getSessionStarterText(session);
-  const showSubject = name && name !== starterText;
+  const showStarterPreview = starterText && name !== starterText;
 
   const handleOpen = () => {
     if (!editing) onOpen?.(session);
@@ -288,9 +288,9 @@ function SessionBubble({
         </div>
         <div className="min-w-0 flex-1">
           <div className="mb-0.5 flex min-w-0 items-center gap-2">
-            <span className="text-xs font-semibold text-surface-100">You</span>
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-surface-100" title={name}>{name}</span>
             <span className="flex-shrink-0 text-[10px] tabular-nums text-surface-500">{timestamp}</span>
-            <span className={`ml-auto inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${status.text}`} title={status.label}>
+            <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] ${status.text}`} title={status.label}>
               <span className={`h-1.5 w-1.5 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
               {status.label}
             </span>
@@ -311,12 +311,9 @@ function SessionBubble({
               className="w-full rounded border border-surface-600 bg-surface-900 px-2 py-1 text-xs text-surface-100 outline-none focus:border-primary-500"
               placeholder="Session name..."
             />
-          ) : (
-            <div className={`break-words text-sm leading-5 text-surface-100 ${compactPreview ? 'line-clamp-2' : ''}`} title={starterText}>{starterText}</div>
-          )}
-          {showSubject && !editing && (
-            <div className="mt-1 truncate text-[11px] text-surface-500" title={name}>{name}</div>
-          )}
+          ) : showStarterPreview ? (
+            <div className={`mt-1 break-words text-xs leading-5 text-surface-400 ${compactPreview ? 'line-clamp-2' : ''}`} title={starterText}>{starterText}</div>
+          ) : null}
           {session?.matchSnippet && session?.matchType === 'content' && (
             <div className="mt-1 truncate text-[11px] text-surface-500">{session.matchSnippet}</div>
           )}
