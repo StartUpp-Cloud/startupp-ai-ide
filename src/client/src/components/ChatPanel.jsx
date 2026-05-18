@@ -2655,7 +2655,7 @@ function ChatSessionContent({
         />
       )}
 
-      {!contracted && (
+      <div className={contracted ? 'hidden' : ''}>
         <ChatInput
           mode={sessionMode}
           channel={renderedChatChannel}
@@ -2665,7 +2665,7 @@ function ChatSessionContent({
             : handleSend}
           onSearch={handleSearch}
           busy={agentBusy}
-          isVisible={isVisible}
+          isVisible={isVisible && !contracted}
           focusSignal={focusInputSignal}
           selectedRolePromptIds={selectedRolePromptIds}
           onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
@@ -2683,7 +2683,7 @@ function ChatSessionContent({
             ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', directMain: true })
             : null}
         />
-      )}
+      </div>
         </>
       )}
     </div>
