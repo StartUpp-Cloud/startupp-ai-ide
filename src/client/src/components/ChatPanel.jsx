@@ -275,7 +275,7 @@ function SessionBubble({
           handleOpen();
         }
       }}
-      className={`group max-w-full cursor-pointer rounded-2xl border px-3 py-2 text-left shadow-sm transition-all duration-500 ${
+      className={`group max-w-full cursor-pointer rounded-2xl border px-3 text-left shadow-sm transition-all duration-500 ${collapsed ? 'py-1.5' : 'py-2'} ${
         active
           ? 'border-primary-500/45 bg-primary-500/10 ring-1 ring-primary-500/20'
           : session?.pinned
@@ -309,13 +309,13 @@ function SessionBubble({
             />
           ) : (
             <div
-              className={`mt-1 h-10 overflow-hidden break-words transition-colors duration-500 ${
-                collapsed ? 'text-[11px] leading-4 text-surface-500' : 'text-xs leading-5 text-surface-400'
+              className={`mt-1 overflow-hidden break-words transition-all duration-500 ${
+                collapsed ? 'h-6 text-[10px] leading-3 text-surface-500' : 'h-10 text-xs leading-5 text-surface-400'
               }`}
               title={starterText}
             >
               {showStarterPreview ? (
-                <div className={collapsed ? 'line-clamp-1' : (compactPreview ? 'line-clamp-2' : '')}>{starterText}</div>
+                <div className={collapsed || compactPreview ? 'line-clamp-2' : ''}>{starterText}</div>
               ) : (
                 <span className="text-surface-700">&nbsp;</span>
               )}
@@ -327,7 +327,7 @@ function SessionBubble({
         </div>
       </div>
 
-      <div className="mt-2 flex min-w-0 items-center gap-2 pl-9 text-[10px] text-surface-500">
+      <div className={`${collapsed ? 'mt-1' : 'mt-2'} flex min-w-0 items-center gap-2 pl-9 text-[10px] text-surface-500 transition-all duration-500`}>
         <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 ${collapsed ? 'text-[8px]' : 'text-[9px]'} ${status.text}`} title={status.label}>
           <span className={`h-1.5 w-1.5 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
           {status.label}
@@ -631,7 +631,7 @@ function MainThreadSessionBubbles({
         <button
           type="button"
           onClick={onLoadArchived}
-          className={`mt-2 rounded-lg border border-surface-800 px-3 py-1.5 text-[10px] text-surface-500 transition-all duration-500 hover:border-surface-700 hover:bg-surface-900 hover:text-surface-300 ${collapsed ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
+          className="mt-2 rounded-lg border border-surface-800 px-3 py-1.5 text-[10px] text-surface-500 transition-all duration-500 hover:border-surface-700 hover:bg-surface-900 hover:text-surface-300"
         >
           Load older sessions
         </button>
@@ -2459,6 +2459,7 @@ function ChatSessionContent({
   const displayMessages = searchResults || filteredMessages;
   const showMainThreadSessionBubbles = session?.isMainThread && !searchResults && mainThreadSessionBubbles;
   const renderedChatChannel = contracted ? 'assistant' : chatChannel;
+  const showOnlySessions = contracted && session?.isMainThread;
 
   return (
     <div
@@ -2525,7 +2526,7 @@ function ChatSessionContent({
 
       {/* Messages */}
       <div ref={scrollContainerRef} onScroll={handleScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }} className="px-1 py-4">
-        {!searchResults && displayMessages.length > 0 && (hasMoreHistory || historyLoadingOlder) && (
+        {!showOnlySessions && !searchResults && displayMessages.length > 0 && (hasMoreHistory || historyLoadingOlder) && (
           <div className="mb-3 flex justify-center px-3">
             <button
               type="button"
@@ -2539,7 +2540,7 @@ function ChatSessionContent({
           </div>
         )}
 
-        {loading ? (
+        {showOnlySessions ? null : loading ? (
           <div className="flex items-center justify-center h-full">
             <Loader size={22} className="animate-spin text-surface-600" />
           </div>
@@ -2564,7 +2565,7 @@ function ChatSessionContent({
 
         {showMainThreadSessionBubbles}
 
-        {progressTranscriptEntries.length > 0 && (
+        {!showOnlySessions && progressTranscriptEntries.length > 0 && (
           <ProgressTranscriptBubble
             entries={progressTranscriptEntries}
             changedFiles={liveChangedFiles}
@@ -2574,7 +2575,7 @@ function ChatSessionContent({
           />
         )}
 
-        {recoveryStatus.active && (
+        {!showOnlySessions && recoveryStatus.active && (
           <div className={`mx-4 mb-2 px-4 py-2 border rounded-lg flex items-center gap-2 text-sm ${
             recoveryStatus.stalled
               ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
@@ -2602,7 +2603,7 @@ function ChatSessionContent({
           </div>
         )}
 
-        {streamingMessage && (
+        {!showOnlySessions && streamingMessage && (
           <ChatMessage
             key={streamingMessage.id}
             message={streamingMessage}
@@ -2613,7 +2614,7 @@ function ChatSessionContent({
           />
         )}
 
-        {(agentBusy || recoveryStatus.active || (streamingMessage && !streamingMessage.shell)) && (
+        {!showOnlySessions && (agentBusy || recoveryStatus.active || (streamingMessage && !streamingMessage.shell)) && (
           progressTranscriptEntries.length === 0 && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
         )}
 
@@ -2621,7 +2622,7 @@ function ChatSessionContent({
       </div>
 
       {/* Jump to top / bottom floating buttons */}
-      <div className="relative">
+      {!contracted && <div className="relative">
         {showJumpTop && (
           <button
             onClick={scrollToTop}
@@ -2640,7 +2641,7 @@ function ChatSessionContent({
             <ChevronDown size={14} />
           </button>
         )}
-      </div>
+      </div>}
 
       {isVisible && containerName && !contracted && (
         <BranchBar
@@ -2653,32 +2654,34 @@ function ChatSessionContent({
         />
       )}
 
-      <ChatInput
-        mode={sessionMode}
-        channel={renderedChatChannel}
-        projectId={projectId}
-        onSend={session?.isMainThread && renderedChatChannel === 'assistant'
-          ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', startSession: true })
-          : handleSend}
-        onSearch={handleSearch}
-        busy={agentBusy}
-        isVisible={isVisible}
-        selectedRolePromptIds={selectedRolePromptIds}
-        onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
-        hideRolePrompts={contracted}
-        placeholderOverride={session?.isMainThread && renderedChatChannel === 'assistant'
-          ? 'Write in Main, then choose where to send... (Ctrl+Enter starts a new session)'
-          : null}
-        sendLabel={session?.isMainThread && renderedChatChannel === 'assistant' ? 'Send as new session' : null}
-        sendVariant={session?.isMainThread && renderedChatChannel === 'assistant' ? 'green' : null}
-        sendIconOnly={session?.isMainThread && renderedChatChannel === 'assistant'}
-        secondarySendLabel={session?.isMainThread && renderedChatChannel === 'assistant' ? 'Ask in main thread' : null}
-        secondarySendVariant="primary"
-        secondarySendIconOnly={session?.isMainThread && renderedChatChannel === 'assistant'}
-        onSecondarySend={session?.isMainThread && renderedChatChannel === 'assistant'
-          ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', directMain: true })
-          : null}
-      />
+      {!contracted && (
+        <ChatInput
+          mode={sessionMode}
+          channel={renderedChatChannel}
+          projectId={projectId}
+          onSend={session?.isMainThread && renderedChatChannel === 'assistant'
+            ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', startSession: true })
+            : handleSend}
+          onSearch={handleSearch}
+          busy={agentBusy}
+          isVisible={isVisible}
+          selectedRolePromptIds={selectedRolePromptIds}
+          onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
+          hideRolePrompts={contracted}
+          placeholderOverride={session?.isMainThread && renderedChatChannel === 'assistant'
+            ? 'Write in Main, then choose where to send... (Ctrl+Enter starts a new session)'
+            : null}
+          sendLabel={session?.isMainThread && renderedChatChannel === 'assistant' ? 'Send as new session' : null}
+          sendVariant={session?.isMainThread && renderedChatChannel === 'assistant' ? 'green' : null}
+          sendIconOnly={session?.isMainThread && renderedChatChannel === 'assistant'}
+          secondarySendLabel={session?.isMainThread && renderedChatChannel === 'assistant' ? 'Ask in main thread' : null}
+          secondarySendVariant="primary"
+          secondarySendIconOnly={session?.isMainThread && renderedChatChannel === 'assistant'}
+          onSecondarySend={session?.isMainThread && renderedChatChannel === 'assistant'
+            ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', directMain: true })
+            : null}
+        />
+      )}
         </>
       )}
     </div>
@@ -3403,9 +3406,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     ? `${activeChildSessionId}:${mainThreadPaneExpanded ? 'expanded' : 'collapsed'}`
     : '';
   const splitGridClass = activeChildSessionId
-    ? mainThreadPaneExpanded
-      ? 'md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] md:gap-2 md:p-2 md:transition-all md:duration-500 md:ease-out'
-      : 'md:grid-cols-[minmax(12rem,18rem)_minmax(0,1fr)] md:gap-2 md:p-2 md:transition-all md:duration-500 md:ease-out'
+    ? 'md:grid-cols-[minmax(12rem,18rem)_minmax(0,1fr)] md:gap-2 md:p-2'
     : '';
 
   const handleSessionBubbleOpen = useCallback((session) => {
@@ -3757,7 +3758,9 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                     ? 'flex'
                     : 'hidden';
                 const paneFrameClass = activeChildSessionId
-                  ? `md:rounded-2xl md:border md:shadow-[0_14px_40px_rgba(0,0,0,0.22)] md:transition-colors md:duration-500 ${mainThreadPaneCollapsed ? 'md:border-primary-500/20' : 'md:border-surface-800'}`
+                  ? isMainTab
+                    ? `md:justify-self-start md:rounded-2xl md:border md:shadow-[0_14px_40px_rgba(0,0,0,0.22)] md:transition-all md:duration-500 ${mainThreadPaneCollapsed ? 'md:w-full md:border-primary-500/20' : 'md:z-30 md:w-[min(56rem,calc(100vw-2rem))] md:border-primary-500/35 md:shadow-[0_20px_70px_rgba(0,0,0,0.45)]'}`
+                    : 'md:rounded-2xl md:border md:border-surface-800 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)]'
                   : '';
 
               return (
