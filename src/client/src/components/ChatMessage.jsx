@@ -301,8 +301,8 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   };
 
   return (
-    <div className={`flex ${style.align} mb-3 px-3`}>
-      <div className={`max-w-[85%] rounded-lg border px-3 py-2 ${style.bubble} ${threadKind === 'main' ? 'shadow-[0_0_0_1px_rgba(14,165,233,0.08)]' : ''}`}>
+    <div className={`flex ${style.align} mb-3 w-full min-w-0 px-3`}>
+      <div className={`min-w-0 max-w-[85%] rounded-lg border px-3 py-2 ${style.bubble} ${threadKind === 'main' ? 'shadow-[0_0_0_1px_rgba(14,165,233,0.08)]' : ''}`}>
         {/* Header */}
         <div className="flex items-center gap-2 mb-1.5 text-[11px] text-surface-500">
           <Icon size={12} />

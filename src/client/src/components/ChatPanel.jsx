@@ -1077,7 +1077,7 @@ function ChildThreadHeader({ project, session, mainSession, onOpenMain, onCloseS
   );
 }
 
-function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange, project, onOpenProjectContext }) {
+function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange, project, onOpenProjectContext, mobileLayout = false }) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
   const rawEffort = session?.effort || '';
@@ -1176,10 +1176,13 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   const modelOptions = dedupeModelOptions(rawModelOptions);
   const selectedModel = modelOptions.some(o => o.value === rawModel) ? rawModel : '';
   const effortOptions = toolEfforts;
+  const channelTabsClass = mobileLayout ? 'w-full' : 'w-full sm:w-auto';
+  const assistantSelectClass = mobileLayout ? 'max-w-[140px]' : 'max-w-[140px] sm:max-w-none';
+  const modelSelectClass = mobileLayout ? 'max-w-[150px]' : 'max-w-[150px] sm:max-w-[220px]';
 
   return (
-    <div className="flex flex-wrap items-center gap-2 px-2 py-2 border-b border-surface-700/40 bg-surface-850/40 sm:px-3">
-      <div className="flex w-full items-center gap-1 overflow-x-auto rounded-md border border-surface-700 bg-surface-900/60 p-0.5 sm:w-auto">
+    <div className={`flex flex-wrap items-center gap-2 px-2 py-2 border-b border-surface-700/40 bg-surface-850/40 ${mobileLayout ? '' : 'sm:px-3'}`}>
+      <div className={`flex ${channelTabsClass} items-center gap-1 overflow-x-auto rounded-md border border-surface-700 bg-surface-900/60 p-0.5`}>
         <button
           onClick={() => onChannelChange?.('assistant')}
           className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
@@ -1242,7 +1245,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
           value={effectiveTool}
           disabled={disabled}
           onChange={(e) => onUpdate({ tool: e.target.value, model: '', effort: '' })}
-          className="max-w-[140px] bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50 sm:max-w-none"
+          className={`${assistantSelectClass} bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50`}
         >
           {CLI_TOOLS.map((toolOption) => (
             <option key={toolOption.id} value={toolOption.id}>
@@ -1259,7 +1262,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
             value={selectedModel}
             disabled={disabled}
             onChange={(e) => onUpdate({ model: e.target.value })}
-            className="max-w-[150px] bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50 sm:max-w-[220px]"
+            className={`${modelSelectClass} bg-surface-800 border border-surface-700 rounded px-2 py-1 text-[11px] text-surface-200 outline-none focus:border-primary-500/50 disabled:opacity-50`}
           >
             {modelOptions.map((option, idx) => (
               <option
@@ -1295,7 +1298,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
         </>
       )}
 
-      <div className="hidden min-w-0 text-[10px] text-surface-500 truncate sm:ml-auto sm:block">
+      <div className={`${mobileLayout ? 'hidden' : 'hidden sm:block sm:ml-auto'} min-w-0 text-[10px] text-surface-500 truncate`}>
         {channel === 'salesforce'
           ? 'Salesforce workbench: schema, SOQL, flows, debug, REST, data'
           : channel === 'shell'
@@ -1343,6 +1346,7 @@ function ChatSessionContent({
   anchorScrollSignal,
   focusInputSignal = 0,
   contracted = false,
+  mobileLayout = false,
 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -2506,6 +2510,7 @@ function ChatSessionContent({
           onChannelChange={setChatChannel}
           project={project}
           onOpenProjectContext={session?.isMainThread ? () => setShowProjectContext(true) : null}
+          mobileLayout={mobileLayout}
         />
       )}
 
@@ -2694,7 +2699,7 @@ function ChatSessionContent({
  * Main ChatPanel - manages sessions/tabs and renders all open sessions.
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
-export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], onProjectUpdated, onSelectedSessionFilesChange }) {
+export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], mobileLayout = false, onProjectUpdated, onSelectedSessionFilesChange }) {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -3409,7 +3414,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const mainThreadAnchorScrollSignal = activeChildSessionId
     ? `${activeChildSessionId}:${mainThreadPaneExpanded ? 'expanded' : 'collapsed'}`
     : '';
-  const splitGridClass = activeChildSessionId
+  const splitGridClass = activeChildSessionId && !mobileLayout
     ? 'md:grid-cols-[minmax(10.75rem,16.75rem)_minmax(0,1fr)] md:gap-2 md:p-2'
     : '';
 
@@ -3750,7 +3755,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
           Loading main thread...
         </div>
       ) : (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+          <div className={`flex min-h-0 flex-1 flex-col overflow-hidden ${mobileLayout ? '' : 'md:flex-row'}`}>
             <div
               className={`grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden ${splitGridClass}`}
             >
@@ -3762,11 +3767,11 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                 const mainThreadRailActive = isMainTab && activeChildSessionId;
                 const mainThreadPaneCollapsed = mainThreadRailActive && !mainThreadPaneExpanded;
                 const visibilityClass = isMainTab
-                  ? (activeChildSessionId ? 'hidden md:flex' : 'flex')
+                  ? (activeChildSessionId ? (mobileLayout ? 'hidden' : 'hidden md:flex') : 'flex')
                   : isActiveChildTab
                     ? 'flex'
                     : 'hidden';
-                const paneFrameClass = activeChildSessionId
+                const paneFrameClass = activeChildSessionId && !mobileLayout
                   ? isMainTab
                     ? `md:justify-self-start md:rounded-2xl md:border md:border-surface-700/55 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)] md:transition-all md:duration-500 ${mainThreadPaneCollapsed ? 'md:w-full' : 'md:z-30 md:w-[min(56rem,calc(100vw-2rem))] md:shadow-[0_20px_70px_rgba(0,0,0,0.45)]'}`
                     : 'md:rounded-2xl md:border md:border-surface-800 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)]'
@@ -3828,6 +3833,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                         anchorScrollSignal={isMainTab ? mainThreadAnchorScrollSignal : ''}
                         focusInputSignal={isActiveChildTab ? sessionInputFocusSignal : 0}
                         contracted={mainThreadPaneCollapsed}
+                        mobileLayout={mobileLayout}
                       />
                     )}
                   </div>

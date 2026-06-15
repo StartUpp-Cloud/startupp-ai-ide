@@ -28,6 +28,7 @@ const STORAGE_KEYS = {
   LEFT_PANEL_WIDTH: 'ide-left-panel-width',
   RIGHT_PANEL_WIDTH: 'ide-right-panel-width',
   LEFT_PANEL_COLLAPSED: 'ide-left-collapsed',
+  FORCE_MOBILE_LAYOUT: 'ide-force-mobile-layout',
 };
 
 function useIsMobileLayout() {
@@ -147,7 +148,11 @@ function WorkspaceProjectsList({ repos, currentBranch, onSelectRepo, onRepoActio
 
 export default function IDE() {
   const { projects, getProject, getGlobalRules, notify } = useProjects();
-  const isMobileLayout = useIsMobileLayout();
+  const viewportIsMobile = useIsMobileLayout();
+  const [forceMobileLayout, setForceMobileLayout] = useState(() => {
+    return localStorage.getItem(STORAGE_KEYS.FORCE_MOBILE_LAYOUT) === 'true';
+  });
+  const isMobileLayout = viewportIsMobile || forceMobileLayout;
   // Layout state (with persistence)
   const [leftPanelWidth, setLeftPanelWidth] = useState(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.LEFT_PANEL_WIDTH);
@@ -257,6 +262,10 @@ export default function IDE() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.LEFT_PANEL_COLLAPSED, leftPanelCollapsed.toString());
   }, [leftPanelCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.FORCE_MOBILE_LAYOUT, forceMobileLayout.toString());
+  }, [forceMobileLayout]);
 
   useEffect(() => {
     localStorage.setItem('agent-mode', agentMode);
@@ -590,7 +599,7 @@ export default function IDE() {
 
   return (
     <div
-      className="fixed inset-0 bg-surface-900"
+      className="fixed inset-0 overflow-hidden bg-surface-900"
       style={{
         display: 'grid',
         gridTemplateRows: 'auto 1fr',
@@ -608,6 +617,8 @@ export default function IDE() {
         onModeChange={setAgentMode}
         selectedTool={selectedTool}
         onToolChange={setSelectedTool}
+        forceMobileLayout={forceMobileLayout}
+        onForceMobileLayoutChange={setForceMobileLayout}
         onProjectUpdated={(project) => setSelectedProject(project)}
         projects={projects}
         notificationSlot={
@@ -714,6 +725,7 @@ export default function IDE() {
                     onProjectRead={handleProjectRead}
                     project={chatProject}
                     containerRepos={chatContainerRepos}
+                    mobileLayout={isMobileLayout}
                     onProjectUpdated={(project) => setSelectedProject(project)}
                     onSelectedSessionFilesChange={(sessionId, files) => {
                       if (projectId === selectedProjectId) setSelectedSessionFiles(sessionId ? (files || []) : []);
