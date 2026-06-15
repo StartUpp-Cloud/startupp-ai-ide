@@ -32,6 +32,18 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  resolveSessionAssistantSettings({ tool: 'codex', model: 'gpt-5.4', effort: 'xhigh' }),
+  { tool: 'codex', model: 'gpt-5.4', effort: 'xhigh' },
+  'Codex should keep compatible model IDs and effort',
+);
+
+assert.deepEqual(
+  resolveSessionAssistantSettings({ tool: 'codex', model: 'gpt-5.4', effort: 'max' }),
+  { tool: 'codex', model: 'gpt-5.4', effort: null },
+  'Codex should reject unsupported effort values',
+);
+
+assert.deepEqual(
   resolveSessionAssistantSettings({ tool: 'claude', model: 'gpt-5.5-pro' }),
   { tool: 'claude', model: null, effort: null },
   'Claude should reject stale Codex/OpenAI model IDs',

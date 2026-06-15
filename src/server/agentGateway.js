@@ -2118,6 +2118,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       parts.push('IMPORTANT: Read CLAUDE.md (if present) and always follow all project conventions and rules established there.');
     } else if (tool === 'codex') {
       parts.push('IMPORTANT: Follow all project conventions and rules. Read any CLAUDE.md, AGENTS.md, or .codex/ rules files if present.');
+      parts.push('\nCODEX EXECUTION STANDARD: Use your highest practical reasoning depth and spend the time needed to solve the request correctly. Before changing behavior, inspect the relevant code paths and existing tests. Prefer a complete first pass over a fast shallow response. Iterate until the implementation is coherent with local patterns, edge cases are considered, and the result has been verified. Run the most relevant validation commands available for the changed surface; if a validation cannot be run, state exactly why. Do not stop after only describing changes when code or verification is needed.');
     }
 
     // Mode instruction — skip for Aider: it edits files directly and doesn't follow
@@ -2129,6 +2130,9 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
         parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
       } else {
         parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done\n- Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.\n- IMPORTANT: Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops). Complete your task with the information available in a single pass and report results immediately.');
+        if (tool === 'codex') {
+          parts.push('\nCODEX QUALITY LOOP: For codebase tasks, explicitly do the full loop inside the Codex run: investigate, plan briefly, implement, inspect the diff, run targeted tests or validation, fix any failures, and only then summarize. Keep working through reasonable follow-up fixes instead of returning a minimal partial answer. Prioritize reliability, maintainability, guardrails, and preserving existing behavior.');
+        }
       }
     }
 
@@ -2176,6 +2180,11 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     }
 
     return args;
+  }
+
+  _buildCodexQualityArgs(assistantSettings = {}) {
+    const effort = assistantSettings?.effort || 'xhigh';
+    return ` -c reasoning_effort=${this._quoteCliArg(effort)} -c model_verbosity=medium`;
   }
 
   _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}, distilledContext = null, salesforceContext = '') {
@@ -2290,15 +2299,12 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
         return cmd;
       }
       case 'codex': {
+        const codexArgs = `${this._buildCodexQualityArgs(assistantSettings)}${this._buildToolOptionArgs(tool, assistantSettings)}`;
         if (cliState?.cliSessionId) {
           // Resume an existing session with a follow-up prompt
-          let cmd = `codex exec resume '${cliState.cliSessionId}' --json --dangerously-bypass-approvals-and-sandbox ${promptArg}`;
-          cmd += this._buildToolOptionArgs(tool, assistantSettings);
-          return cmd;
+          return `codex exec resume --json --dangerously-bypass-approvals-and-sandbox${codexArgs} '${cliState.cliSessionId}' ${promptArg}`;
         }
-        let cmd = `codex exec --json --dangerously-bypass-approvals-and-sandbox ${promptArg}`;
-        cmd += this._buildToolOptionArgs(tool, assistantSettings);
-        return cmd;
+        return `codex exec --json --dangerously-bypass-approvals-and-sandbox${codexArgs} ${promptArg}`;
       }
       case 'ollama': {
         // ollama run <model> in non-interactive mode — exits after one response.
@@ -2893,6 +2899,81 @@ NEEDS_USER`,
    * Parse stream-json events from Claude to extract meaningful progress updates.
    * stream-json format: one JSON object per line with type field.
    */
+  _stringifyEventDetail(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value || '');
+    }
+  }
+
+  _extractPathFromText(value) {
+    const text = String(value || '');
+    return text.match(/[\"']?([^\s\"']+\.[A-Za-z0-9][A-Za-z0-9._-]*)[\"']?/)?.[1] || '';
+  }
+
+  _parseCodexProgressEvent(event) {
+    const type = String(event?.type || '').replace(/[.-]/g, '_').toLowerCase();
+    const item = event?.item || event?.payload?.item || event?.data?.item || event;
+    const itemType = String(item?.type || item?.kind || '').replace(/[.-]/g, '_').toLowerCase();
+    const name = String(
+      item?.name
+      || item?.tool
+      || item?.tool_name
+      || item?.toolName
+      || item?.function?.name
+      || item?.call?.name
+      || event?.name
+      || event?.tool
+      || ''
+    ).trim();
+    const detail = this._stringifyEventDetail(
+      item?.command
+      || item?.cmd
+      || item?.input
+      || item?.arguments
+      || item?.args
+      || item?.params
+      || item?.path
+      || item?.text
+      || event?.message
+      || ''
+    );
+    const lowerName = name.toLowerCase();
+    const lowerDetail = detail.toLowerCase();
+    const label = name || itemType || type;
+
+    if (type === 'turn_started') return 'Thinking...';
+    if (type === 'turn_completed') return 'Finalizing response...';
+
+    if (itemType === 'agent_message') return 'Writing response...';
+    if (itemType.includes('reasoning') || type.includes('reasoning')) return 'Reasoning through the task...';
+
+    if (itemType.includes('tool') || itemType.includes('command') || name) {
+      if (lowerName.includes('exec') || lowerName.includes('bash') || lowerName.includes('shell') || itemType.includes('command')) {
+        const command = detail || name;
+        return command ? 'Running: `' + command.slice(0, 100) + '`' : 'Running shell command...';
+      }
+      if (lowerName.includes('apply_patch') || lowerName.includes('edit') || lowerName.includes('write') || lowerDetail.includes('apply_patch')) {
+        const path = this._extractPathFromText(detail);
+        return path ? 'Editing: `' + path + '`' : 'Editing project files...';
+      }
+      if (lowerName.includes('read') || lowerName.includes('open') || lowerName.includes('view') || lowerName.includes('cat')) {
+        const path = this._extractPathFromText(detail);
+        return path ? 'Reading: `' + path + '`' : 'Reading project files...';
+      }
+      if (lowerName.includes('search') || lowerName.includes('find') || lowerName.includes('grep') || lowerName === 'rg') {
+        return detail ? 'Searching: ' + detail.slice(0, 100) : 'Searching the codebase...';
+      }
+      if (label) return detail ? 'Using ' + label + ': ' + detail.slice(0, 80) : 'Using ' + label + '...';
+    }
+
+    if (type === 'item_started') return 'Working...';
+    if (type === 'item_completed') return itemType ? 'Completed ' + itemType.replace(/_/g, ' ') + '...' : 'Completed a step...';
+    return null;
+  }
   _parseStreamEvent(chunk) {
     const lines = chunk.split('\n');
     for (const line of lines) {
@@ -2952,14 +3033,8 @@ NEEDS_USER`,
         }
 
         // Codex events
-        if (event.type === 'item.completed' && event.item) {
-          if (event.item.type === 'agent_message') return `Writing response...`;
-          if (event.item.type === 'tool_call') {
-            const name = event.item.name || event.item.tool || '';
-            return `Running: \`${name}\``;
-          }
-        }
-        if (event.type === 'turn.started') return `Thinking...`;
+        const codexProgress = this._parseCodexProgressEvent(event);
+        if (codexProgress) return codexProgress;
 
       } catch {}
     }

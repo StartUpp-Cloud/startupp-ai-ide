@@ -176,6 +176,13 @@ const EFFORT_OPTIONS = {
     { value: 'high', label: 'high' },
     { value: 'xhigh', label: 'xhigh' },
   ],
+  codex: [
+    { value: '', label: 'Default effort (xhigh)' },
+    { value: 'low', label: 'low' },
+    { value: 'medium', label: 'medium' },
+    { value: 'high', label: 'high' },
+    { value: 'xhigh', label: 'xhigh' },
+  ],
 };
 
 export function getToolConfig(tool) {

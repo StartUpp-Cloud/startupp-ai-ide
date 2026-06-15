@@ -537,6 +537,76 @@ class JobManager extends EventEmitter {
     }
   }
 
+  _stringifyEventDetail(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value || '');
+    }
+  }
+
+  _extractPathFromText(value) {
+    const text = String(value || '');
+    return text.match(/[\"']?([^\s\"']+\.[A-Za-z0-9][A-Za-z0-9._-]*)[\"']?/)?.[1] || '';
+  }
+
+  _parseCodexProgressEvent(event) {
+    const type = String(event?.type || '').replace(/[.-]/g, '_').toLowerCase();
+    const item = event?.item || event?.payload?.item || event?.data?.item || event;
+    const itemType = String(item?.type || item?.kind || '').replace(/[.-]/g, '_').toLowerCase();
+    const name = String(
+      item?.name
+      || item?.tool
+      || item?.tool_name
+      || item?.toolName
+      || item?.function?.name
+      || item?.call?.name
+      || event?.name
+      || event?.tool
+      || ''
+    ).trim();
+    const detail = this._stringifyEventDetail(
+      item?.command
+      || item?.cmd
+      || item?.input
+      || item?.arguments
+      || item?.args
+      || item?.params
+      || item?.path
+      || item?.text
+      || event?.message
+      || ''
+    );
+    const lowerName = name.toLowerCase();
+    const lowerDetail = detail.toLowerCase();
+    const label = name || itemType || type;
+
+    if (type === 'turn_started') return { status: 'thinking', detail: null };
+    if (type === 'turn_completed') return { status: 'done', detail: null };
+    if (itemType === 'agent_message') return { status: 'responding', detail: null };
+    if (itemType.includes('reasoning') || type.includes('reasoning')) return { status: 'thinking', detail: detail.slice(0, 100) || null };
+
+    if (itemType.includes('tool') || itemType.includes('command') || name) {
+      if (lowerName.includes('exec') || lowerName.includes('bash') || lowerName.includes('shell') || itemType.includes('command')) {
+        return { status: 'running', detail: (detail || name).slice(0, 100) };
+      }
+      if (lowerName.includes('apply_patch') || lowerName.includes('edit') || lowerName.includes('write') || lowerDetail.includes('apply_patch')) {
+        return { status: 'writing', detail: this._extractPathFromText(detail) || detail.slice(0, 80) || null };
+      }
+      if (lowerName.includes('read') || lowerName.includes('open') || lowerName.includes('view') || lowerName.includes('cat')) {
+        return { status: 'reading', detail: this._extractPathFromText(detail) || detail.slice(0, 80) || null };
+      }
+      if (lowerName.includes('search') || lowerName.includes('find') || lowerName.includes('grep') || lowerName === 'rg') {
+        return { status: 'searching', detail: detail.slice(0, 80) || null };
+      }
+      return { status: 'working', detail: label + (detail ? ': ' + detail.slice(0, 60) : '') };
+    }
+
+    if (type === 'item_started') return { status: 'working', detail: itemType || null };
+    return null;
+  }
   /**
    * Parse stream-json events from output chunk
    */
@@ -586,6 +656,12 @@ class JobManager extends EventEmitter {
 
         if (event.type === 'content_block_delta' || event.type === 'content') {
           update = { status: 'responding', detail: null };
+        }
+
+        const codexUpdate = this._parseCodexProgressEvent(event);
+        if (codexUpdate) {
+          update = codexUpdate;
+          if (job.progress) job.progress.eventCount++;
         }
 
       } catch {}
