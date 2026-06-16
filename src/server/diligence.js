@@ -30,8 +30,10 @@ const DEFAULT_DILIGENCE_SETTINGS = {
   enabled: true,
   // How many follow-up "you're not done yet" rounds we are willing to drive
   // before giving up and surfacing whatever we have. Keep small — each round is
-  // a full agent turn.
-  maxNudges: 2,
+  // a full agent turn, and over-nudging on subjective work makes the agent
+  // invent unrequested polish and churn the session. One verification pass is
+  // the sweet spot; raise only if you want more aggressive completion.
+  maxNudges: 1,
   // Nudge when new logic appears to have shipped without any validation run.
   requireVerification: true,
   // Verdict confidence at/above which we trust a "done" without re-checking.
@@ -118,13 +120,18 @@ export function buildOperatingContract({ tool, mode } = {}) {
 
 // ── Completion gate ─────────────────────────────────────────────────────────
 
-const VERDICT_SYSTEM_PROMPT = `You are a strict senior engineer acting as a COMPLETION GATE for an autonomous coding agent.
-Given the user's GOAL and the agent's TRANSCRIPT (its output for this turn), decide whether the work is GENUINELY complete AND verified.
+const VERDICT_SYSTEM_PROMPT = `You are a COMPLETION GATE for an autonomous coding agent. Your ONLY job is to catch cases where the agent stopped short of what the USER EXPLICITLY ASKED. You are NOT a code reviewer and you do NOT request improvements.
 
-Be skeptical. The agent is "done" ONLY if ALL of these hold:
-- The requested work is actually implemented in code — not merely described, planned, or promised.
-- The agent RAN verification (tests, build, typecheck, or an explicit run/e2e) and reported REAL results — not a bare claim of success.
-- There is nothing the agent said it would do but did not, and no obvious missing piece for the stated goal.
+Default to done=true. Only return done=false when there is a CONCRETE, OBJECTIVE gap in the EXACT thing the user asked for:
+- The user's explicit request is clearly not implemented in code (only described, planned, or promised), OR
+- The agent itself said it would do something this turn and visibly did not, OR
+- Code/logic was added but a verification the agent clearly should have run (tests/build/typecheck) was skipped or failed.
+
+Do NOT mark incomplete for any of these — they are NOT gaps:
+- Subjective polish, refactors, extra tests, renames, reordering, or "nice to have" improvements the user did not ask for. NEVER invent additional work.
+- Style/UI taste where the user's request was already addressed.
+- Wanting "more thorough" verification when a reasonable check already passed.
+When genuinely unsure, return done=true. It is far worse to send the agent off inventing unrequested work than to occasionally pass.
 
 Return ONLY valid JSON, no prose, with this exact shape:
 {
@@ -138,11 +145,11 @@ Return ONLY valid JSON, no prose, with this exact shape:
 }
 
 Rules:
-- If the agent only described changes with no evidence of running them: done=false, verification.ran=false.
-- If new logic/feature was added but no test or validation was run: done=false, and the nudge MUST require running (or writing then running) the relevant tests/build.
+- If the agent only DESCRIBED the requested change with no evidence it was actually made/run: done=false, verification.ran=false.
+- If NON-TRIVIAL new logic was added but a relevant validation (tests/build/typecheck) was clearly skipped: done=false, and the nudge must require running it. (Do NOT demand tests for trivial/UI/copy/styling changes — that is not a gap.)
 - If PROJECT RULES are provided and the agent deferred or skipped an action that a rule REQUIRES or grants STANDING APPROVAL for (e.g. a rule says "always deploy to dev-1" but the agent said deploy is an optional next step): done=false, and the nudge MUST instruct the agent to perform that action now per the rule.
 - "passed" is true/false/null (null when nothing was run).
-- Keep bullets concise. The nudge must be actionable and name the specific gap. Do not invent work the user did not ask for.`;
+- The nudge addresses ONLY the user's explicit request — never additional improvements, refactors, reordering, or extra tests the user did not ask for. Keep it concise and name the specific gap.`;
 
 function clamp01(n) {
   const x = Number(n);
@@ -155,13 +162,17 @@ function heuristicVerdict(transcript, settings) {
   const text = String(transcript || '');
   const ranVerification = /(\bPASS\b|\bFAIL\b|\d+\s+pass|passed|failing|\btsc\b|type-?check|build (succeeded|failed|complete)|vitest|jest|pytest|playwright|npm (run )?test|yarn test|pnpm test|coverage|✓|✔)/i.test(text);
   const hasReport = /##\s*Verification/i.test(text) || /##\s*Summary/i.test(text);
-  const looksIncomplete = /(TODO|not implemented|next step|i (will|'ll)|let me know if|placeholder|stub)/i.test(text);
+  // Strong signals only — the agent explicitly says it did NOT finish this turn.
+  // Weak phrases like "next step" appear in normal reports, so we don't use them.
+  const looksIncomplete = /(\bTODO\b|not (yet )?implemented|i'?ll (do|continue|finish) (this|that|it) (next|later)|left (this|that|it) (for|to) (you|later)|placeholder|\bstub\b)/i.test(text);
 
-  const done = hasReport && (!settings.requireVerification || ranVerification) && !looksIncomplete;
+  // Bias to done: only flag a CONCRETE objective gap, never subjective polish.
   const outstanding = [];
-  if (settings.requireVerification && !ranVerification) outstanding.push('No test/build/typecheck output is visible — verification was not actually run.');
-  if (!hasReport) outstanding.push('Missing the structured report (## Summary / ## Verification / ## Next).');
-  if (looksIncomplete) outstanding.push('The output reads as partial or describes work still to be done.');
+  if (looksIncomplete) outstanding.push('The agent indicated part of the requested work is not finished yet.');
+  if (looksIncomplete && settings.requireVerification && !ranVerification && !hasReport) {
+    outstanding.push('No verification (tests/build) output is visible.');
+  }
+  const done = outstanding.length === 0;
 
   return {
     done,

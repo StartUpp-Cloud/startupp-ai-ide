@@ -844,7 +844,7 @@ ${run.goal}`;
     return [
       '<ide_orchestrator_handoff version="1">',
       this._xmlBlock('control_loop_role', 'You are the coding agent being driven by an IDE control loop. Do the repository reasoning, edits, commands, tests, and final reporting. The IDE orchestrator tracks progress, formats responses, and decides whether another push is needed.'),
-      this._xmlBlock('session_continuity', 'Treat this as the same user conversation even if the CLI session is fresh. Use the context below to continue naturally. Do not tell the user that a new agent session started unless it is relevant to a blocker.'),
+      this._xmlBlock('session_continuity', 'Treat this as the same user conversation even if the CLI session is fresh — use the context below for continuity only. CRITICAL: the <assigned_task> below is the ONLY thing to work on right now. Earlier messages, previous tasks, and prior context are BACKGROUND, not instructions. Do NOT resume, repeat, re-polish, reorder, or extend earlier work unless <assigned_task> explicitly says so. If the assigned task is unrelated to what was discussed before, fully switch focus to it. Do not tell the user a new agent session started unless it is relevant to a blocker.'),
       this._xmlBlock('user_profile_and_preferences', profileContext),
       this._xmlBlock('response_guidance', this._responseGuidance(profile)),
       this._xmlBlock('recovered_previous_run_context', recoveredContinuation),
@@ -856,7 +856,7 @@ ${run.goal}`;
       this._xmlBlock('skill_context', this._buildSkillContextForTask(run, prompt) || '(none)'),
       this._xmlBlock('prior_completed_task_results', prior),
       this._xmlBlock('assigned_task', prompt),
-      this._xmlBlock('execution_contract', 'Complete the assigned task end-to-end. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. Do not wait for user input unless truly blocked. If you need user input, include the exact questions, options, and recommended safe default in your final answer. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
+      this._xmlBlock('execution_contract', 'Work ONLY on <assigned_task>; earlier conversation and previous tasks are background context, not new instructions — do not redo or extend them. Complete the assigned task end-to-end. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. Do not wait for user input unless truly blocked. If you need user input, include the exact questions, options, and recommended safe default in your final answer. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
       '</ide_orchestrator_handoff>',
     ].join('\n\n');
   }
