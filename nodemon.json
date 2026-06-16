@@ -1,0 +1,14 @@
+{
+  "comment": "Dev backend auto-reload. Restarting the API mid-run wipes the orchestrator's in-memory activeRuns, which makes live agent runs get reconciled as 'interrupted'. So watch ONLY backend source, ignore all runtime-written paths, and debounce so bursts of writes don't thrash-restart.",
+  "watch": ["src/server"],
+  "ext": "js,cjs,mjs,json",
+  "ignore": [
+    "data/",
+    "logs/",
+    "src/data/",
+    "src/server/tests/",
+    "**/*.test.js",
+    "**/*.log"
+  ],
+  "delay": "2500"
+}
