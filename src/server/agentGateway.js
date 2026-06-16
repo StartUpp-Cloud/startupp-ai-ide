@@ -1155,9 +1155,8 @@ RULES:
    * nudge back into the SAME CLI session (resume) so the agent finishes and
    * actually validates. Bounded by settings.maxNudges and ctx.aborted.
    *
-   * Skipped for orchestrated runs (the orchestrator drives its own
-   * liveness/retry loop and we must not fight it), plan modes, weak tools, or
-   * when disabled. Returns the (possibly extended) output plus the final verdict.
+   * Skipped for plan modes, weak tools, or when disabled. Returns the
+   * (possibly extended) output plus the final verdict.
    *
    * @returns {Promise<{ verdict: object|null, rounds: number, displayOutput: string, cleanOutput: string }>}
    */
@@ -1176,11 +1175,15 @@ RULES:
     let cleanOutput = result.cleanOutput || '';
     let verdict = null;
     let rounds = 0;
+    // Standing rules feed the gate so it can catch deferred rule-approved
+    // actions (e.g. "deploy is the next step if you want" when a rule says
+    // always deploy to dev-1) and nudge the agent to actually perform them.
+    const rules = this._getProjectRules(projectId);
 
     for (let i = 0; i < settings.maxNudges; i++) {
       if (ctx.aborted) break;
       const changedFiles = fileTracker?.poll().files || [];
-      verdict = await evaluateCompletion({ goal, transcript: cleanOutput, changedFiles, settings });
+      verdict = await evaluateCompletion({ goal, transcript: cleanOutput, changedFiles, rules, settings });
       if (!verdict || verdict.done) break;
 
       rounds++;
@@ -1209,7 +1212,7 @@ RULES:
     // reflects the final state of the work.
     if (rounds > 0 && !ctx.aborted) {
       const changedFiles = fileTracker?.poll().files || [];
-      verdict = (await evaluateCompletion({ goal, transcript: cleanOutput, changedFiles, settings })) || verdict;
+      verdict = (await evaluateCompletion({ goal, transcript: cleanOutput, changedFiles, rules, settings })) || verdict;
     }
 
     return { verdict, rounds, displayOutput, cleanOutput };
@@ -2217,6 +2220,21 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     } catch { return ''; }
   }
 
+  /**
+   * A compact, high-priority restatement of the project's standing rules, for
+   * re-injection on every follow-up turn. Crucially tells the agent that a rule
+   * granting standing approval means it should act, not ask.
+   */
+  _getStandingRulesReminder(projectId) {
+    const rules = this._getProjectRules(projectId);
+    if (!rules) return '';
+    return [
+      '[STANDING PROJECT RULES — these always apply, including for THIS request.',
+      'If a rule grants you standing approval to perform an action (e.g. deploying to a dev environment), DO IT NOW as part of completing the task — do not stop to ask for confirmation or defer it as a "next step".]',
+      rules,
+    ].join('\n');
+  }
+
   _buildProjectMemoryContext(projectId, userMessage = '') {
     if (!projectId) return '';
     try {
@@ -2400,14 +2418,20 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       fullMessage = message;
     }
 
-    // Inject distilled context + branch reminder for follow-up messages
-    // This ensures the coding assistant retains key decisions, files, constraints,
-    // and branch context even if its own session memory was lost or compacted.
-    if (!isFirstMessage && (distilledContext || branchReminder)) {
+    // Inject standing rules + distilled context + branch reminder for follow-up
+    // messages. Rules are re-asserted EVERY turn (not just the first) because the
+    // CLI session's own memory gets compacted on long/resumed sessions — losing
+    // standing instructions like "you are always approved to deploy to dev-1",
+    // which makes the agent revert to its cautious default and ask permission.
+    if (!isFirstMessage && tool !== 'aider') {
       const contextParts = [];
+      const standingRules = this._getStandingRulesReminder(projectId);
+      if (standingRules) contextParts.push(standingRules);
       if (branchReminder) contextParts.push(branchReminder);
       if (distilledContext) contextParts.push(distilledContext);
-      fullMessage = `[Session Context — do not repeat this back, use it to inform your response]\n${contextParts.join('\n')}\n\n[User Request]\n${fullMessage}`;
+      if (contextParts.length) {
+        fullMessage = `[Session Context — do not repeat this back, use it to inform your response]\n${contextParts.join('\n\n')}\n\n[User Request]\n${fullMessage}`;
+      }
     }
 
     if (salesforceContext) {

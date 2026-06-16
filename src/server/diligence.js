@@ -94,7 +94,7 @@ export function buildOperatingContract({ tool, mode } = {}) {
     '   - Actually execute the commands and read the output. NEVER claim something passes without running it.',
     '   - If a validation genuinely cannot be run, state exactly which one and why.',
     "5. ASSERT QUALITY — Re-read your own diff. Check error handling, edge cases, security, and that you didn't break existing behavior or leave debug/dead code behind.",
-    '6. FOLLOW THE RULES — Honor CLAUDE.md / AGENTS.md / project rules / skills above your own defaults.',
+    '6. FOLLOW THE RULES — Honor CLAUDE.md / AGENTS.md / project rules / skills above your own defaults. If a rule grants STANDING APPROVAL for an action (e.g. "always approved to deploy to dev-1", "always deploy changes to the dev-1 worker"), perform that action as part of completing the task — do not pause to ask for confirmation or list it as a deferred "next step".',
     '7. REPORT — End every turn with EXACTLY this structure (Markdown), so the human can follow up easily:',
     '',
     '## Summary',
@@ -140,6 +140,7 @@ Return ONLY valid JSON, no prose, with this exact shape:
 Rules:
 - If the agent only described changes with no evidence of running them: done=false, verification.ran=false.
 - If new logic/feature was added but no test or validation was run: done=false, and the nudge MUST require running (or writing then running) the relevant tests/build.
+- If PROJECT RULES are provided and the agent deferred or skipped an action that a rule REQUIRES or grants STANDING APPROVAL for (e.g. a rule says "always deploy to dev-1" but the agent said deploy is an optional next step): done=false, and the nudge MUST instruct the agent to perform that action now per the rule.
 - "passed" is true/false/null (null when nothing was run).
 - Keep bullets concise. The nudge must be actionable and name the specific gap. Do not invent work the user did not ask for.`;
 
@@ -182,7 +183,7 @@ function heuristicVerdict(transcript, settings) {
  * @returns {Promise<object>} verdict — see VERDICT_SYSTEM_PROMPT shape, plus
  *   a `source` field ('llm' | 'heuristic').
  */
-export async function evaluateCompletion({ goal, transcript, changedFiles = [], settings = getDiligenceSettings() } = {}) {
+export async function evaluateCompletion({ goal, transcript, changedFiles = [], rules = '', settings = getDiligenceSettings() } = {}) {
   const tail = String(transcript || '').slice(-7000);
   const filesLine = changedFiles.length
     ? changedFiles.slice(0, 40).map((f) => (typeof f === 'string' ? f : f.path)).filter(Boolean).join(', ')
@@ -196,9 +197,10 @@ export async function evaluateCompletion({ goal, transcript, changedFiles = [], 
 
   const userPrompt = [
     `GOAL:\n${String(goal || '').slice(0, 2000)}`,
+    rules ? `\nPROJECT RULES (must be satisfied):\n${String(rules).slice(0, 1500)}` : '',
     `\nCHANGED FILES: ${filesLine}`,
     `\nTRANSCRIPT (the agent's output for this turn, tail):\n${tail}`,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   try {
     const result = await llmProvider.generateResponse(userPrompt, {
