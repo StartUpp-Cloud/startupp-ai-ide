@@ -31,6 +31,11 @@ const LIVENESS_INTERVAL_MS = 5000;
 const LIVENESS_STALE_MS = 4000;
 const ACTIVE_RUN_STATUSES = ['running'];
 const ACTIVE_RUN_STATUS_SQL = ACTIVE_RUN_STATUSES.map(() => '?').join(', ');
+// Cross-restart recovery: a run whose in-memory state was lost (process restart)
+// is resumed rather than declared interrupted, so it always drives through to an
+// answer. Bounded so a poison run can't loop forever across repeated restarts.
+const MAX_RECOVERY_ATTEMPTS = 5;
+const RECOVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000; // don't resurrect day-old runs on boot
 const RECOVERABLE_RUN_STATUSES = ['failed', 'blocked'];
 
 const NON_RETRYABLE_PATTERNS = [
@@ -179,9 +184,16 @@ class AgentOrchestrator extends EventEmitter {
   }
 
   async init() {
-    const reconciled = this.reconcileInterruptedRuns();
-    if (reconciled.length > 0) {
-      console.log(`[agentOrchestrator] Reconciled ${reconciled.length} interrupted run(s) from persisted state`);
+    // Recovery is intentionally NOT done here — at process init the broadcast
+    // channel and container/agent infra may not be ready. The reliability sweep
+    // (terminalServer) runs shortly after boot with a live broadcastFn and
+    // drives resume/interrupt then. Runs simply remain in 'running' status until
+    // that sweep picks them up.
+    const pending = sqliteStore.db.prepare(
+      `SELECT COUNT(*) AS n FROM orchestrator_runs WHERE status IN (${ACTIVE_RUN_STATUS_SQL})`,
+    ).get(...ACTIVE_RUN_STATUSES);
+    if (pending?.n > 0) {
+      console.log(`[agentOrchestrator] ${pending.n} run(s) pending recovery; reliability sweep will resume them.`);
     }
   }
 
@@ -222,49 +234,144 @@ class AgentOrchestrator extends EventEmitter {
     this._emitRun(run, broadcastFn);
     await this._event(run, null, 'run-started', `Started autonomous run with ${tool}.`, { tool, model, effort }, broadcastFn);
 
-    this._executeRun(run, { attachments, mode, tool, model, effort, broadcastFn, skipUnread }).catch(async (err) => {
-      const active = this.activeRuns.get(run.id);
-      const cancelled = active?.aborted || /cancelled|aborted/i.test(err.message || '');
-      run.status = cancelled ? 'cancelled' : 'failed';
-      run.phase = run.status;
-      run.error = cancelled ? null : err.message;
-      run.completedAt = nowIso();
-      run.updatedAt = run.completedAt;
-      this._saveRun(run);
-      if (cancelled) {
-        if (!active?.cancelEventEmitted) {
-          await this._event(run, null, 'run-cancelled', 'Autonomous run cancelled.', null, broadcastFn, 'warning');
-        }
-      } else {
-        const profile = this._getProfile();
-        const userMessage = buildRunFailureResponse({
-          status: run.status,
-          error: err.message,
-          tool,
-          model,
-          profile,
-        });
-        const eventMessage = buildRunFailureEventMessage({
-          status: run.status,
-          error: err.message,
-          tool,
-          model,
-        });
-        await this._event(run, null, 'run-failed', eventMessage, { rawError: err.message }, broadcastFn, 'error');
-        const msg = chatStore.addMessage({
-          projectId: run.projectId,
-          sessionId: run.sessionId,
-          role: 'agent',
-          content: userMessage,
-          metadata: { orchestratorRunId: run.id, orchestratorFailure: true, rawError: err.message },
-        });
-        broadcastFn({ type: 'chat-message', message: msg });
-      }
-      this._emitRun(run, broadcastFn);
-      this._deactivateRun(run.id);
-    });
+    this._executeRun(run, { attachments, mode, tool, model, effort, broadcastFn, skipUnread })
+      .catch((err) => this._handleRunCrash(run, err, { broadcastFn, tool, model }));
 
     return run;
+  }
+
+  /**
+   * Terminal handler when _executeRun throws (not a graceful task failure —
+   * those are handled inside _executeRun). Shared by initial runs and resumes.
+   */
+  async _handleRunCrash(run, err, { broadcastFn, tool, model }) {
+    const active = this.activeRuns.get(run.id);
+    const cancelled = active?.aborted || /cancelled|aborted/i.test(err.message || '');
+    run.status = cancelled ? 'cancelled' : 'failed';
+    run.phase = run.status;
+    run.error = cancelled ? null : err.message;
+    run.completedAt = nowIso();
+    run.updatedAt = run.completedAt;
+    this._saveRun(run);
+    if (cancelled) {
+      if (!active?.cancelEventEmitted) {
+        await this._event(run, null, 'run-cancelled', 'Autonomous run cancelled.', null, broadcastFn, 'warning');
+      }
+    } else {
+      const profile = this._getProfile();
+      const userMessage = buildRunFailureResponse({ status: run.status, error: err.message, tool, model, profile });
+      const eventMessage = buildRunFailureEventMessage({ status: run.status, error: err.message, tool, model });
+      await this._event(run, null, 'run-failed', eventMessage, { rawError: err.message }, broadcastFn, 'error');
+      const msg = chatStore.addMessage({
+        projectId: run.projectId,
+        sessionId: run.sessionId,
+        role: 'agent',
+        content: userMessage,
+        metadata: { orchestratorRunId: run.id, orchestratorFailure: true, rawError: err.message },
+      });
+      broadcastFn?.({ type: 'chat-message', message: msg });
+    }
+    this._emitRun(run, broadcastFn);
+    this._deactivateRun(run.id);
+  }
+
+  /**
+   * Decide how to recover a run whose in-memory state was lost (process
+   * restart): resume it (default) so it drives through to an answer, or — as a
+   * last resort — mark it interrupted. Returns the run only if it was marked
+   * interrupted (so callers can surface/auto-retry it); null if resumed.
+   */
+  _recoverRun(run, broadcastFn) {
+    if (!run || this.activeRuns.has(run.id)) {
+      if (run) this._emitRun(run, broadcastFn);
+      return null;
+    }
+    const overCap = (run.data?.recoveryAttempts || 0) >= MAX_RECOVERY_ATTEMPTS;
+    const ageMs = Date.now() - (Date.parse(run.updatedAt || run.startedAt) || 0);
+    const session = chatStore.getSession(run.projectId, run.sessionId);
+    // Resume unless the parent session is gone or explicitly closed/archived.
+    const sessionUsable = session && session.status !== 'closed' && session.status !== 'archived';
+    const resumable = !overCap && ageMs <= RECOVERY_MAX_AGE_MS && sessionUsable;
+    if (!resumable) return this._markRunInterrupted(run, broadcastFn);
+    this.resumeRun(run, broadcastFn);
+    return null;
+  }
+
+  /**
+   * Resume a run after a restart. Reuses persisted tasks: completed ones feed
+   * synthesis directly (recovering the answer without re-running the agent when
+   * the crash happened during synthesis), and unfinished ones are re-driven with
+   * a recovery prompt on a FRESH agent session (a new CLI thread — avoids
+   * colliding with any still-detached agent process from before the restart).
+   */
+  resumeRun(run, broadcastFn) {
+    // Reserve the slot synchronously so concurrent reconcilers don't double-drive.
+    if (this.activeRuns.has(run.id)) return run;
+    this.activeRuns.set(run.id, {
+      aborted: false, broadcastFn, recovering: true,
+      lastActivityAt: Date.now(), lastMeaningfulActivityAt: Date.now(),
+    });
+
+    const recoveryAttempts = (run.data?.recoveryAttempts || 0) + 1;
+    const tasks = this.getTasks(run.id);
+
+    for (const t of tasks) {
+      if (t.status === 'completed' || t.status === 'blocked') continue;
+      // Fresh continuation: new CLI thread + recovery-wrapped prompt.
+      t.agentSessionId = null;
+      t.attempt = 0;
+      t.status = 'pending';
+      t.error = null;
+      t.startedAt = null;
+      t.completedAt = null;
+      // Persist the reset state, then wrap the prompt in-memory for this run.
+      // (_saveTask doesn't persist `prompt`, so the DB keeps the original — which
+      // means each resume wraps the original fresh and never nests wrappers.)
+      this._saveTask(t);
+      t.prompt = this._buildRecoveryPrompt(t);
+    }
+
+    run.status = 'running';
+    run.phase = 'executing';
+    run.error = null;
+    run.completedAt = null;
+    run.data = { ...(run.data || {}), recoveryAttempts };
+    run.updatedAt = nowIso();
+    this._saveRun(run);
+    this._startLivenessMonitor(run, broadcastFn);
+    this._emitRun(run, broadcastFn);
+
+    // Non-terminal, informational — NOT the scary "interrupted" failure message.
+    this._event(run, null, 'run-resumed',
+      `Reconnected after a service restart — continuing this run where it left off (recovery ${recoveryAttempts}/${MAX_RECOVERY_ATTEMPTS}).`,
+      { recoveryAttempts }, broadcastFn, 'info').catch(() => {});
+
+    const opts = {
+      attachments: run.data?.attachments || [],
+      mode: run.data?.mode || 'agent',
+      tool: run.tool, model: run.model, effort: run.effort,
+      broadcastFn: broadcastFn || (() => {}),
+      skipUnread: false,
+      // Only use resume mode if there are persisted tasks; otherwise let
+      // _executeRun plan fresh from the original goal.
+      resume: tasks.length > 0,
+      resumeTasks: tasks,
+    };
+    this._executeRun(run, opts)
+      .catch((err) => this._handleRunCrash(run, err, { broadcastFn: opts.broadcastFn, tool: run.tool, model: run.model }));
+    return run;
+  }
+
+  _buildRecoveryPrompt(task) {
+    return `[RECOVERY — the service restarted while this task was in progress; a previous attempt may have partially completed it]
+Before doing anything else:
+1. Inspect the CURRENT state to see what is already done (e.g. git status/diff, what is already deployed, existing test results).
+2. Do NOT redo work that is already complete.
+3. Continue and finish the remaining work, honoring all project rules.
+4. Verify, then report.
+
+--- ORIGINAL TASK ---
+${task.prompt}`;
   }
 
   abortRun(runId) {
@@ -361,7 +468,9 @@ class AgentOrchestrator extends EventEmitter {
     for (const row of rows) {
       const run = rowToRun(row);
       if (!run || this.activeRuns.has(run.id)) continue;
-      reconciled.push(this._markRunInterrupted(run, broadcastFn));
+      // Resume by default; only collect runs we gave up on (marked interrupted).
+      const interrupted = this._recoverRun(run, broadcastFn);
+      if (interrupted) reconciled.push(interrupted);
     }
     return reconciled.filter(Boolean);
   }
@@ -378,8 +487,8 @@ class AgentOrchestrator extends EventEmitter {
         if (run) this._emitRun(run, broadcastFn);
         continue;
       }
-
-      const interrupted = this._markRunInterrupted(run, broadcastFn);
+      // Resume by default; only collect runs we gave up on (marked interrupted).
+      const interrupted = this._recoverRun(run, broadcastFn);
       if (interrupted) reconciled.push(interrupted);
     }
     return reconciled;
@@ -450,19 +559,32 @@ class AgentOrchestrator extends EventEmitter {
         ? { ...opts, runRetryContext: { attempt: runAttempt, maxRetries: maxRunRetries, previousError: lastFailedResult?.error } }
         : opts;
 
-      const tasks = await this._planTasks(run, retryOpts);
-      for (const task of tasks) this._saveTask(task);
+      // Resume mode (only on the first attempt of a recovered run): reuse the
+      // persisted tasks instead of planning fresh. Already-completed tasks feed
+      // synthesis directly so we recover the answer without re-running the agent.
+      const resuming = opts.resume && runAttempt === 0;
+      let tasks;
+      const completed = [];
+      if (resuming) {
+        const persisted = opts.resumeTasks || [];
+        for (const t of persisted.filter(t => t.status === 'completed')) {
+          completed.push({ task: t, result: { success: true, content: t.result || '', changedFiles: [] } });
+        }
+        tasks = persisted.filter(t => t.status !== 'completed');
+      } else {
+        tasks = await this._planTasks(run, retryOpts);
+        for (const task of tasks) this._saveTask(task);
+      }
 
       run.phase = 'executing';
       run.updatedAt = nowIso();
-      run.data = { ...(run.data || {}), taskCount: tasks.length, runAttempt };
+      run.data = { ...(run.data || {}), taskCount: tasks.length + completed.length, runAttempt };
       this._saveRun(run);
       this._emitRun(run, broadcastFn);
-      if (runAttempt === 0) {
+      if (runAttempt === 0 && !resuming) {
         await this._event(run, null, 'tasks-created', `Created ${tasks.length} agent task${tasks.length === 1 ? '' : 's'}.`, { tasks: tasks.map(t => ({ id: t.id, title: t.title, type: t.taskType })) }, broadcastFn);
       }
 
-      const completed = [];
       const batches = this._batchTasks(tasks);
       for (const batch of batches) {
         if (active?.aborted) throw new Error('Run cancelled');
