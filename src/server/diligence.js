@@ -237,6 +237,109 @@ export async function evaluateCompletion({ goal, transcript, changedFiles = [], 
   }
 }
 
+// ── Report parsing ───────────────────────────────────────────────────────────
+
+const REPORT_SECTIONS = ['Summary', 'Changes', 'Verification', 'Quality', 'Next'];
+// Matches a section header line in any of the shapes models emit:
+//   "## Summary", "**Summary**", "Summary:", "### Verification"
+const SECTION_HEADER_RE = new RegExp(
+  `^\\s*(?:#{1,4}\\s*)?\\*{0,2}\\s*(${REPORT_SECTIONS.join('|')})\\s*\\*{0,2}\\s*:?\\s*$`,
+  'i',
+);
+
+/** Classify a single verification line into a check status. */
+function classifyCheck(text) {
+  if (/(❌|✗|✘|\bfail(ed|ing|ure)?\b|\berror\b|\bnon-?zero\b|did not pass)/i.test(text)) return 'fail';
+  if (/(not run|could not|couldn'?t|unable to|skipped|n\/a\b|blocked)/i.test(text)) return 'skip';
+  if (/(✅|✔|✓|\bpass(ed|es)?\b|\bsuccess(ful|fully)?\b|\bok\b|HTTP\/?\d?\s*200|\bclean\b|up to date|completed)/i.test(text)) return 'pass';
+  return 'info';
+}
+
+/** Parse a bullet list block into individual check items. */
+function parseChecks(block) {
+  const checks = [];
+  for (const raw of block.split('\n')) {
+    const line = raw.replace(/^\s*[-*•·]\s+/, (m) => (m === raw ? raw : '')); // only strip if it was a bullet
+    const isBullet = /^\s*[-*•·]\s+/.test(raw);
+    const text = isBullet ? raw.replace(/^\s*[-*•·]\s+/, '').trim() : raw.trim();
+    if (!text) continue;
+    if (!isBullet && checks.length) {
+      // Continuation line for the previous check (wrapped result).
+      checks[checks.length - 1].result = `${checks[checks.length - 1].result} ${text}`.trim();
+      continue;
+    }
+    if (!isBullet) continue;
+    // Split "command → result" (also handles -> and :)
+    const m = text.split(/\s*(?:→|->)\s*/);
+    let label = m[0].trim();
+    let result = m.slice(1).join(' → ').trim();
+    label = label.replace(/^`|`$/g, '');
+    checks.push({ label, result, status: classifyCheck(text) });
+  }
+  return checks;
+}
+
+/**
+ * Split an agent's turn output into the human-facing structured report and the
+ * preceding reasoning narration ("activity"), and pull the Verification block
+ * out as discrete checks. Graceful: if no recognizable report is present,
+ * `hasReport` is false and `body` is the original text unchanged.
+ *
+ * When the output contains multiple report blocks (e.g. after diligence nudge
+ * rounds), the LAST one wins — it reflects the final state of the work.
+ *
+ * @returns {{ hasReport: boolean, activity: string, body: string, summary: string,
+ *   checks: Array<{label:string,result:string,status:string}> }}
+ */
+export function parseAgentReport(text) {
+  const src = String(text || '');
+  const lines = src.split('\n');
+
+  // Locate every section header and where it sits.
+  const headers = [];
+  lines.forEach((line, i) => {
+    const m = line.match(SECTION_HEADER_RE);
+    if (m) headers.push({ name: m[1].replace(/^\w/, (c) => c.toUpperCase()), line: i });
+  });
+
+  // Find the start of the LAST report block — the last "Summary" header, or the
+  // earliest header of the last contiguous run if Summary is absent.
+  const summaryIdxs = headers.filter((h) => /^summary$/i.test(h.name));
+  const startHeader = summaryIdxs.length ? summaryIdxs[summaryIdxs.length - 1] : null;
+  if (!startHeader) {
+    return { hasReport: false, activity: '', body: src, summary: '', checks: [] };
+  }
+
+  const activity = lines.slice(0, startHeader.line).join('\n').trim();
+  const reportHeaders = headers.filter((h) => h.line >= startHeader.line);
+
+  // Carve the report into sections.
+  const sections = {};
+  reportHeaders.forEach((h, i) => {
+    const end = i + 1 < reportHeaders.length ? reportHeaders[i + 1].line : lines.length;
+    sections[h.name.toLowerCase()] = lines.slice(h.line + 1, end).join('\n').trim();
+  });
+
+  const checks = sections.verification ? parseChecks(sections.verification) : [];
+
+  // Rebuild the body markdown WITHOUT the Verification block (rendered as checks
+  // separately), preserving the other sections in order.
+  const bodyParts = [];
+  reportHeaders.forEach((h, i) => {
+    if (/^verification$/i.test(h.name)) return;
+    const end = i + 1 < reportHeaders.length ? reportHeaders[i + 1].line : lines.length;
+    bodyParts.push(lines.slice(h.line, end).join('\n').trim());
+  });
+
+  return {
+    hasReport: true,
+    activity,
+    body: bodyParts.join('\n\n').trim(),
+    summary: sections.summary || '',
+    checks,
+  };
+}
+
 /** Pull the first JSON object out of a model response (handles code fences). */
 function extractJson(text) {
   if (!text || typeof text !== 'string') return null;

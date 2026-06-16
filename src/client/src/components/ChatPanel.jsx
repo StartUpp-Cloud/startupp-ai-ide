@@ -4,7 +4,7 @@ import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from '
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
-import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy, CheckCircle2, Circle, XCircle, MinusCircle } from 'lucide-react';
 import ModeToggle from './ModeToggle';
 import {
   CLI_TOOLS,
@@ -852,6 +852,57 @@ function ProjectContextPanel({ projectId, project, onClose, onStartSession }) {
 /**
  * Working indicator with live timer and stop button.
  */
+// Renders a single check row with a status icon. Shared by the live panel and
+// the final message render.
+function CheckRow({ check, active }) {
+  const status = active && check.status === 'active' ? 'active' : check.status;
+  const Icon = status === 'active' ? Loader
+    : status === 'done' ? CheckCircle2
+    : status === 'fail' ? XCircle
+    : status === 'skip' ? MinusCircle
+    : Circle;
+  const color = status === 'active' ? 'text-primary-300'
+    : status === 'done' ? 'text-emerald-400'
+    : status === 'fail' ? 'text-red-400'
+    : status === 'skip' ? 'text-amber-400'
+    : 'text-surface-500';
+  return (
+    <div className="flex items-start gap-2">
+      <Icon size={13} className={`mt-0.5 flex-shrink-0 ${color} ${status === 'active' ? 'animate-spin' : ''}`} />
+      <div className="min-w-0">
+        <div className={`text-[12px] leading-snug ${status === 'active' ? 'text-surface-100' : 'text-surface-300'}`}>
+          {check.verify && <span className="mr-1.5 rounded bg-surface-700/60 px-1 py-px text-[9px] uppercase tracking-wide text-surface-400">verify</span>}
+          {check.label}
+        </div>
+        {status === 'active' && check.detail && (
+          <div className="mt-0.5 text-[11px] leading-snug text-surface-400 line-clamp-2">{check.detail}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Live checklist shown while the agent works — discrete steps fill in, the
+// current one spins with a short "what's happening now" detail. Replaces the
+// wall-of-reasoning "status conversation".
+function LiveChecksPanel({ checks }) {
+  if (!checks || checks.length === 0) return null;
+  const done = checks.filter(c => c.status === 'done' || c.status === 'fail' || c.status === 'skip').length;
+  return (
+    <div className="mx-4 mb-2 rounded-xl border border-primary-500/20 bg-primary-500/5 px-3 py-2.5">
+      <div className="mb-1.5 flex items-center gap-2 text-[11px] font-medium text-primary-200">
+        <Loader size={12} className="animate-spin" />
+        Working — {done}/{checks.length} checks
+      </div>
+      <div className="space-y-1.5">
+        {checks.map((c, i) => (
+          <CheckRow key={c.id ?? i} check={c} active={i === checks.length - 1} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function WorkingIndicator({ wsRef, projectId, sessionId }) {
   const [elapsed, setElapsed] = useState(0);
   const [liveOutput, setLiveOutput] = useState('');
@@ -1358,6 +1409,7 @@ function ChatSessionContent({
   const [streamingMessage, setStreamingMessage] = useState(null);
   const [liveProgressEntries, setLiveProgressEntries] = useState([]);
   const [liveChangedFiles, setLiveChangedFiles] = useState([]);
+  const [liveChecks, setLiveChecks] = useState([]);
   const [typingMessageIds, setTypingMessageIds] = useState(() => new Set());
   const [orchestratorRun, setOrchestratorRun] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
@@ -1850,6 +1902,7 @@ function ChatSessionContent({
               setStreamingMessage(null);
               setLiveProgressEntries([]);
               setLiveChangedFiles([]);
+              setLiveChecks([]);
               markMessageForTyping(msg.message);
               streamingChunksRef.current = '';
               setAgentBusy(false);
@@ -1917,6 +1970,7 @@ function ChatSessionContent({
             if (msg.message.role === 'agent' || msg.message.role === 'error') {
               setLiveProgressEntries([]);
               setLiveChangedFiles([]);
+              setLiveChecks([]);
               markMessageForTyping(msg.message);
             }
             updateMessages(prev => [
@@ -1969,6 +2023,13 @@ function ChatSessionContent({
               knownIdsRef.current.add(msg.message.id);
               updateMessages(prev => [...prev, msg.message]);
             }
+          }
+          break;
+
+        case 'chat-checks':
+          // Live checklist derived from the agent's streaming output.
+          if ((!msg.sessionId || msg.sessionId === sessionId) && Array.isArray(msg.checks)) {
+            setLiveChecks(msg.checks);
           }
           break;
 
@@ -2028,6 +2089,7 @@ function ChatSessionContent({
               streamingChunksRef.current = '';
               setLiveProgressEntries([]);
               setLiveChangedFiles([]);
+              setLiveChecks([]);
               setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
             }
           }
@@ -2609,6 +2671,10 @@ function ChatSessionContent({
           </div>
         )}
 
+        {!showOnlySessions && liveChecks.length > 0 && (
+          <LiveChecksPanel checks={liveChecks} />
+        )}
+
         {!showOnlySessions && streamingMessage && (
           <ChatMessage
             key={streamingMessage.id}
@@ -2621,7 +2687,7 @@ function ChatSessionContent({
         )}
 
         {!showOnlySessions && (agentBusy || recoveryStatus.active || (streamingMessage && !streamingMessage.shell)) && (
-          progressTranscriptEntries.length === 0 && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
+          progressTranscriptEntries.length === 0 && liveChecks.length === 0 && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
         )}
 
         <div ref={messagesEndRef} />

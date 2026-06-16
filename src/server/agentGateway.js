@@ -43,7 +43,9 @@ import {
   buildOperatingContract,
   evaluateCompletion,
   buildNudgeMessage,
+  parseAgentReport,
 } from './diligence.js';
+import { checklistTracker } from './checklistTracker.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -875,6 +877,9 @@ RULES:
       jobId: job.id,
     });
 
+    // Begin deriving a live checklist from the agent's streaming output.
+    checklistTracker.start({ messageId: streamingMsg.id, projectId, sessionId: chatSessionId, tool, broadcastFn });
+
     let chunkIndex = 0;
 
     // ── Context distillation: enrich follow-up messages with key context ──
@@ -908,6 +913,8 @@ RULES:
         });
         // Record output to job (handles timeout tracking, progress parsing)
         jobManager.recordOutput(job.id, chunk);
+        // Derive live checklist steps from the streamed output.
+        checklistTracker.ingestChunk(streamingMsg.id, chunk);
       },
     };
 
@@ -922,6 +929,7 @@ RULES:
           const diligence = await this._runDiligenceLoop({
             projectId, chatSessionId, tool, mode, goal: message,
             result, assistantSettings, broadcastFn, ctx, streamOpts, fileTracker,
+            messageId: streamingMsg.id,
           });
           const combinedDisplay = diligence.displayOutput || result.displayOutput;
           const combinedClean = diligence.cleanOutput || result.cleanOutput;
@@ -939,6 +947,22 @@ RULES:
           const changedFiles = fileTracker?.poll().files || [];
           const diligenceMeta = this._buildDiligenceMeta(diligence);
 
+          // ── Concise reporting: promote the structured report to the message
+          // body, demote the reasoning narration to collapsible "activity", and
+          // surface the Verification block as discrete checks. Graceful no-op
+          // when the agent didn't emit a recognizable report. ──
+          const report = parseAgentReport(finalContent);
+          // Fall back to the full content if the parsed body came out empty, so
+          // we never render a blank message.
+          const displayContent = report.hasReport && report.body.trim() ? report.body : finalContent;
+          // checks live in metadata.checks (merged with run steps); keep report
+          // meta to the summary only to avoid duplicating the check list.
+          const reportMeta = report.hasReport ? { summary: report.summary } : null;
+          const activityNarration = report.hasReport && report.activity ? report.activity : null;
+          // Finalize the live checklist for this message (merges run steps with
+          // the report's verification checks) before we tear the tracker down.
+          const finalChecks = checklistTracker.finalize(streamingMsg.id, report.checks);
+
           // Complete the job
           jobManager.completeJob(job.id, finalContent);
 
@@ -947,7 +971,7 @@ RULES:
             projectId,
             sessionId: chatSessionId,
             messageId: streamingMsg.id,
-            finalContent,
+            finalContent: displayContent,
             metadata: {
               tool,
               jobId: job.id,
@@ -957,6 +981,9 @@ RULES:
               ...(reviewMeta ? { review: reviewMeta } : {}),
               ...(logContext ? { logContext } : {}),
               ...(diligenceMeta ? { diligence: diligenceMeta } : {}),
+              ...(reportMeta ? { report: reportMeta } : {}),
+              ...(activityNarration ? { activity: activityNarration } : {}),
+              ...(finalChecks?.length ? { checks: finalChecks } : {}),
             },
           });
 
@@ -969,7 +996,7 @@ RULES:
             jobId: job.id,
             message: {
               ...streamingMsg,
-              content: finalContent,
+              content: displayContent,
               metadata: {
                 tool,
                 jobId: job.id,
@@ -979,6 +1006,9 @@ RULES:
                 ...(reviewMeta ? { review: reviewMeta } : {}),
                 ...(logContext ? { logContext } : {}),
                 ...(diligenceMeta ? { diligence: diligenceMeta } : {}),
+                ...(reportMeta ? { report: reportMeta } : {}),
+                ...(activityNarration ? { activity: activityNarration } : {}),
+                ...(finalChecks?.length ? { checks: finalChecks } : {}),
               },
             },
           });
@@ -996,11 +1026,13 @@ RULES:
             }
           }
 
-          this._persistContext(projectId, chatSessionId, message, finalContent);
+          this._persistContext(projectId, chatSessionId, message, displayContent);
+          // Memory learning gets the full text (reasoning included) for richer
+          // durable-fact extraction; the user-facing message stays concise.
           this._learnDurableMemory(projectId, message, finalContent, { tool, mode }).catch(err => {
             console.warn('[agentGateway] Memory learning skipped:', err.message);
           });
-          return { success: true, content: finalContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, rawOutput: rawForDisplay.slice(-8000), changedFiles, ...(diligenceMeta ? { diligence: diligenceMeta } : {}) };
+          return { success: true, content: displayContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, rawOutput: rawForDisplay.slice(-8000), changedFiles, ...(diligenceMeta ? { diligence: diligenceMeta } : {}) };
         }
 
         if (result.retry && attempt < MAX_ATTEMPTS) {
@@ -1111,6 +1143,9 @@ RULES:
     } finally {
       // Clean up event handler
       jobManager.removeListener('job-progress', jobProgressHandler);
+      // Ensure the live checklist is torn down even on failure/abort paths
+      // (no-op if it was already finalized in the success branch).
+      checklistTracker.abort(streamingMsg.id);
     }
   }
 
@@ -1126,13 +1161,16 @@ RULES:
    *
    * @returns {Promise<{ verdict: object|null, rounds: number, displayOutput: string, cleanOutput: string }>}
    */
-  async _runDiligenceLoop({ projectId, chatSessionId, tool, mode, goal, result, assistantSettings, broadcastFn, ctx, streamOpts, fileTracker }) {
+  async _runDiligenceLoop({ projectId, chatSessionId, tool, mode, goal, result, assistantSettings, broadcastFn, ctx, streamOpts, fileTracker, messageId }) {
     const empty = { verdict: null, rounds: 0, displayOutput: result.displayOutput, cleanOutput: result.cleanOutput };
     const settings = getDiligenceSettings();
     if (!diligenceAppliesTo(tool, mode, settings)) return empty;
     if (ctx.aborted) return empty;
-    // Don't interfere with the autonomous orchestrator's own control loop.
-    if (this._running.get(chatSessionId)?.orchestrated) return empty;
+    // Orchestrated runs: the loop runs INSIDE the single task turn the
+    // orchestrator awaits, so it doesn't double-drive. We still honor it because
+    // single-task runs (e.g. "deploy and report back") are exactly where the
+    // verdict + verification visibility matters most. The orchestrator's
+    // liveness monitor only fires on silence, and nudge rounds produce activity.
 
     let displayOutput = result.displayOutput || '';
     let cleanOutput = result.cleanOutput || '';
@@ -1151,6 +1189,11 @@ RULES:
         `🔍 Verifying completeness — ${verdict.headline || 'asking the agent to finish & validate'}`,
         broadcastFn, null, { transient: true },
       );
+      // Surface the verification milestone as a live check.
+      if (messageId) {
+        checklistTracker.note(messageId, `🔍 Verifying completeness (round ${rounds})`, 'active',
+          (verdict.outstanding || []).slice(0, 3).join(' · ') || verdict.headline || '');
+      }
 
       const nudgeResult = await this._attemptCliTool(
         projectId, chatSessionId, buildNudgeMessage(verdict), tool,

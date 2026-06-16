@@ -76,6 +76,42 @@ function DiligenceStrip({ diligence }) {
 }
 
 /**
+ * Final checklist rendered on a completed agent message — the run's steps and
+ * the report's verification checks, each with a pass/fail/skip icon.
+ */
+function MessageChecks({ checks }) {
+  if (!checks || checks.length === 0) return null;
+  const iconFor = (status) => {
+    if (status === 'done') return { Icon: CheckCircle, cls: 'text-emerald-400' };
+    if (status === 'fail') return { Icon: AlertTriangle, cls: 'text-red-400' };
+    if (status === 'skip') return { Icon: Info, cls: 'text-amber-400' };
+    return { Icon: Info, cls: 'text-surface-500' };
+  };
+  return (
+    <div className="mt-2 rounded-md border border-surface-700/30 bg-surface-950/40 p-2">
+      <div className="mb-1.5 text-[11px] font-medium text-surface-400">Checks</div>
+      <div className="space-y-1">
+        {checks.map((c, i) => {
+          const { Icon, cls } = iconFor(c.status);
+          return (
+            <div key={c.id ?? i} className="flex items-start gap-2">
+              <Icon size={12} className={`mt-0.5 flex-shrink-0 ${cls}`} />
+              <div className="min-w-0 text-[11px] leading-snug">
+                <span className="text-surface-200">
+                  {c.verify && <span className="mr-1.5 rounded bg-surface-700/60 px-1 py-px text-[9px] uppercase tracking-wide text-surface-400">verify</span>}
+                  {c.label}
+                </span>
+                {c.detail && <span className="text-surface-500"> — {c.detail}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Lightweight markdown renderer — handles the common formatting cases
  * without pulling in a heavy library.
  */
@@ -290,6 +326,7 @@ function useTypedContent(content, enabled) {
 export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry, animateContent = false, threadKind = 'session' }) {
   const [showRaw, setShowRaw] = useState(false);
   const [showChangedFiles, setShowChangedFiles] = useState(false);
+  const [showActivity, setShowActivity] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
   const [showLogInput, setShowLogInput] = useState(false);
   const shellPrompt = message.metadata?.shell?.prompt;
@@ -311,6 +348,8 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const review = message.metadata?.review;
   const logContext = message.metadata?.logContext;
   const diligence = message.metadata?.diligence;
+  const checks = Array.isArray(message.metadata?.checks) ? message.metadata.checks : [];
+  const activity = message.metadata?.activity;
 
   // Suggestion buttons: render as a row of clickable chips
   if (suggestions && message.metadata?.hidden) {
@@ -429,12 +468,20 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
           </div>
         )}
 
+        {checks.length > 0 && <MessageChecks checks={checks} />}
+
         {diligence && (
           <DiligenceStrip diligence={diligence} />
         )}
 
-        {(rawOutput || changedFiles.length > 0) && (
+        {(rawOutput || changedFiles.length > 0 || activity) && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
+            {activity && (
+              <button onClick={() => setShowActivity(!showActivity)} className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
+                {showActivity ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                Show activity
+              </button>
+            )}
             {rawOutput && (
               <button onClick={() => setShowRaw(!showRaw)} className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
                 {showRaw ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
@@ -447,6 +494,11 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
                 Files edited in this session ({changedFiles.length})
               </button>
             )}
+          </div>
+        )}
+        {showActivity && activity && (
+          <div className="mt-1 p-2 bg-surface-950/60 rounded border border-surface-700/20 text-[12px] text-surface-400 max-h-72 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+            {activity}
           </div>
         )}
         {showRaw && rawOutput && (
