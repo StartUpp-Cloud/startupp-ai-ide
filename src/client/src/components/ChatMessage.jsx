@@ -10,6 +10,72 @@ const ROLE_STYLES = {
 };
 
 /**
+ * Verification strip — renders the diligence verdict attached by the server's
+ * completion gate (whether the agent's work was judged done + verified, how it
+ * was validated, and any outstanding items). Compact by default.
+ */
+function DiligenceStrip({ diligence }) {
+  const [open, setOpen] = useState(false);
+  const v = diligence.verification || {};
+  const done = !!diligence.done;
+  const ran = !!v.ran;
+  const passed = v.passed;
+
+  const tone = done && (passed !== false)
+    ? { border: 'border-emerald-500/30', bg: 'bg-emerald-500/5', text: 'text-emerald-300', Icon: CheckCircle }
+    : passed === false
+      ? { border: 'border-red-500/30', bg: 'bg-red-500/5', text: 'text-red-300', Icon: AlertTriangle }
+      : { border: 'border-amber-500/30', bg: 'bg-amber-500/5', text: 'text-amber-300', Icon: AlertTriangle };
+
+  const verifyLabel = !ran
+    ? 'not verified'
+    : passed === true ? `verified · ${v.kind || 'tests'}`
+    : passed === false ? `${v.kind || 'tests'} failing`
+    : `ran ${v.kind || 'checks'}`;
+
+  const outstanding = Array.isArray(diligence.outstanding) ? diligence.outstanding : [];
+  const hasDetail = outstanding.length > 0 || v.details;
+
+  return (
+    <div className={`mt-2 rounded-md border ${tone.border} ${tone.bg} px-2 py-1.5`}>
+      <button
+        type="button"
+        onClick={() => hasDetail && setOpen(!open)}
+        className={`flex w-full items-center gap-2 text-left text-[11px] ${tone.text} ${hasDetail ? 'cursor-pointer' : 'cursor-default'}`}
+      >
+        <tone.Icon size={12} className="flex-shrink-0" />
+        <span className="font-medium">{done ? 'Done' : 'Needs follow-up'}</span>
+        <span className="text-surface-400">·</span>
+        <span className="text-surface-300">{verifyLabel}</span>
+        {typeof diligence.confidence === 'number' && (
+          <>
+            <span className="text-surface-400">·</span>
+            <span className="text-surface-400">{Math.round(diligence.confidence * 100)}% conf</span>
+          </>
+        )}
+        {diligence.rounds > 0 && (
+          <>
+            <span className="text-surface-400">·</span>
+            <span className="text-surface-400">{diligence.rounds} nudge{diligence.rounds > 1 ? 's' : ''}</span>
+          </>
+        )}
+        {hasDetail && (open ? <ChevronDown size={11} className="ml-auto" /> : <ChevronRight size={11} className="ml-auto" />)}
+      </button>
+      {open && hasDetail && (
+        <div className="mt-1.5 space-y-1 text-[11px] text-surface-300">
+          {v.details && <div className="text-surface-400">{v.details}</div>}
+          {outstanding.length > 0 && (
+            <ul className="list-disc ml-4 space-y-0.5">
+              {outstanding.map((o, i) => <li key={i}>{o}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Lightweight markdown renderer — handles the common formatting cases
  * without pulling in a heavy library.
  */
@@ -244,6 +310,7 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const suggestions = message.metadata?.suggestions;
   const review = message.metadata?.review;
   const logContext = message.metadata?.logContext;
+  const diligence = message.metadata?.diligence;
 
   // Suggestion buttons: render as a row of clickable chips
   if (suggestions && message.metadata?.hidden) {
@@ -360,6 +427,10 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
               Approve &amp; Execute Plan
             </button>
           </div>
+        )}
+
+        {diligence && (
+          <DiligenceStrip diligence={diligence} />
         )}
 
         {(rawOutput || changedFiles.length > 0) && (

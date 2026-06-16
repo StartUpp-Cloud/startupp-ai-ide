@@ -37,6 +37,13 @@ import { buildCompactSalesforceContext } from './salesforce/salesforceContextSer
 import { shouldSuppressAgentProgress } from './orchestratorLiveness.js';
 import { isOpencodeQuietCompletion, parseOpencodeJsonOutput } from './opencodeOutput.js';
 import { buildPromptContextForLLM } from './projectContextService.js';
+import {
+  getDiligenceSettings,
+  diligenceAppliesTo,
+  buildOperatingContract,
+  evaluateCompletion,
+  buildNudgeMessage,
+} from './diligence.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -882,31 +889,45 @@ RULES:
       console.warn(`[agentGateway] Context distillation failed (non-blocking):`, err.message);
     }
 
+    // Shared streaming options — reused by the initial attempt, retries, AND the
+    // diligence nudge loop so follow-up rounds persist/stream identically.
+    const streamOpts = {
+      job, // Pass job for output recording
+      distilledContext, // Pre-computed context brief for follow-up enrichment
+      fileTracker,
+      // Callback to persist chunks as they arrive (for recovery)
+      // NOTE: Raw chunks are saved to disk but NOT broadcast to client
+      // Client only sees progress messages and the final cleaned response
+      onChunk: (chunk) => {
+        chatStore.appendStreamChunk({
+          projectId,
+          sessionId: chatSessionId,
+          messageId: streamingMsg.id,
+          chunk,
+          chunkIndex: chunkIndex++,
+        });
+        // Record output to job (handles timeout tracking, progress parsing)
+        jobManager.recordOutput(job.id, chunk);
+      },
+    };
+
     try {
       for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ctx.aborted; attempt++) {
-        const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode, {
-          job, // Pass job for output recording
-          distilledContext, // Pre-computed context brief for follow-up enrichment
-          fileTracker,
-          // Callback to persist chunks as they arrive (for recovery)
-          // NOTE: Raw chunks are saved to disk but NOT broadcast to client
-          // Client only sees progress messages and the final cleaned response
-          onChunk: (chunk) => {
-            chatStore.appendStreamChunk({
-              projectId,
-              sessionId: chatSessionId,
-              messageId: streamingMsg.id,
-              chunk,
-              chunkIndex: chunkIndex++,
-            });
-            // Record output to job (handles timeout tracking, progress parsing)
-            jobManager.recordOutput(job.id, chunk);
-          },
-        });
+        const result = await this._attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode, streamOpts);
 
         if (result.success) {
+          // ── Diligence gate: assert the work is genuinely done & verified,
+          // nudging the agent through follow-up rounds if not. May append more
+          // output (and a verdict) before we finalize. ──
+          const diligence = await this._runDiligenceLoop({
+            projectId, chatSessionId, tool, mode, goal: message,
+            result, assistantSettings, broadcastFn, ctx, streamOpts, fileTracker,
+          });
+          const combinedDisplay = diligence.displayOutput || result.displayOutput;
+          const combinedClean = diligence.cleanOutput || result.cleanOutput;
+
           // ── Success: format and finalize ──
-          const finalContent = await this._cleanContent(result.displayOutput);
+          const finalContent = await this._cleanContent(combinedDisplay);
           const reviewMeta = await this._analyzeResponseForReview({
             projectId,
             userMessage: message,
@@ -914,8 +935,9 @@ RULES:
             mode,
           });
           const logContext = this._detectLogRequest(finalContent);
-          const rawForDisplay = this._cleanRawOutput(result.cleanOutput);
+          const rawForDisplay = this._cleanRawOutput(combinedClean);
           const changedFiles = fileTracker?.poll().files || [];
+          const diligenceMeta = this._buildDiligenceMeta(diligence);
 
           // Complete the job
           jobManager.completeJob(job.id, finalContent);
@@ -934,6 +956,7 @@ RULES:
               ...(changedFiles.length > 0 ? { changedFiles } : {}),
               ...(reviewMeta ? { review: reviewMeta } : {}),
               ...(logContext ? { logContext } : {}),
+              ...(diligenceMeta ? { diligence: diligenceMeta } : {}),
             },
           });
 
@@ -955,6 +978,7 @@ RULES:
                 ...(changedFiles.length > 0 ? { changedFiles } : {}),
                 ...(reviewMeta ? { review: reviewMeta } : {}),
                 ...(logContext ? { logContext } : {}),
+                ...(diligenceMeta ? { diligence: diligenceMeta } : {}),
               },
             },
           });
@@ -976,7 +1000,7 @@ RULES:
           this._learnDurableMemory(projectId, message, finalContent, { tool, mode }).catch(err => {
             console.warn('[agentGateway] Memory learning skipped:', err.message);
           });
-          return { success: true, content: finalContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, rawOutput: rawForDisplay.slice(-8000), changedFiles };
+          return { success: true, content: finalContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, rawOutput: rawForDisplay.slice(-8000), changedFiles, ...(diligenceMeta ? { diligence: diligenceMeta } : {}) };
         }
 
         if (result.retry && attempt < MAX_ATTEMPTS) {
@@ -1088,6 +1112,78 @@ RULES:
       // Clean up event handler
       jobManager.removeListener('job-progress', jobProgressHandler);
     }
+  }
+
+  /**
+   * Diligence loop — after a successful agent turn, run a skeptical completion
+   * gate and, while the work is judged incomplete/unverified, feed a focused
+   * nudge back into the SAME CLI session (resume) so the agent finishes and
+   * actually validates. Bounded by settings.maxNudges and ctx.aborted.
+   *
+   * Skipped for orchestrated runs (the orchestrator drives its own
+   * liveness/retry loop and we must not fight it), plan modes, weak tools, or
+   * when disabled. Returns the (possibly extended) output plus the final verdict.
+   *
+   * @returns {Promise<{ verdict: object|null, rounds: number, displayOutput: string, cleanOutput: string }>}
+   */
+  async _runDiligenceLoop({ projectId, chatSessionId, tool, mode, goal, result, assistantSettings, broadcastFn, ctx, streamOpts, fileTracker }) {
+    const empty = { verdict: null, rounds: 0, displayOutput: result.displayOutput, cleanOutput: result.cleanOutput };
+    const settings = getDiligenceSettings();
+    if (!diligenceAppliesTo(tool, mode, settings)) return empty;
+    if (ctx.aborted) return empty;
+    // Don't interfere with the autonomous orchestrator's own control loop.
+    if (this._running.get(chatSessionId)?.orchestrated) return empty;
+
+    let displayOutput = result.displayOutput || '';
+    let cleanOutput = result.cleanOutput || '';
+    let verdict = null;
+    let rounds = 0;
+
+    for (let i = 0; i < settings.maxNudges; i++) {
+      if (ctx.aborted) break;
+      const changedFiles = fileTracker?.poll().files || [];
+      verdict = await evaluateCompletion({ goal, transcript: cleanOutput, changedFiles, settings });
+      if (!verdict || verdict.done) break;
+
+      rounds++;
+      this._addProgressMessage(
+        projectId, chatSessionId,
+        `🔍 Verifying completeness — ${verdict.headline || 'asking the agent to finish & validate'}`,
+        broadcastFn, null, { transient: true },
+      );
+
+      const nudgeResult = await this._attemptCliTool(
+        projectId, chatSessionId, buildNudgeMessage(verdict), tool,
+        assistantSettings, broadcastFn, ctx, 1, mode, streamOpts,
+      );
+      if (!nudgeResult || !nudgeResult.success) break;
+
+      displayOutput += '\n\n' + (nudgeResult.displayOutput || '');
+      cleanOutput += '\n\n' + (nudgeResult.cleanOutput || '');
+    }
+
+    // Re-evaluate once more after the last nudge so the surfaced verdict
+    // reflects the final state of the work.
+    if (rounds > 0 && !ctx.aborted) {
+      const changedFiles = fileTracker?.poll().files || [];
+      verdict = (await evaluateCompletion({ goal, transcript: cleanOutput, changedFiles, settings })) || verdict;
+    }
+
+    return { verdict, rounds, displayOutput, cleanOutput };
+  }
+
+  /** Compact verdict metadata for the client verification strip. */
+  _buildDiligenceMeta(diligence) {
+    if (!diligence || !diligence.verdict) return null;
+    const v = diligence.verdict;
+    return {
+      done: !!v.done,
+      confidence: v.confidence,
+      headline: v.headline,
+      verification: v.verification,
+      outstanding: Array.isArray(v.outstanding) ? v.outstanding.slice(0, 6) : [],
+      rounds: diligence.rounds || 0,
+    };
   }
 
   /**
@@ -2130,9 +2226,13 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
         parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
       } else {
         parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done\n- Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.\n- IMPORTANT: Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops). Complete your task with the information available in a single pass and report results immediately.');
-        if (tool === 'codex') {
-          parts.push('\nCODEX QUALITY LOOP: For codebase tasks, explicitly do the full loop inside the Codex run: investigate, plan briefly, implement, inspect the diff, run targeted tests or validation, fix any failures, and only then summarize. Keep working through reasonable follow-up fixes instead of returning a minimal partial answer. Prioritize reliability, maintainability, guardrails, and preserving existing behavior.');
-        }
+
+        // Engineering Diligence Contract — tool-agnostic doctrine that raises
+        // effort/persistence and mandates the verify+report structure. Returns
+        // '' for tools/modes the diligence loop doesn't drive, so this is safe
+        // to push unconditionally. Supersedes the old codex-only quality blurb.
+        const contract = buildOperatingContract({ tool, mode });
+        if (contract) parts.push(`\n${contract}`);
       }
     }
 

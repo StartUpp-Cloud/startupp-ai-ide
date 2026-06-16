@@ -21,6 +21,7 @@ import {
   AlertTriangle,
   RotateCcw,
   Sparkles,
+  CheckCircle,
 } from 'lucide-react';
 
 const API_BASE = '/api';
@@ -61,6 +62,7 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
   const [showApiKey, setShowApiKey] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [activeTab, setActiveTab] = useState('general');
+  const [diligence, setDiligence] = useState(null);
 
   // Load settings on open
   useEffect(() => {
@@ -69,8 +71,35 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
       loadHealth();
       loadOllamaModels();
       loadOpenCodeModels();
+      loadDiligence();
     }
   }, [isOpen, effectiveProjectId]);
+
+  const loadDiligence = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/llm/diligence`);
+      const data = await res.json();
+      if (data?.settings) setDiligence(data.settings);
+    } catch (error) {
+      console.error('Failed to load diligence settings:', error);
+    }
+  };
+
+  const saveDiligence = async (updates) => {
+    // Optimistic update so toggles feel instant
+    setDiligence((prev) => ({ ...(prev || {}), ...updates }));
+    try {
+      const res = await fetch(`${API_BASE}/llm/diligence`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      const data = await res.json();
+      if (data?.settings) setDiligence(data.settings);
+    } catch (error) {
+      console.error('Failed to save diligence settings:', error);
+    }
+  };
 
   const loadSettings = async () => {
     try {
@@ -1221,6 +1250,117 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
               {/* Advanced Tab */}
               {activeTab === 'advanced' && settings && (
                 <div className="space-y-6">
+                  {/* Diligence — quality / completion loop */}
+                  {diligence && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-3">
+                        <CheckCircle className="w-4 h-4 text-emerald-400" />
+                        <label className="text-sm font-medium text-surface-300">
+                          Diligence — quality &amp; completion loop
+                        </label>
+                      </div>
+                      <p className="text-xs text-surface-500 mb-3">
+                        After each agent turn, a strict gate checks the work is actually done and
+                        verified (tests / build / e2e). If not, it nudges the agent to finish &amp;
+                        validate before reporting back.
+                      </p>
+                      <div className="space-y-3">
+                        <label className="flex items-center justify-between p-3 bg-surface-800 rounded-lg border border-surface-700 cursor-pointer hover:border-surface-600">
+                          <div>
+                            <span className="text-sm text-surface-300">Enable diligence loop</span>
+                            <p className="text-xs text-surface-500">
+                              Curate effort, nudge to completion, enforce verification &amp; reporting
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => saveDiligence({ enabled: !diligence.enabled })}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${diligence.enabled ? 'bg-emerald-500' : 'bg-surface-600'}`}
+                          >
+                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${diligence.enabled ? 'translate-x-5' : ''}`} />
+                          </button>
+                        </label>
+
+                        <label className={`flex items-center justify-between p-3 bg-surface-800 rounded-lg border border-surface-700 ${diligence.enabled ? 'cursor-pointer hover:border-surface-600' : 'opacity-50'}`}>
+                          <div>
+                            <span className="text-sm text-surface-300">Require verification</span>
+                            <p className="text-xs text-surface-500">
+                              Treat a turn as incomplete if no tests / build / typecheck were run
+                            </p>
+                          </div>
+                          <button
+                            disabled={!diligence.enabled}
+                            onClick={() => saveDiligence({ requireVerification: !diligence.requireVerification })}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${diligence.requireVerification ? 'bg-emerald-500' : 'bg-surface-600'}`}
+                          >
+                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${diligence.requireVerification ? 'translate-x-5' : ''}`} />
+                          </button>
+                        </label>
+
+                        <div>
+                          <label className="block text-xs text-surface-400 mb-2">
+                            Max nudge rounds ({diligence.maxNudges ?? 2})
+                          </label>
+                          <div className="flex items-center gap-4">
+                            <input
+                              type="range"
+                              min="0"
+                              max="5"
+                              value={diligence.maxNudges ?? 2}
+                              disabled={!diligence.enabled}
+                              onChange={(e) => saveDiligence({ maxNudges: parseInt(e.target.value, 10) })}
+                              className="flex-1 accent-emerald-500"
+                            />
+                            <span className="text-sm text-surface-300 w-12 text-right">{diligence.maxNudges ?? 2}</span>
+                          </div>
+                          <p className="text-xs text-surface-500 mt-1">
+                            How many follow-up rounds to drive before surfacing the result (0 = check only, never nudge)
+                          </p>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs text-surface-400 mb-2">
+                            Min confidence to accept &ldquo;done&rdquo; ({Math.round((diligence.minConfidence ?? 0.7) * 100)}%)
+                          </label>
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={(diligence.minConfidence ?? 0.7) * 100}
+                            disabled={!diligence.enabled}
+                            onChange={(e) => saveDiligence({ minConfidence: parseInt(e.target.value, 10) / 100 })}
+                            className="w-full accent-emerald-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs text-surface-400 mb-2">Apply to tools</label>
+                          <div className="flex flex-wrap gap-2">
+                            {['claude', 'codex', 'opencode', 'copilot'].map((t) => {
+                              const active = Array.isArray(diligence.tools) && diligence.tools.includes(t);
+                              return (
+                                <button
+                                  key={t}
+                                  disabled={!diligence.enabled}
+                                  onClick={() => {
+                                    const cur = Array.isArray(diligence.tools) ? diligence.tools : [];
+                                    const next = active ? cur.filter((x) => x !== t) : [...cur, t];
+                                    saveDiligence({ tools: next });
+                                  }}
+                                  className={`px-3 py-1 rounded-full text-xs border transition-colors ${active ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-200' : 'border-surface-700 text-surface-400 hover:border-surface-600'}`}
+                                >
+                                  {t}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <p className="text-xs text-surface-500 mt-1">
+                            Ollama and Aider are intentionally excluded — the loop only drives capable agents.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* When to use LLM */}
                   <div>
                     <label className="block text-sm font-medium text-surface-300 mb-3">

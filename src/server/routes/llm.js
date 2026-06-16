@@ -7,8 +7,40 @@ import express from 'express';
 import { llmProvider } from '../llmProvider.js';
 import Project from '../models/Project.js';
 import { skillManager } from '../skillManager.js';
+import { getDiligenceSettings, updateDiligenceSettings } from '../diligence.js';
 
 const router = express.Router();
+
+/**
+ * GET /api/llm/diligence - Get the diligence (quality/completion loop) settings.
+ */
+router.get('/diligence', (req, res) => {
+  try {
+    res.json({ success: true, settings: getDiligenceSettings() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * PUT /api/llm/diligence - Update diligence settings (enabled, maxNudges,
+ * requireVerification, minConfidence, tools).
+ */
+router.put('/diligence', async (req, res) => {
+  try {
+    const allowed = ['enabled', 'maxNudges', 'requireVerification', 'minConfidence', 'tools'];
+    const updates = {};
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+    if (typeof updates.maxNudges === 'number') updates.maxNudges = Math.max(0, Math.min(5, Math.round(updates.maxNudges)));
+    if (typeof updates.minConfidence === 'number') updates.minConfidence = Math.max(0, Math.min(1, updates.minConfidence));
+    const settings = await updateDiligenceSettings(updates);
+    res.json({ success: true, settings });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 /**
  * GET /api/llm/settings - Get LLM settings
