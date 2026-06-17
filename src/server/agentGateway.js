@@ -47,6 +47,7 @@ import {
 } from './diligence.js';
 import { checklistTracker } from './checklistTracker.js';
 import { drainSteers, buildSteerPrompt } from './steeringInbox.js';
+import { buildEnvironmentsSummary } from './projectEnvironments.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -2276,12 +2277,18 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
    */
   _getStandingRulesReminder(projectId) {
     const rules = this._getProjectRules(projectId);
-    if (!rules) return '';
-    return [
-      '[STANDING PROJECT RULES — these always apply, including for THIS request.',
-      'If a rule grants you standing approval to perform an action (e.g. deploying to a dev environment), DO IT NOW as part of completing the task — do not stop to ask for confirmation or defer it as a "next step".]',
-      rules,
-    ].join('\n');
+    const environments = buildEnvironmentsSummary(projectId);
+    if (!rules && !environments) return '';
+    const parts = [];
+    if (rules) {
+      parts.push(
+        '[STANDING PROJECT RULES — these always apply, including for THIS request.\n'
+        + 'If a rule grants you standing approval to perform an action (e.g. deploying to a dev environment), DO IT NOW as part of completing the task — do not stop to ask for confirmation or defer it as a "next step".]\n'
+        + rules,
+      );
+    }
+    if (environments) parts.push(environments);
+    return parts.join('\n\n');
   }
 
   _buildProjectMemoryContext(projectId, userMessage = '') {
@@ -2356,6 +2363,11 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     // Project rules
     const rules = this._getProjectRules(projectId);
     if (rules) parts.push(`\n${rules}`);
+
+    // Available environments + test users (non-secret) so the agent can log in
+    // and verify changes end-to-end, honoring read-only targets.
+    const environments = buildEnvironmentsSummary(projectId);
+    if (environments) parts.push(`\n${environments}`);
 
     // Active skills (skip for Ollama models and Aider — incompatible tool-use format)
     if (!isOllamaModel && tool !== 'aider') {

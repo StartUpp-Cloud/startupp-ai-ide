@@ -4,8 +4,16 @@ import Project from "../models/Project.js";
 import { normalizePromptSettings } from "../models/Project.js";
 import { containerManager } from "../containerManager.js";
 import { ptyManager } from "../ptyManager.js";
+import { normalizeEnvironments, maskEnvironmentsForClient } from "../projectEnvironments.js";
 
 const router = express.Router();
+
+/** Replace stored (encrypted) environment secrets with masks before sending to clients. */
+function safeProject(project) {
+  if (!project) return project;
+  if (!Array.isArray(project.environments)) return project;
+  return { ...project, environments: maskEnvironmentsForClient(project.environments) };
+}
 
 function parseOpenCodeModels(raw, source) {
   if (!raw) return [];
@@ -92,7 +100,7 @@ router.get("/", async (req, res) => {
       projects = Project.getAll();
     }
 
-    res.json(projects);
+    res.json(projects.map(safeProject));
   } catch (error) {
     res
       .status(500)
@@ -114,7 +122,7 @@ router.get("/:id", async (req, res) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    res.json(project);
+    res.json(safeProject(project));
   } catch (error) {
     res
       .status(500)
@@ -125,7 +133,7 @@ router.get("/:id", async (req, res) => {
 // POST /api/projects - Create new project
 router.post("/", async (req, res) => {
   try {
-    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath, stack, stackManualOverride, salesforce } = req.body;
+    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath, stack, stackManualOverride, salesforce, environments } = req.body;
 
     // Handle project cloning
     if (cloneFromId) {
@@ -194,9 +202,10 @@ router.post("/", async (req, res) => {
       stack,
       stackManualOverride,
       salesforce: normalizeSalesforceSettings(salesforce),
+      environments,
     });
 
-    res.status(201).json(project);
+    res.status(201).json(safeProject(project));
   } catch (error) {
     res
       .status(500)
@@ -254,7 +263,7 @@ router.post("/:id/clone", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, rules, selectedPresets, promptSettings, folderPath, containerName, gitUrl, repos, containerPorts, containerStatus } = req.body;
+    const { name, description, rules, selectedPresets, promptSettings, folderPath, containerName, gitUrl, repos, containerPorts, containerStatus, environments } = req.body;
 
     const project = Project.findById(id);
     if (!project) {
@@ -322,12 +331,17 @@ router.put("/:id", async (req, res) => {
     if (repos !== undefined) updates.repos = Array.isArray(repos) ? repos : [];
     if (containerPorts !== undefined) updates.containerPorts = Array.isArray(containerPorts) ? containerPorts : [];
     if (containerStatus !== undefined) updates.containerStatus = containerStatus || null;
+    // Normalize against the stored environments so masked (unchanged) secrets
+    // are preserved and any new plaintext secrets are encrypted at rest.
+    if (environments !== undefined) {
+      updates.environments = normalizeEnvironments(environments, project.environments || []);
+    }
 
     const stackError = applyStackUpdates(project, updates, req.body);
     if (stackError) return res.status(400).json({ error: stackError });
 
     const updatedProject = await Project.update(id, updates);
-    res.json(updatedProject);
+    res.json(safeProject(updatedProject));
   } catch (error) {
     res
       .status(500)

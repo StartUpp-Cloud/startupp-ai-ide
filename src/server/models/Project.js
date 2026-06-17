@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import db from "../db.js";
+import { normalizeEnvironments } from "../projectEnvironments.js";
 
 // Project helper functions for LowDB
 
@@ -107,6 +108,7 @@ export async function createProject({
   stackManualOverride,
   stackDetection,
   salesforce,
+  environments,
 }) {
   const now = new Date().toISOString();
   const project = {
@@ -125,6 +127,7 @@ export async function createProject({
     stackManualOverride: stackManualOverride === true,
     stackDetection: stackDetection || null,
     salesforce: salesforce && typeof salesforce === "object" ? salesforce : {},
+    environments: normalizeEnvironments(environments, []),
     promptCount: 0,
     createdAt: now,
     updatedAt: now,

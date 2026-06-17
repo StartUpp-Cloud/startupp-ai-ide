@@ -28,10 +28,12 @@ const EditProject = () => {
     description: "",
     rules: [""],
     selectedPresets: [],
+    environments: [],
   });
   const [errors, setErrors] = useState({});
   const [draggedRuleIndex, setDraggedRuleIndex] = useState(null);
   const [showPresets, setShowPresets] = useState(false);
+  const [showEnvironments, setShowEnvironments] = useState(false);
 
   useEffect(() => {
     loadProject();
@@ -46,10 +48,14 @@ const EditProject = () => {
         description: projectData.description,
         rules: projectData.rules.length > 0 ? projectData.rules : [""],
         selectedPresets: projectData.selectedPresets || [],
+        environments: projectData.environments || [],
       });
       // Auto-expand presets section if project has presets
       if (projectData.selectedPresets?.length > 0) {
         setShowPresets(true);
+      }
+      if (projectData.environments?.length > 0) {
+        setShowEnvironments(true);
       }
     } catch (error) {
       console.error("Failed to load project:", error);
@@ -104,6 +110,36 @@ const EditProject = () => {
     return Object.keys(newErrors).length === 0;
   };
 
+  // ── Environments & test users ──
+  const setEnvs = (environments) =>
+    setFormData((prev) => ({ ...prev, environments }));
+  const addEnvironment = () =>
+    setEnvs([...(formData.environments || []), { name: "", baseUrl: "", writesAllowed: true, testUsers: [] }]);
+  const updateEnvironment = (i, patch) => {
+    const envs = [...formData.environments];
+    envs[i] = { ...envs[i], ...patch };
+    setEnvs(envs);
+  };
+  const removeEnvironment = (i) =>
+    setEnvs(formData.environments.filter((_, x) => x !== i));
+  const addTestUser = (i) => {
+    const envs = [...formData.environments];
+    envs[i] = { ...envs[i], testUsers: [...(envs[i].testUsers || []), { label: "", username: "", tenantId: "", role: "", password: "" }] };
+    setEnvs(envs);
+  };
+  const updateTestUser = (i, j, patch) => {
+    const envs = [...formData.environments];
+    const users = [...(envs[i].testUsers || [])];
+    users[j] = { ...users[j], ...patch };
+    envs[i] = { ...envs[i], testUsers: users };
+    setEnvs(envs);
+  };
+  const removeTestUser = (i, j) => {
+    const envs = [...formData.environments];
+    envs[i] = { ...envs[i], testUsers: envs[i].testUsers.filter((_, x) => x !== j) };
+    setEnvs(envs);
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validateForm()) return;
@@ -115,6 +151,7 @@ const EditProject = () => {
         description: formData.description.trim(),
         rules: formData.rules.filter((r) => r.trim()),
         selectedPresets: formData.selectedPresets,
+        environments: formData.environments,
       });
       navigate(`/project/${id}`);
     } catch (error) {
@@ -306,6 +343,92 @@ const EditProject = () => {
           </button>
 
           {errors.rules && <p className="text-error">{errors.rules}</p>}
+        </div>
+
+        {/* Environments & Test Users */}
+        <div className="card">
+          <button
+            type="button"
+            onClick={() => setShowEnvironments(!showEnvironments)}
+            className="flex items-center justify-between w-full text-left"
+          >
+            <div>
+              <span className="text-sm font-medium text-surface-200">
+                Environments &amp; Test Users
+              </span>
+              <p className="text-hint mt-0.5">
+                Let the agent log in and verify changes end-to-end. Passwords are encrypted at rest and never shown to the model.
+              </p>
+            </div>
+            <ChevronDown
+              className={`w-4 h-4 text-surface-400 transition-transform flex-shrink-0 ${showEnvironments ? "rotate-180" : ""}`}
+            />
+          </button>
+
+          {showEnvironments && (
+            <div className="mt-4 pt-4 border-t border-surface-700/60 space-y-4">
+              {(formData.environments || []).map((env, i) => (
+                <div key={i} className="p-3 bg-surface-700/30 rounded-lg space-y-3">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={env.name || ""}
+                      onChange={(e) => updateEnvironment(i, { name: e.target.value })}
+                      placeholder="Name (e.g. dev, staging, prod)"
+                      className="input !py-2 text-sm flex-1"
+                    />
+                    <button type="button" onClick={() => removeEnvironment(i)} className="btn-icon !p-1.5 text-danger-400">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <input
+                    type="url"
+                    value={env.baseUrl || ""}
+                    onChange={(e) => updateEnvironment(i, { baseUrl: e.target.value })}
+                    placeholder="Base URL (e.g. https://dev.example.com)"
+                    className="input !py-2 text-sm w-full"
+                  />
+                  <label className="flex items-center gap-2 text-sm text-surface-300">
+                    <input
+                      type="checkbox"
+                      checked={env.writesAllowed !== false}
+                      onChange={(e) => updateEnvironment(i, { writesAllowed: e.target.checked })}
+                    />
+                    Writes allowed (uncheck for read-only — blocks create/update/delete, recommended for prod)
+                  </label>
+
+                  <div className="space-y-2">
+                    <div className="text-xs text-surface-400">Test users</div>
+                    {(env.testUsers || []).map((u, j) => (
+                      <div key={j} className="grid grid-cols-2 gap-2 items-center sm:grid-cols-5">
+                        <input type="text" value={u.label || ""} onChange={(e) => updateTestUser(i, j, { label: e.target.value })} placeholder="label" className="input !py-1.5 text-xs" />
+                        <input type="text" value={u.username || ""} onChange={(e) => updateTestUser(i, j, { username: e.target.value })} placeholder="username/email" className="input !py-1.5 text-xs" />
+                        <input type="text" value={u.tenantId || ""} onChange={(e) => updateTestUser(i, j, { tenantId: e.target.value })} placeholder="tenantId" className="input !py-1.5 text-xs" />
+                        <input type="password" value={u.password || ""} onChange={(e) => updateTestUser(i, j, { password: e.target.value })} placeholder={u.hasSecret ? "•••• (stored)" : "password"} className="input !py-1.5 text-xs" />
+                        <div className="flex items-center gap-1">
+                          <input type="text" value={u.role || ""} onChange={(e) => updateTestUser(i, j, { role: e.target.value })} placeholder="role" className="input !py-1.5 text-xs flex-1" />
+                          <button type="button" onClick={() => removeTestUser(i, j)} className="btn-icon !p-1 text-danger-400">
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    <button type="button" onClick={() => addTestUser(i)} className="flex items-center gap-1.5 text-xs text-primary-400 hover:text-primary-300">
+                      <Plus className="w-3 h-3" />
+                      Add test user
+                    </button>
+                  </div>
+                  <p className="text-hint">
+                    Tip: add ≥2 users with different <span className="font-mono">tenantId</span> values to enable the cross-tenant isolation probe.
+                  </p>
+                </div>
+              ))}
+              <button type="button" onClick={addEnvironment} className="flex items-center gap-1.5 text-sm text-primary-400 hover:text-primary-300">
+                <Plus className="w-3.5 h-3.5" />
+                Add environment
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Actions */}

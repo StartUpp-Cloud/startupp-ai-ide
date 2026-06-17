@@ -58,6 +58,15 @@ const DANGEROUS_PATTERNS = [
   { pattern: /git\s+commit|git\s+push(?!\s+.*--force)/i, risk: RISK.LOW, reason: 'Git commit/push' },
 ];
 
+// Operations that mutate remote/app state — blocked against read-only
+// environments (e.g. production) where writesAllowed is false.
+const MUTATING_OP_PATTERNS = [
+  { pattern: /\b(DELETE\s+FROM|UPDATE\s+\w|INSERT\s+INTO|DROP\s+|TRUNCATE)\b/i, reason: 'SQL write/delete' },
+  { pattern: /\bcurl\b[^|]*\s-X\s*(POST|PUT|PATCH|DELETE)\b/i, reason: 'HTTP write request (curl)' },
+  { pattern: /\b(fetch|axios|http)\b[^\n]*(method\s*:\s*['"]?(POST|PUT|PATCH|DELETE)|\.(post|put|patch|delete)\s*\()/i, reason: 'HTTP write request' },
+  { pattern: /\b(rm|unlink|rmdir)\b|\bdrop\b|\bdelete\b|\bdestroy\b|\bwipe\b|\bpurge\b/i, reason: 'Destructive operation' },
+];
+
 // Default safety settings (mirrors db.js defaultSafetySettings)
 const DEFAULT_SETTINGS = {
   maxStepsPerPlan: 50,
@@ -69,6 +78,7 @@ const DEFAULT_SETTINGS = {
   pauseOnHighRisk: true,
   allowedPaths: [],
   blockedCommands: [],
+  enforceEnvironmentReadOnly: true, // block mutating ops against read-only envs
 };
 
 class SafetySystem {
@@ -161,6 +171,31 @@ class SafetySystem {
       reasons,
       requiresConfirmation,
     };
+  }
+
+  /**
+   * Check whether a command/step is safe to run against a given environment.
+   * Mutating operations (writes/deletes/HTTP POST·PUT·PATCH·DELETE/SQL writes)
+   * are blocked when the environment is read-only (writesAllowed === false),
+   * e.g. production. Read-only assertions are always allowed.
+   *
+   * @param {string} promptText - The command/step text.
+   * @param {{ name?: string, writesAllowed?: boolean }} environment
+   * @returns {{ safe: boolean, blocked: boolean, reasons: string[] }}
+   */
+  checkEnvironmentSafety(promptText, environment) {
+    const settings = this.getSettings();
+    if (!environment || environment.writesAllowed !== false || !settings.enforceEnvironmentReadOnly) {
+      return { safe: true, blocked: false, reasons: [] };
+    }
+    const reasons = [];
+    for (const { pattern, reason } of MUTATING_OP_PATTERNS) {
+      if (pattern.test(promptText)) {
+        reasons.push(`${reason} blocked against read-only environment "${environment.name || 'env'}"`);
+      }
+    }
+    const blocked = reasons.length > 0;
+    return { safe: !blocked, blocked, reasons };
   }
 
   /**

@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { sessionHistory } from './sessionHistory.js';
 import { dockerEnvFlags, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
+import { resolveEnvironmentSecrets } from './projectEnvironments.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -219,6 +220,12 @@ class PTYManager extends EventEmitter {
     let shell, args, spawnCwd;
     const runtimeTarget = role === 'agent' ? 'agent' : 'pty';
     const runtimeEnv = projectId ? resolveRuntimeEnvironment({ projectId, target: runtimeTarget }).env : {};
+    // Inject decrypted test-user credentials + env base URLs so the agent can
+    // actually log in and exercise the running app (names advertised in the
+    // <available_environments> context block).
+    if (projectId) {
+      try { Object.assign(runtimeEnv, resolveEnvironmentSecrets(projectId)); } catch {}
+    }
 
     if (containerName) {
       // We spawn /bin/bash and exec into docker from there, because node-pty's
