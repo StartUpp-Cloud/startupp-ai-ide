@@ -644,6 +644,7 @@ class TerminalServer {
         const { chatStore } = await import('./chatStore.js');
         const { agentGateway } = await import('./agentGateway.js');
         const { agentOrchestrator } = await import('./agentOrchestrator.js');
+        const { classifySteerUrgency, addSteer } = await import('./steeringInbox.js');
 
         if (!payload.projectId) {
           this.sendError(ws, 'projectId is required');
@@ -725,6 +726,41 @@ class TerminalServer {
         // Auto-name session on first message (before routing fork so both
         // gateway and orchestrator paths trigger naming).
         agentGateway.autoNameSession(payload.projectId, chatSessionId, payload.content);
+
+        // ── Steering: if a run/turn is already in flight for this session, fold
+        // this message into it instead of spawning a duplicate run. Smart triage:
+        // a clear correction ("stop", "actually no…") interrupts and redirects;
+        // anything else is queued and folded in at the next safe boundary. ──
+        const sessionBusy = agentOrchestrator.hasActiveSession(payload.projectId, chatSessionId)
+          || agentGateway.isBusy(chatSessionId);
+        if (sessionBusy) {
+          const urgent = classifySteerUrgency(payload.content) === 'urgent';
+          const steerNote = (text) => sharedBroadcast({
+            type: 'chat-progress',
+            projectId: payload.projectId,
+            message: {
+              id: `steer-${Date.now()}`,
+              sessionId: chatSessionId,
+              role: 'progress',
+              content: text,
+              createdAt: new Date().toISOString(),
+              metadata: { transient: true },
+            },
+          });
+          if (urgent) {
+            // Interrupt the current turn; this message becomes a fresh turn that
+            // also drains any previously-queued steers.
+            steerNote('↪️ Redirecting the agent to your new message…');
+            agentGateway.abort(chatSessionId);
+            agentOrchestrator.abortSession(chatSessionId);
+            // fall through to route a fresh run/turn below
+          } else {
+            // Queue and let the active run fold it in at its next boundary.
+            addSteer(chatSessionId, agentContent, { urgent: false });
+            steerNote('📨 Queued — the agent will fold this into the current run at its next step.');
+            break;
+          }
+        }
 
         const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({ mode: payload.mode, content: payload.content });
         const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);

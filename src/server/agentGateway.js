@@ -46,6 +46,7 @@ import {
   parseAgentReport,
 } from './diligence.js';
 import { checklistTracker } from './checklistTracker.js';
+import { drainSteers, buildSteerPrompt } from './steeringInbox.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -894,6 +895,15 @@ RULES:
       console.warn(`[agentGateway] Context distillation failed (non-blocking):`, err.message);
     }
 
+    // Fold any steers queued before this turn began (e.g. while a prior turn was
+    // finishing, or carried over by an urgent redirect) into the opening message.
+    try {
+      const preSteers = drainSteers(this._steerKey(projectId, chatSessionId));
+      if (preSteers.length) {
+        message = `${buildSteerPrompt(preSteers)}\n\n---\n\n${message}`;
+      }
+    } catch {}
+
     // Shared streaming options — reused by the initial attempt, retries, AND the
     // diligence nudge loop so follow-up rounds persist/stream identically.
     const streamOpts = {
@@ -1162,26 +1172,53 @@ RULES:
    */
   async _runDiligenceLoop({ projectId, chatSessionId, tool, mode, goal, result, assistantSettings, broadcastFn, ctx, streamOpts, fileTracker, messageId }) {
     const empty = { verdict: null, rounds: 0, displayOutput: result.displayOutput, cleanOutput: result.cleanOutput };
-    const settings = getDiligenceSettings();
-    if (!diligenceAppliesTo(tool, mode, settings)) return empty;
     if (ctx.aborted) return empty;
-    // Orchestrated runs: the loop runs INSIDE the single task turn the
-    // orchestrator awaits, so it doesn't double-drive. We still honor it because
-    // single-task runs (e.g. "deploy and report back") are exactly where the
-    // verdict + verification visibility matters most. The orchestrator's
-    // liveness monitor only fires on silence, and nudge rounds produce activity.
+    const settings = getDiligenceSettings();
+    // Diligence nudging applies to capable tools/agent mode. Steer folding
+    // applies to ALL turns (so the user can always keep typing), so the loop
+    // runs whenever either is relevant. Orchestrated runs are included: this
+    // runs INSIDE the single task turn the orchestrator awaits, so it doesn't
+    // double-drive.
+    const diligenceOn = diligenceAppliesTo(tool, mode, settings);
+    const steerKey = this._steerKey(projectId, chatSessionId);
 
     let displayOutput = result.displayOutput || '';
     let cleanOutput = result.cleanOutput || '';
     let verdict = null;
     let rounds = 0;
+    let steerRounds = 0;
+    const MAX_STEER_ROUNDS = 6; // generous — the user explicitly wants these addressed
     // Standing rules feed the gate so it can catch deferred rule-approved
     // actions (e.g. "deploy is the next step if you want" when a rule says
     // always deploy to dev-1) and nudge the agent to actually perform them.
     const rules = this._getProjectRules(projectId);
 
-    for (let i = 0; i < settings.maxNudges; i++) {
-      if (ctx.aborted) break;
+    while (!ctx.aborted) {
+      // 1) User steers ALWAYS take priority over auto-nudges.
+      const steers = drainSteers(steerKey);
+      if (steers.length) {
+        if (++steerRounds > MAX_STEER_ROUNDS) break;
+        this._addProgressMessage(
+          projectId, chatSessionId,
+          `↪️ Folding in your follow-up${steers.length > 1 ? ` (${steers.length} messages)` : ''}…`,
+          broadcastFn, null, { transient: true },
+        );
+        if (messageId) {
+          checklistTracker.note(messageId, '↪️ Folding in your follow-up', 'active',
+            steers.map(s => s.content).join(' · ').slice(0, 200));
+        }
+        const steerResult = await this._attemptCliTool(
+          projectId, chatSessionId, buildSteerPrompt(steers), tool,
+          assistantSettings, broadcastFn, ctx, 1, mode, streamOpts,
+        );
+        if (!steerResult || !steerResult.success) break;
+        displayOutput += '\n\n' + (steerResult.displayOutput || '');
+        cleanOutput += '\n\n' + (steerResult.cleanOutput || '');
+        continue; // re-check for more steers, then diligence
+      }
+
+      // 2) Diligence nudges (bounded, capable tools only).
+      if (!diligenceOn || rounds >= settings.maxNudges) break;
       const changedFiles = fileTracker?.poll().files || [];
       verdict = await evaluateCompletion({ goal, transcript: cleanOutput, changedFiles, rules, settings });
       if (!verdict || verdict.done) break;
@@ -1192,7 +1229,6 @@ RULES:
         `🔍 Verifying completeness — ${verdict.headline || 'asking the agent to finish & validate'}`,
         broadcastFn, null, { transient: true },
       );
-      // Surface the verification milestone as a live check.
       if (messageId) {
         checklistTracker.note(messageId, `🔍 Verifying completeness (round ${rounds})`, 'active',
           (verdict.outstanding || []).slice(0, 3).join(' · ') || verdict.headline || '');
@@ -1208,14 +1244,27 @@ RULES:
       cleanOutput += '\n\n' + (nudgeResult.cleanOutput || '');
     }
 
-    // Re-evaluate once more after the last nudge so the surfaced verdict
-    // reflects the final state of the work.
-    if (rounds > 0 && !ctx.aborted) {
+    // Re-evaluate once more so the surfaced verdict reflects the final state.
+    if ((rounds > 0 || steerRounds > 0) && !ctx.aborted && diligenceOn) {
       const changedFiles = fileTracker?.poll().files || [];
       verdict = (await evaluateCompletion({ goal, transcript: cleanOutput, changedFiles, rules, settings })) || verdict;
     }
 
     return { verdict, rounds, displayOutput, cleanOutput };
+  }
+
+  /**
+   * The session key under which the user's steering messages are queued. For
+   * orchestrated child sessions this is the parent (user-facing) session, so a
+   * steer typed in the chat reaches the child agent turn that's actually running.
+   */
+  _steerKey(projectId, chatSessionId) {
+    try {
+      const meta = chatSessionId ? chatStore.getSession(projectId, chatSessionId) : null;
+      return meta?.parentSessionId || chatSessionId;
+    } catch {
+      return chatSessionId;
+    }
   }
 
   /** Compact verdict metadata for the client verification strip. */
@@ -2817,6 +2866,12 @@ Reply with exactly one word: YES or NO.`,
   // ── Helpers ──
 
   isRunning(sessionId) {
+    const entry = this._running.get(sessionId);
+    return !!(entry && !entry.aborted);
+  }
+
+  /** Whether a (non-orchestrated) agent turn is currently in flight for a session. */
+  isBusy(sessionId) {
     const entry = this._running.get(sessionId);
     return !!(entry && !entry.aborted);
   }
