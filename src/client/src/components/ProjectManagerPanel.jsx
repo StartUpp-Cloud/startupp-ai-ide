@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useProjects } from "../contexts/ProjectContext";
 import useProjectForm from "../hooks/useProjectForm";
 import ProjectFormFields from "./ProjectFormFields";
+import EnvironmentsEditor from "./EnvironmentsEditor";
 import {
   FolderOpen,
   Plus,
@@ -737,6 +738,7 @@ function EditModal({ project, onClose, onSaved }) {
   const [showPresets, setShowPresets] = useState(
     (project.selectedPresets?.length || 0) > 0,
   );
+  const [environments, setEnvironments] = useState(project.environments || []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -750,6 +752,7 @@ function EditModal({ project, onClose, onSaved }) {
         selectedPresets: form.formData.selectedPresets,
         excludedPresetRules: form.formData.excludedPresetRules || [],
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
+        environments,
       });
       onSaved();
     } catch {
@@ -768,6 +771,10 @@ function EditModal({ project, onClose, onSaved }) {
           showPresets={showPresets}
           setShowPresets={setShowPresets}
         />
+
+        <div className="mt-4">
+          <EnvironmentsEditor environments={environments} onChange={setEnvironments} />
+        </div>
 
         <div className="flex justify-end gap-2 pt-4 mt-4 border-t border-surface-700/60">
           <button type="button" onClick={onClose} className="btn-secondary">
