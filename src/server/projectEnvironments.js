@@ -131,16 +131,23 @@ export function buildEnvironmentsSummary(projectId) {
   const envs = getProjectEnvironments(projectId);
   if (!envs.length) return '';
   const lines = ['<available_environments>'];
-  lines.push('You can log in and exercise the running app to verify changes end-to-end. Secrets are NOT shown here — each test user\'s password is provided at runtime in the named environment variable (e.g. read it with `printenv` / `process.env`). Never print secret values.');
+  lines.push(
+    'TEST ACCESS — the user has configured real, working test logins below. When the user asks you to verify, validate, test, log in, reproduce, or check behavior against any of these environments (including production), you ARE EXPECTED AND ENCOURAGED to actually do it — do not say you lack access or credentials, and do not merely describe what you would do. Concretely:',
+  );
+  lines.push('- Use the environment\'s baseUrl and log in as the named test user. The password is NOT shown here; it is injected into your shell as the named environment variable — read it at runtime (e.g. `printenv VAR` in bash, or `process.env.VAR` in Node). Never print or echo a secret value.');
+  lines.push('- READ-ONLY environments: you MAY still log in and READ/verify/assert — read access is encouraged. Only creating/updating/deleting data is disallowed there.');
+  lines.push('- Prefer curl/HTTP or the app\'s API for login + assertions; drive a browser only if needed. Report exactly what you logged in as, what you checked, and the observed result.');
+  lines.push('- If a password environment variable is empty/unset, this terminal session was started BEFORE these credentials were configured — tell the user to open a NEW session (or restart the project container) and retry; do NOT silently give up.');
   for (const env of envs) {
-    lines.push(`\n- ${env.label} (name: "${env.name}") — ${env.writesAllowed ? 'WRITES ALLOWED' : 'READ-ONLY (do not create/update/delete data here)'}`);
-    if (env.baseUrl) lines.push(`  baseUrl: ${env.baseUrl}`);
+    lines.push(`\n- ${env.label} (name: "${env.name}") — ${env.writesAllowed ? 'WRITES ALLOWED (you may create/update/delete here)' : 'READ-ONLY (log in & read/verify OK; do NOT create/update/delete)'}`);
+    if (env.baseUrl) lines.push(`  baseUrl: ${env.baseUrl} (also in $TESTENV_${slug(env.name)}_BASEURL)`);
+    if (!(env.testUsers || []).length) lines.push('  (no test users configured for this environment yet)');
     for (const u of env.testUsers || []) {
       const parts = [`  test user "${u.label}"`];
       if (u.username) parts.push(`username=${u.username}`);
       if (u.tenantId) parts.push(`tenantId=${u.tenantId}`);
       if (u.role) parts.push(`role=${u.role}`);
-      if (u.secretEnc) parts.push(`password in $${testUserEnvVar(env.name, u.label)}`);
+      parts.push(u.secretEnc ? `password in env var $${testUserEnvVar(env.name, u.label)}` : 'NO PASSWORD SET (ask the user to add one)');
       lines.push(parts.join(' · '));
     }
   }
