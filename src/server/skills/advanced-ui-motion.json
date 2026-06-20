@@ -1,0 +1,31 @@
+{
+  "id": "advanced-ui-motion",
+  "name": "Advanced UI & Motion",
+  "description": "Implement and fix complex UI: sticky/scroll effects, transitions, micro-interactions, scroll-linked animations, parallax, and WebGL/Three.js — smooth, accessible, and performant.",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "wand",
+  "category": "frontend",
+  "defaultOn": true,
+  "rules": [
+    "Animate only cheap properties: transform and opacity. Never animate layout-affecting properties (top/left/width/height/margin) in hot paths — use transforms. Promote with will-change sparingly and remove it after.",
+    "Always honor prefers-reduced-motion: provide a reduced/disabled variant for non-essential motion. Motion should enhance, never block content or trap users.",
+    "Sticky done right: prefer position: sticky over scroll-jacking JS. Ensure the sticky element's ancestor chain has no overflow:hidden/auto that breaks it, give it a top offset, and watch for transformed ancestors (a transform on a parent breaks position:fixed/sticky).",
+    "Scroll-linked animations: prefer the modern scroll-driven animations (animation-timeline: scroll()/view()) where supported, otherwise IntersectionObserver for reveal-on-scroll and a rAF-batched scroll handler for progress. Never do heavy work directly in a scroll event — throttle/rAF and avoid forced reflows (batch reads then writes).",
+    "Use the right tool: CSS transitions/keyframes for simple state/enter-exit; a library (Framer Motion / Motion One / GSAP + ScrollTrigger) for orchestrated sequences, shared-layout, and timeline control. Don't hand-roll spring physics when a library does it well.",
+    "Enter/exit & layout transitions: use AnimatePresence (Framer Motion) or FLIP for list reordering and route transitions so elements move smoothly instead of popping.",
+    "Performance budget: keep animations at 60fps. Check for jank with devtools; avoid animating large blurred shadows/filters, large repaint areas, and too many simultaneously animated nodes. Composite layers intentionally.",
+    "WebGL/Three.js: prefer react-three-fiber + drei in React. Dispose geometries/materials/textures on unmount (no leaks). Cap devicePixelRatio (min(2, dpr)), pause the render loop when offscreen/hidden, lazy-load the 3D bundle, and provide a non-WebGL fallback. Keep draw calls and shader complexity in check.",
+    "Accessibility & robustness: keep focus order sane during animated transitions, don't animate away focus, ensure content is readable mid-animation, and make sure animations don't cause content reflow/CLS.",
+    "Debugging complex UI issues: reproduce minimally, inspect the stacking/containing-block context (transform/filter/will-change create new containing blocks that break fixed/sticky), check z-index within stacking contexts, and verify overflow and contain properties. State the exact root cause when you fix it."
+  ],
+  "conventions": "Common fixes:\n- 'position: sticky not working' → an ancestor has overflow other than visible, the element has no top/bottom offset, or a parent has a transform/filter creating a containing block. Fix the ancestor, not the element.\n- 'fixed header jumps / z-index ignored' → element is inside a stacking context created by a transformed/filtered/opacity<1 ancestor; move it out or raise the right context.\n- 'janky scroll animation' → work happening in the scroll handler; move to IntersectionObserver/scroll-driven CSS or rAF, and avoid read-after-write reflows.\n- 'animation stutters on mobile' → animating non-composited properties or too-large blur/shadow; switch to transform/opacity and reduce filter area.\n\nReach-for list: CSS scroll-driven animations (animation-timeline), IntersectionObserver, Framer Motion (React), Motion One (vanilla/light), GSAP + ScrollTrigger (complex timelines), Lenis (smooth scroll, used judiciously with reduced-motion respect), react-three-fiber + drei (WebGL). Always verify with reduced-motion on and on a mid-tier mobile profile.",
+  "triggers": [
+    { "filePattern": "*.tsx", "description": "React components" },
+    { "filePattern": "*.jsx", "description": "React components" },
+    { "filePattern": "*.css", "description": "Stylesheets/animations" },
+    { "filePattern": "*.glsl", "description": "Shaders" },
+    { "filePattern": "*.vert", "description": "Vertex shaders" },
+    { "filePattern": "*.frag", "description": "Fragment shaders" }
+  ]
+}

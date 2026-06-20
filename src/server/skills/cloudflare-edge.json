@@ -1,0 +1,26 @@
+{
+  "id": "cloudflare-edge",
+  "name": "Cloudflare & Edge",
+  "description": "Build and ship correctly on Cloudflare Workers/Pages and the edge runtime — bindings, Wrangler, KV/D1/R2/Durable Objects, and safe deploys.",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "cloud",
+  "category": "deployment",
+  "defaultOn": false,
+  "rules": [
+    "Respect the Workers runtime: it is NOT Node. No fs/net/child_process; use Web APIs (fetch, Request/Response, Web Crypto, streams). For Node built-ins, enable nodejs_compat in wrangler config and import from node:* explicitly.",
+    "Configuration lives in wrangler.toml / wrangler.jsonc. Define bindings (KV, D1, R2, Durable Objects, Queues, Service bindings, Vars/Secrets) there, and access them via the env argument — never via process.env at the edge.",
+    "Secrets via `wrangler secret put` (or the dashboard), never committed. Use vars for non-secret config. Read both off env.",
+    "Pick the right storage: KV (eventually-consistent, read-heavy cache/config), D1 (relational SQL), R2 (objects/files, S3-compatible, no egress fees), Durable Objects (strongly-consistent coordination/state, websockets). Don't reach for a Worker when Cloudflare Pages + Functions is simpler for a site.",
+    "Static sites / frontends: deploy with Cloudflare Pages; put dynamic logic in Pages Functions or a bound Worker. Use the framework's CF adapter (e.g. @astrojs/cloudflare, @sveltejs/adapter-cloudflare, Next-on-Pages) rather than assuming a Node host.",
+    "Deploy safely: build, then `wrangler deploy` (Workers) / `wrangler pages deploy` (Pages). Use --env / separate wrangler environments for dev/staging/prod, prefer preview deployments, and confirm bindings exist in the target environment before promoting.",
+    "Mind limits: CPU time per request, request size, subrequest counts, and bundle size. Stream large responses, cache with the Cache API / cf object, and offload heavy/async work to Queues or waitUntil().",
+    "Observability: enable Workers logs/tail (`wrangler tail`), add structured logging, and handle errors with proper status codes. Never leak secrets or stack internals to the client."
+  ],
+  "conventions": "Defaults: TypeScript Workers with module syntax (export default { fetch(req, env, ctx) }). Generate types with `wrangler types`. Use Hono for routing on Workers when an app framework helps. For full-stack, prefer the framework's official Cloudflare adapter + Pages.\n\nDeploy checklist before shipping: bindings present in target env, secrets set, nodejs_compat flag if needed, build passes, preview verified, then deploy to the intended environment only (honor any project rule about which environments you may deploy to).",
+  "triggers": [
+    { "filePattern": "wrangler.toml", "description": "Wrangler config" },
+    { "filePattern": "wrangler.jsonc", "description": "Wrangler config" },
+    { "filePattern": "wrangler.json", "description": "Wrangler config" }
+  ]
+}

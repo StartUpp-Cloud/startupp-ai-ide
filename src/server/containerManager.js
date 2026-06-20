@@ -211,6 +211,10 @@ class ContainerManager extends EventEmitter {
 
       // Configure OpenCode for Ollama with high context
       this.configureOpenCodeOllama(containerName);
+      // Provision curated MCP servers into the CLI tool configs (best-effort).
+      import('./mcpProvisioner.js')
+        .then((m) => m.provisionContainerMcp(containerName))
+        .catch(() => {});
 
       // Clone repos — supports multiple repos for monorepo/multi-service workspaces
       const repoList = repos.length > 0
@@ -255,6 +259,12 @@ class ContainerManager extends EventEmitter {
       });
       // Ensure OpenCode is configured for Ollama on each start
       this.configureOpenCodeOllama(containerName);
+      // Provision curated MCP servers into the CLI tools (best-effort; keeps
+      // existing containers up to date on their next start). Dynamic import
+      // avoids a circular dependency.
+      import('./mcpProvisioner.js')
+        .then((m) => m.provisionContainerMcp(containerName))
+        .catch(() => {});
       return true;
     } catch {
       return false;

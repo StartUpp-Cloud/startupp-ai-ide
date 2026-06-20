@@ -888,9 +888,26 @@ class SkillManager {
       ? project.activeSkills
       : [];
 
-    return activeIds
-      .map((id) => this.get(id))
-      .filter(Boolean);
+    // Explicitly-activated skills first, then any "default-on" built-in skills
+    // (the bundled house skills — premium UI/UX, design, motion, security, edge)
+    // so every project gets them out of the box, for every CLI agent, without
+    // manual activation. A project can opt out via disabledDefaultSkills.
+    const disabled = new Set(project.disabledDefaultSkills || []);
+    const result = [];
+    const seen = new Set();
+    for (const id of activeIds) {
+      const skill = this.get(id);
+      if (skill && !seen.has(id)) { seen.add(id); result.push(skill); }
+    }
+    for (const skill of this._defaultOnSkills()) {
+      if (!seen.has(skill.id) && !disabled.has(skill.id)) { seen.add(skill.id); result.push(skill); }
+    }
+    return result;
+  }
+
+  /** Built-in skills flagged defaultOn — applied to every project automatically. */
+  _defaultOnSkills() {
+    return Array.from(this.builtInSkills.values()).filter((s) => s && s.defaultOn);
   }
 
   /**

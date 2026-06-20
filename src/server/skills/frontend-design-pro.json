@@ -1,0 +1,38 @@
+{
+  "id": "frontend-design-pro",
+  "name": "Frontend Design Pro",
+  "description": "Ship beautiful, modern, conversion-focused websites by default — premium design systems, typography, layout, and accessibility for service businesses (medical, dental, real estate, legal, etc.).",
+  "version": "1.0.0",
+  "author": "StartUpp AI IDE",
+  "icon": "palette",
+  "category": "frontend",
+  "defaultOn": true,
+  "rules": [
+    "Design like a top studio by default: no generic 'AI-looking' Bootstrap/cookie-cutter layouts. Every page should look intentionally designed, with a clear visual hierarchy and a confident point of view.",
+    "Establish a real design system first: a type scale, an 8px spacing scale, a restrained color palette (1 brand color + neutrals + 1 accent), consistent radii, and 2-3 shadow elevations. Use design tokens / CSS variables (or Tailwind theme) — never hard-code one-off values.",
+    "Typography carries the design: pair a characterful display/heading font with a highly legible body font (e.g. via next/font or Fontsource). Use a modular scale, generous line-height (1.5-1.7 body), tight headings, and limit body measure to ~60-75ch.",
+    "Use whitespace generously and a consistent vertical rhythm. Most amateur sites are too cramped — give sections breathing room (clamp() based section padding) and align everything to the spacing scale.",
+    "Strong, specific hero: a clear value proposition headline, a supporting subhead, ONE primary CTA, social proof, and a high-quality visual. Avoid vague stock-photo + lorem ipsum energy.",
+    "Mobile-first and fully responsive: design the small screen first, use fluid type/space with clamp(), test at 360 / 768 / 1280 / 1536. No horizontal scroll, no tap targets under 44px.",
+    "Accessibility is non-negotiable: semantic HTML, labelled controls, visible focus states, WCAG AA contrast (4.5:1 text), prefers-reduced-motion honored, alt text, and keyboard operability. Run an axe pass mentally before declaring done.",
+    "Performance is part of the design: optimize images (next/image or responsive <img> + AVIF/WebP), lazy-load below the fold, avoid layout shift (reserve dimensions), and keep the hero LCP fast.",
+    "Polish the details that signal quality: hover/active/focus states on every interactive element, smooth but subtle transitions, consistent icon set (lucide/heroicons), rounded-but-consistent corners, and aligned optical spacing.",
+    "Conversion-first for service businesses: above-the-fold CTA, trust signals (reviews, credentials, certifications, 'as seen in'), clear services overview, an easy contact/booking path, location/hours, and a sticky or prominent 'Book / Call' action on mobile."
+  ],
+  "conventions": "Industry cues (apply tastefully, don't stereotype):\n- Medical/Dental: calm, clean, trustworthy. Blues/greens/teals, soft neutrals, lots of whitespace, real (or realistic) team/clinic photography, clear services + insurance + booking, reassurance copy. Prominent 'Book appointment' and phone.\n- Real estate: aspirational and visual. Large imagery/galleries, elegant serif or refined sans, property cards with consistent metadata, map, agent bio with credibility, strong 'Schedule a viewing / Get a valuation' CTAs.\n- Legal/Professional: authoritative, restrained, high-contrast typography, credentials and case results, trust and clarity over flash.\n\nStack defaults when free to choose: React + Tailwind (+ shadcn/ui for accessible primitives), or Next.js for marketing sites (SEO, image optimization). Use a component library for accessible primitives (dialog, menu, tabs) rather than hand-rolling. Compose sections (Hero, Features, Testimonials, Pricing/Services, FAQ, CTA, Footer) from reusable, well-named components.\n\nDelivery: provide a coherent theme (tokens), not scattered styles. Prefer CSS variables / Tailwind theme extension. Keep class lists readable (extract repeated patterns). Verify responsiveness and contrast before reporting done.",
+  "promptTemplates": [
+    {
+      "name": "Design a landing page",
+      "description": "Generate a polished, conversion-focused landing page",
+      "template": "Design and build a polished, conversion-focused landing page for {{business}}. Establish a design system (type scale, spacing, color tokens, radii, shadows) first, then build responsive sections: hero with clear value prop + primary CTA + social proof, services, testimonials, FAQ, and a strong contact/booking CTA. Mobile-first, WCAG AA, optimized images. Avoid generic AI-looking layouts."
+    }
+  ],
+  "triggers": [
+    { "filePattern": "*.tsx", "description": "React components" },
+    { "filePattern": "*.jsx", "description": "React components" },
+    { "filePattern": "*.vue", "description": "Vue components" },
+    { "filePattern": "*.svelte", "description": "Svelte components" },
+    { "filePattern": "*.css", "description": "Stylesheets" },
+    { "filePattern": "*.html", "description": "HTML pages" }
+  ]
+}

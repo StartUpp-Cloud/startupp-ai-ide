@@ -363,6 +363,23 @@ router.get("/:name/status", (req, res) => {
  * Execute a command inside a container
  * Body: { command, timeout? }
  */
+// Provision (or re-provision) the curated MCP servers into an existing
+// container's CLI tool configs (Claude Code / Codex / OpenCode).
+router.post("/:name/provision-mcp", async (req, res) => {
+  try {
+    const status = containerManager.getContainerStatus(req.params.name);
+    if (!status) return res.status(404).json({ error: "Container not found" });
+    if (status !== "running") {
+      return res.status(409).json({ error: `Container is not running (status: ${status})` });
+    }
+    const { provisionContainerMcp } = await import("../mcpProvisioner.js");
+    const result = await provisionContainerMcp(req.params.name);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to provision MCP servers", message: error.message });
+  }
+});
+
 router.post("/:name/exec", (req, res) => {
   try {
     const { command, timeout } = req.body;
