@@ -8,6 +8,7 @@ import { memoryStore } from './memoryStore.js';
 import skillManager from './skillManager.js';
 import { shouldOrchestrateRequest } from './orchestratorRouting.js';
 import { batchTasks } from './orchestratorBatching.js';
+import { resolveBaseRef, createWorktree, removeWorktrees } from './worktreeManager.js';
 import { ACTIVE_RUN_STALE_MS } from './sessionRecovery.js';
 import {
   buildRunFailureEventMessage,
@@ -573,8 +574,12 @@ ${task.prompt}`;
         tasks = persisted.filter(t => t.status !== 'completed');
       } else {
         tasks = await this._planTasks(run, retryOpts);
-        for (const task of tasks) this._saveTask(task);
       }
+
+      // Set up isolated worktrees for any parallel sub-tasks (best-effort; any
+      // failure falls back to safe serial execution in the base workspace).
+      await this._setupParallelWorktrees(run, tasks);
+      for (const task of tasks) this._saveTask(task);
 
       run.phase = 'executing';
       run.updatedAt = nowIso();
@@ -744,14 +749,20 @@ ${task.prompt}`;
       })];
     }
 
-    const tasks = subtasks.map((st) =>
-      this._createTask(run, {
+    // Each sub-task is assigned its own worktree branch and marked parallel —
+    // isolation makes concurrent execution safe. _setupParallelWorktrees creates
+    // the worktrees (or falls back to serial if it can't).
+    const runShort = String(run.id).slice(0, 8);
+    const tasks = subtasks.map((st, i) => {
+      const t = this._createTask(run, {
         title: st.title,
         prompt: this._buildTaskPrompt(run, st.prompt, []),
-        taskType: st.parallelSafe ? 'research' : 'implementation',
-        parallelSafe: !!st.parallelSafe,
-      }),
-    );
+        taskType: 'implementation',
+        parallelSafe: true,
+      });
+      t.data = { ...t.data, parallelSafe: true, worktreeBranch: `orch-${runShort}-p${i + 1}` };
+      return t;
+    });
 
     // One consolidator integrates the sub-agent work; one validator tests it.
     // Their prompts are (re)built at execution time with the prior results.
@@ -796,10 +807,81 @@ ${task.prompt}`;
     }));
   }
 
+  _orchestratorProject(run) {
+    try { return (getDB().data.projects || []).find((p) => p.id === run.projectId) || null; } catch { return null; }
+  }
+
+  /**
+   * Create an isolated git worktree (fresh branch off the base) for each
+   * parallel sub-task so they can run concurrently without clobbering each
+   * other. Best-effort: on ANY problem (no container, git failure, disabled),
+   * falls back to safe SERIAL execution in the base workspace.
+   */
+  async _setupParallelWorktrees(run, tasks) {
+    const parallel = tasks.filter((t) => t.data?.worktreeBranch && t.status !== 'completed');
+    if (parallel.length < 2) return this._serializeFallback(parallel);
+
+    let disabled = false;
+    try { disabled = getDB().data?.orchestratorSettings?.parallelWorktrees === false; } catch {}
+    const project = this._orchestratorProject(run);
+    if (disabled || !project?.containerName) return this._serializeFallback(parallel);
+
+    const containerName = project.containerName;
+    const parentSession = chatStore.getSession(run.projectId, run.sessionId);
+    // Branch off the parent agent's own working dir/branch so consolidate can
+    // merge back into it cleanly.
+    const parentWorkDir = parentSession?.workDir || parentSession?.worktreePath
+      || parentSession?.cwd || parentSession?.repoPath || '/workspace';
+
+    try {
+      const { root, base } = await resolveBaseRef(containerName, parentWorkDir);
+      run.data = { ...(run.data || {}), worktreeRoot: root, worktreeBase: base, worktreeBranches: [], worktreePaths: [] };
+      for (const t of parallel) {
+        const res = await createWorktree({ containerName, root, base, branch: t.data.worktreeBranch });
+        if (!res.ok) throw new Error(`worktree create failed (${t.data.worktreeBranch}): ${res.output.slice(0, 200)}`);
+        t.data = { ...t.data, workDir: res.path, worktreeBranch: res.branch };
+        t.prompt = `${t.prompt}\n\n[ISOLATION] You are in a DEDICATED git worktree on branch "${res.branch}" — you cannot conflict with the other agents. Make your changes here and COMMIT them (\`git add -A && git commit -m "..."\`) so the consolidation step can merge your branch. Use your full capability and take the time you need.`;
+        run.data.worktreeBranches.push(res.branch);
+        run.data.worktreePaths.push(res.path);
+      }
+      this._saveRun(run);
+      await this._event(run, null, 'parallel-worktrees',
+        `Spun up ${parallel.length} isolated worktrees off "${base}" for parallel sub-agents.`,
+        { branches: run.data.worktreeBranches }, null, 'info').catch(() => {});
+    } catch (err) {
+      console.warn('[agentOrchestrator] parallel worktree setup failed → serial fallback:', err.message);
+      await this._cleanupWorktrees(run).catch(() => {});
+      run.data = { ...(run.data || {}), worktreeBranches: [], worktreePaths: [] };
+      this._serializeFallback(parallel);
+    }
+  }
+
+  /** Drop parallel/worktree assignments so tasks run serially in the base workspace. */
+  _serializeFallback(tasks = []) {
+    for (const t of tasks) {
+      t.parallelSafe = false;
+      if (t.data) { delete t.data.workDir; delete t.data.worktreeBranch; t.data.parallelSafe = false; }
+    }
+  }
+
+  async _cleanupWorktrees(run) {
+    const root = run?.data?.worktreeRoot;
+    const paths = run?.data?.worktreePaths || [];
+    if (!root || !paths.length) return;
+    const project = this._orchestratorProject(run);
+    if (!project?.containerName) return;
+    await removeWorktrees({ containerName: project.containerName, root, paths }).catch(() => {});
+  }
+
   /** (Re)build a pipeline task's prompt at run time with the prior results. */
   _prepareTaskPrompt(run, task, completed) {
     if (task.data?.phase === 'consolidate') {
-      const inner = `CONSOLIDATION PHASE — integrate the sub-agent results above into ONE coherent solution for the original request. Reconcile overlapping or conflicting changes, remove duplication, ensure consistency across files, and make any edits needed so the combined result fully satisfies:\n\n${run.goal}\n\nThen briefly report what you reconciled.`;
+      const branches = run.data?.worktreeBranches || [];
+      const base = run.data?.worktreeBase;
+      const mergeNote = branches.length
+        ? `\n\nThe sub-agents committed their work on these ISOLATED branches (base: "${base}"): ${branches.join(', ')}.\nYou are in the base workspace. MERGE each branch into "${base}" in order — e.g. \`git merge --no-edit <branch>\` for each. If a merge conflicts, resolve it properly (preserve every agent's intent), then commit. After merging all branches, ensure the project still builds.`
+        : '';
+      const inner = `CONSOLIDATION PHASE — integrate the sub-agent results into ONE coherent solution for the original request. Reconcile overlapping or conflicting changes, remove duplication, and ensure consistency so the combined result fully satisfies:\n\n${run.goal}${mergeNote}\n\nThen briefly report what you reconciled.`;
       task.prompt = this._buildTaskPrompt(run, inner, completed);
     } else if (task.data?.phase === 'validate') {
       const inner = `VALIDATION & FINAL REPORT PHASE — this is the LAST step; your output becomes the reply to the user.\n\nFor the original request:\n\n${run.goal}\n\n1. Run the project's tests / build / typecheck (and exercise the running app via the configured test users if relevant). Report REAL pass/fail output. Fix quick failures you find; do NOT add new features. If a check cannot be run, say exactly why.\n2. Then write the user-facing summary of the COMPLETE work across all parts above (what changed, how it was verified, anything outstanding), using the standard ## Summary / ## Changes / ## Verification / ## Next report.`;
@@ -1134,7 +1216,11 @@ ${run.goal}`;
     for (const field of ['branch', 'repoPath', 'worktreePath', 'workDir', 'cwd']) {
       if (parentSession?.[field]) inheritedContext[field] = parentSession[field];
     }
-    const sessionWorkDir = inheritedContext.workDir || inheritedContext.cwd || this._sessionWorkDirFromMeta(inheritedContext);
+    // A parallel sub-task runs in its OWN isolated worktree (set up before the
+    // batch); that overrides the inherited parent workDir so concurrent agents
+    // can't clobber each other.
+    const sessionWorkDir = task.data?.workDir
+      || inheritedContext.workDir || inheritedContext.cwd || this._sessionWorkDirFromMeta(inheritedContext);
 
     chatStore.updateSessionMeta(run.projectId, session.id, {
       archived: true,
@@ -1143,6 +1229,7 @@ ${run.goal}`;
       orchestratorTaskId: task.id,
       parentSessionId: run.sessionId,
       ...inheritedContext,
+      ...(task.data?.workDir ? { worktreePath: task.data.workDir, branch: task.data.worktreeBranch } : {}),
       ...(sessionWorkDir ? { workDir: sessionWorkDir } : {}),
     });
     return chatStore.getSession(run.projectId, session.id) || session;
@@ -1461,6 +1548,12 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
     if (active?.livenessTimer) clearInterval(active.livenessTimer);
     this.activeRuns.delete(runId);
     this._lastProgress.delete(runId);
+    // Best-effort: remove any parallel worktree directories this run created
+    // (their branches were already merged by the consolidate phase).
+    const run = this.getRun(runId);
+    if (run?.data?.worktreePaths?.length) {
+      this._cleanupWorktrees(run).catch(() => {});
+    }
   }
 }
 
