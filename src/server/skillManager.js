@@ -362,6 +362,58 @@ class SkillManager {
     console.log(
       `Skills loaded: ${this.builtInSkills.size} built-in, ${this.installedSkills.size} installed, ${this.folderSkills.size} folder-based`,
     );
+
+    // Ensure the bundled default-on skills are actually enabled on EVERY
+    // existing project (one-time, idempotent backfill).
+    await this.backfillDefaultSkills();
+  }
+
+  /** IDs of built-in skills that ship enabled by default. */
+  defaultOnSkillIds() {
+    return this._defaultOnSkills().map((s) => s.id);
+  }
+
+  /**
+   * Make sure a project's activeSkills includes every default-on skill (minus any
+   * the project explicitly opted out of via disabledDefaultSkills). Idempotent.
+   * @returns {boolean} whether anything was added.
+   */
+  async ensureDefaultSkillsActive(projectId) {
+    const project = findProjectById(projectId);
+    if (!project) return false;
+    const disabled = new Set(project.disabledDefaultSkills || []);
+    const active = Array.isArray(project.activeSkills) ? [...project.activeSkills] : [];
+    const present = new Set(active);
+    let changed = false;
+    for (const id of this.defaultOnSkillIds()) {
+      if (!present.has(id) && !disabled.has(id)) { active.push(id); present.add(id); changed = true; }
+    }
+    if (changed) await updateProject(projectId, { activeSkills: active });
+    return changed;
+  }
+
+  /** Backfill default-on skills into all existing projects in one write. */
+  async backfillDefaultSkills() {
+    try {
+      const ids = this.defaultOnSkillIds();
+      if (!ids.length) return;
+      const database = getDB();
+      let changed = 0;
+      for (const project of database.data.projects || []) {
+        const disabled = new Set(project.disabledDefaultSkills || []);
+        if (!Array.isArray(project.activeSkills)) project.activeSkills = [];
+        const present = new Set(project.activeSkills);
+        for (const id of ids) {
+          if (!present.has(id) && !disabled.has(id)) { project.activeSkills.push(id); present.add(id); changed++; }
+        }
+      }
+      if (changed) {
+        await database.write();
+        console.log(`[skillManager] Enabled ${changed} default skill activation(s) across existing projects`);
+      }
+    } catch (err) {
+      console.warn('[skillManager] default skill backfill failed:', err.message);
+    }
   }
 
   /**
@@ -924,16 +976,23 @@ class SkillManager {
       ? [...project.activeSkills]
       : [];
 
+    const updates = {};
+    // Re-activating a default-on skill clears any prior opt-out.
+    if (Array.isArray(project.disabledDefaultSkills) && project.disabledDefaultSkills.includes(skillId)) {
+      updates.disabledDefaultSkills = project.disabledDefaultSkills.filter((id) => id !== skillId);
+    }
     if (activeSkills.includes(skillId)) {
-      return project; // Already active
+      return Object.keys(updates).length ? updateProject(projectId, updates) : project;
     }
 
     activeSkills.push(skillId);
-    return updateProject(projectId, { activeSkills });
+    return updateProject(projectId, { ...updates, activeSkills });
   }
 
   /**
    * Deactivate a skill for a project. Removes the skill ID from project.activeSkills.
+   * For default-on skills, also records an explicit opt-out so the auto-enable
+   * backfill/merge does not re-add it.
    */
   async deactivateForProject(projectId, skillId) {
     const project = findProjectById(projectId);
@@ -943,7 +1002,13 @@ class SkillManager {
       ? project.activeSkills.filter((id) => id !== skillId)
       : [];
 
-    return updateProject(projectId, { activeSkills });
+    const updates = { activeSkills };
+    if (this.defaultOnSkillIds().includes(skillId)) {
+      const disabled = new Set(project.disabledDefaultSkills || []);
+      disabled.add(skillId);
+      updates.disabledDefaultSkills = [...disabled];
+    }
+    return updateProject(projectId, updates);
   }
 
   /**

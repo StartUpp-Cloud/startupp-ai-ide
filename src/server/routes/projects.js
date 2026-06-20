@@ -5,6 +5,7 @@ import { normalizePromptSettings } from "../models/Project.js";
 import { containerManager } from "../containerManager.js";
 import { ptyManager } from "../ptyManager.js";
 import { normalizeEnvironments, maskEnvironmentsForClient } from "../projectEnvironments.js";
+import { skillManager } from "../skillManager.js";
 
 const router = express.Router();
 
@@ -155,7 +156,8 @@ router.post("/", async (req, res) => {
         salesforce: sourceProject.salesforce || {},
       });
 
-      res.status(201).json(clonedProject);
+      await skillManager.ensureDefaultSkillsActive(clonedProject.id);
+      res.status(201).json(safeProject(Project.findById(clonedProject.id) || clonedProject));
       return;
     }
 
@@ -205,7 +207,11 @@ router.post("/", async (req, res) => {
       environments,
     });
 
-    res.status(201).json(safeProject(project));
+    // Enable the bundled default-on skills on the new project.
+    await skillManager.ensureDefaultSkillsActive(project.id);
+    const created = Project.findById(project.id) || project;
+
+    res.status(201).json(safeProject(created));
   } catch (error) {
     res
       .status(500)
