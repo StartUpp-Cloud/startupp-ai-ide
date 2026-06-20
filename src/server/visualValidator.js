@@ -99,7 +99,38 @@ const LOGIN_SCRIPT = (username, password) => `
  * @returns {Promise<object>} { available, passed, url, httpStatus, title, blank,
  *   consoleErrors[], failedRequests[], loginResult, screenshotPath, summary }
  */
-export async function validateDeployedUrl({ url, username = null, password = null, label = 'page' }) {
+// Recipe-based login: use the project-configured selectors. More reliable than
+// the generic heuristic for custom/SSO-ish forms.
+const RECIPE_LOGIN_SCRIPT = (recipe, username, password) => `
+(() => {
+  const u = ${JSON.stringify(username)}, p = ${JSON.stringify(password)};
+  const uSel = ${JSON.stringify(recipe.usernameSelector || '')};
+  const pSel = ${JSON.stringify(recipe.passwordSelector || '')};
+  const sSel = ${JSON.stringify(recipe.submitSelector || '')};
+  const fire = (el) => { el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); };
+  const uEl = uSel ? document.querySelector(uSel) : null;
+  const pEl = pSel ? document.querySelector(pSel) : null;
+  if (uEl) { uEl.focus(); uEl.value = u; fire(uEl); }
+  if (pEl) { pEl.focus(); pEl.value = p; fire(pEl); }
+  if (!pEl) return 'password-field-not-found';
+  const btn = sSel ? document.querySelector(sSel) : ((pEl.closest('form')||document).querySelector('button[type=submit], input[type=submit], button'));
+  if (btn) { btn.click(); return 'clicked'; }
+  const form = pEl.closest('form'); if (form) { form.submit(); return 'submitted'; }
+  return 'filled-no-submit';
+})()
+`;
+
+function extractJson(text) {
+  if (!text) return null;
+  let s = String(text).trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  const a = s.indexOf('{'), b = s.lastIndexOf('}');
+  if (a === -1 || b <= a) return null;
+  try { return JSON.parse(s.slice(a, b + 1)); } catch { return null; }
+}
+
+export async function validateDeployedUrl({ url, username = null, password = null, label = 'page', goal = null, loginRecipe = null }) {
   if (!url) return { available: false, reason: 'no url' };
   if (!(await chromeReachable())) return { available: false, reason: 'chrome/CDP not reachable on host' };
 
@@ -136,9 +167,25 @@ export async function validateDeployedUrl({ url, username = null, password = nul
 
     // Optional login, then re-navigate to the target page.
     if (username && password) {
-      const r = await sess.send('Runtime.evaluate', { expression: LOGIN_SCRIPT(username, password), returnByValue: true, awaitPromise: true }).catch(() => null);
+      // If a login path is configured, go there first.
+      if (loginRecipe?.path) {
+        try { sess.events.length = 0; await navAndSettle(new URL(loginRecipe.path, url).href); } catch {}
+      }
+      const expression = loginRecipe?.passwordSelector
+        ? RECIPE_LOGIN_SCRIPT(loginRecipe, username, password)
+        : LOGIN_SCRIPT(username, password);
+      const r = await sess.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }).catch(() => null);
       evidence.loginResult = r?.result?.value || 'login-eval-failed';
-      await waitMs(2000);
+      await waitMs(2500);
+      // Wait for a success marker if configured.
+      if (loginRecipe?.successSelector) {
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          const ok = await sess.send('Runtime.evaluate', { expression: `!!document.querySelector(${JSON.stringify(loginRecipe.successSelector)})`, returnByValue: true }).catch(() => null);
+          if (ok?.result?.value) break;
+          await waitMs(400);
+        }
+      }
       sess.events.length = 0;
       await navAndSettle(url);
     }
@@ -178,23 +225,56 @@ export async function validateDeployedUrl({ url, username = null, password = nul
     }
 
     await sess.send('Target.closeTarget', { targetId: target.id }).catch(() => {});
+
+    // Vision assessment: does the page actually implement the request? Uses a
+    // vision-capable model if one is configured (best-effort; skipped otherwise).
+    if (goal && shot?.data) {
+      try {
+        const { llmProvider } = await import('./llmProvider.js');
+        const sys = 'You are a meticulous QA reviewer. You receive a screenshot of a web page that was just changed/deployed, plus the change that was requested. Decide whether the page CORRECTLY and COMPLETELY implements the request and looks visually correct (no broken layout, error/empty states, or missing elements). Respond with ONLY JSON: {"matches": true|false, "confidence": 0.0, "issues": ["specific, actionable problems"], "notes": "one short sentence"}.';
+        const prompt = `REQUESTED CHANGE:\n${String(goal).slice(0, 1800)}\n\nDoes the page in the screenshot correctly and completely implement this? Be specific about anything missing, wrong, or broken. If it clearly does, matches=true with an empty issues list.`;
+        const vr = await llmProvider.generateVisionResponse({ prompt, systemPrompt: sys, imageBase64: shot.data, maxTokens: 600 });
+        if (vr?.response) {
+          const parsed = extractJson(vr.response);
+          if (parsed) {
+            evidence.intentMatch = {
+              assessed: true,
+              matches: parsed.matches !== false,
+              confidence: typeof parsed.confidence === 'number' ? parsed.confidence : null,
+              issues: Array.isArray(parsed.issues) ? parsed.issues.slice(0, 8).map(String) : [],
+              notes: String(parsed.notes || '').slice(0, 300),
+            };
+          }
+        } else {
+          evidence.intentMatch = { assessed: false, reason: vr?.error || 'no vision provider' };
+        }
+      } catch (e) {
+        evidence.intentMatch = { assessed: false, reason: e.message };
+      }
+    }
   } catch (err) {
     evidence.error = err.message;
   } finally {
     sess.close();
   }
 
-  // Deterministic verdict: loaded, not blank, no console errors / 5xx.
+  // Verdict: deterministic (loads, not blank, no console errors / 5xx) AND, when
+  // a vision model assessed it, that the page matches the request.
   const httpOk = evidence.httpStatus == null || (evidence.httpStatus >= 200 && evidence.httpStatus < 400);
-  const passed = httpOk && !evidence.blank && evidence.consoleErrors.length === 0 && evidence.failedRequests.length === 0;
-  evidence.passed = passed;
-  evidence.summary = passed
-    ? `Loaded cleanly${evidence.title ? ` ("${evidence.title}")` : ''}, no console errors or failed requests.`
+  const deterministicPass = httpOk && !evidence.blank && evidence.consoleErrors.length === 0 && evidence.failedRequests.length === 0;
+  const intentOk = !evidence.intentMatch?.assessed || evidence.intentMatch.matches !== false;
+  evidence.passed = deterministicPass && intentOk;
+  const intentIssues = evidence.intentMatch?.assessed && !evidence.intentMatch.matches
+    ? `doesn't match the request (${(evidence.intentMatch.issues || []).slice(0, 2).join('; ') || evidence.intentMatch.notes || 'visual mismatch'})`
+    : null;
+  evidence.summary = evidence.passed
+    ? `Loaded cleanly${evidence.title ? ` ("${evidence.title}")` : ''}, no errors${evidence.intentMatch?.assessed ? ', and matches the request' : ''}.`
     : [
         !httpOk ? `HTTP ${evidence.httpStatus}` : null,
         evidence.blank ? 'page rendered blank/empty' : null,
         evidence.consoleErrors.length ? `${evidence.consoleErrors.length} console error(s)` : null,
         evidence.failedRequests.length ? `${evidence.failedRequests.length} failed request(s)` : null,
+        intentIssues,
       ].filter(Boolean).join('; ');
   return evidence;
 }
@@ -207,6 +287,11 @@ export function buildVisualFeedback(evidence, url) {
   if (evidence.loginResult && evidence.loginResult !== 'clicked' && evidence.loginResult !== 'submitted') lines.push(`- Automated login result: ${evidence.loginResult} (could not complete login automatically).`);
   for (const e of (evidence.consoleErrors || []).slice(0, 10)) lines.push(`- Console error: ${e.text}${e.url ? ` (${e.url})` : ''}`);
   for (const f of (evidence.failedRequests || []).slice(0, 10)) lines.push(`- Failed request: ${f.url || ''} ${f.status || f.error || ''}`);
-  lines.push('', 'Investigate the root cause and FIX it so the deployed page loads cleanly with no console errors. Re-deploy if your fix requires it; it will be re-validated.');
+  if (evidence.intentMatch?.assessed && !evidence.intentMatch.matches) {
+    lines.push('- A visual review of the screenshot says the page does NOT correctly implement the request:');
+    for (const issue of (evidence.intentMatch.issues || []).slice(0, 8)) lines.push(`    • ${issue}`);
+    if (evidence.intentMatch.notes) lines.push(`    (${evidence.intentMatch.notes})`);
+  }
+  lines.push('', 'Investigate the root cause and FIX it so the deployed page loads cleanly, with no console errors, and correctly implements the request. Re-deploy if your fix requires it; it will be re-validated.');
   return lines.join('\n');
 }

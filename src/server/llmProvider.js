@@ -621,6 +621,80 @@ class LLMProvider extends EventEmitter {
     }
   }
 
+  /** Resolve endpoint/key/model for an OpenAI-compatible provider, or null. */
+  _openAICompatibleConfig(provider) {
+    if (!['openai', 'deepseek', 'github'].includes(provider)) return null;
+    const conn = this.getApplicationConnection(provider, 'apiKey');
+    const s = this.settings[provider] || {};
+    const endpoint = conn?.config?.endpoint || s.endpoint;
+    const apiKey = conn?.secret || s.apiKey;
+    const model = conn?.config?.model || s.model;
+    if (!endpoint || !apiKey || !model) return null;
+    return { endpoint, apiKey, model };
+  }
+
+  /**
+   * Multimodal (vision) completion — sends a prompt + a PNG screenshot to a
+   * vision-capable model. Used by visual validation to assess whether a deployed
+   * page matches the user's request. Best-effort: returns { error } when the
+   * configured provider/model can't do vision, so callers can skip gracefully.
+   * @param {{ prompt: string, systemPrompt?: string, imageBase64: string, mimeType?: string, maxTokens?: number }} opts
+   * @returns {Promise<{ response?: string, error?: string }>}
+   */
+  async generateVisionResponse({ prompt, systemPrompt = '', imageBase64, mimeType = 'image/png', maxTokens = 800 }) {
+    if (!imageBase64) return { error: 'no image' };
+    const provider = this.settings.provider;
+    try {
+      if (provider === 'ollama') {
+        const endpoint = this.settings.ollama.endpoint;
+        const model = this.settings.ollama.model; // must be a vision model (e.g. llava, llama3.2-vision)
+        const res = await fetch(`${endpoint}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [
+              ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+              { role: 'user', content: prompt, images: [imageBase64] },
+            ],
+            stream: false,
+            options: { num_predict: maxTokens, temperature: 0.2 },
+          }),
+        });
+        if (!res.ok) return { error: `ollama vision ${res.status}` };
+        const data = await res.json();
+        return { response: String(data.message?.content || '').trim() };
+      }
+
+      const cfg = this._openAICompatibleConfig(provider);
+      if (!cfg) return { error: `vision not supported for provider "${provider}"` };
+      const res = await fetch(`${cfg.endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({
+          model: cfg.model,
+          max_tokens: maxTokens,
+          temperature: 0.2,
+          messages: [
+            ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+            { role: 'user', content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+            ] },
+          ],
+        }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        return { error: `vision ${res.status}: ${e.error?.message || ''}` };
+      }
+      const data = await res.json();
+      return { response: String(data.choices?.[0]?.message?.content || '').trim() };
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+
   /**
    * Generate response using DeepSeek API (OpenAI-compatible)
    */

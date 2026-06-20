@@ -50,6 +50,21 @@ function normalizeTestUser(user, prior = null) {
   };
 }
 
+/** Optional login recipe (non-secret: selectors/path) for visual validation. */
+function normalizeLoginRecipe(input) {
+  if (!input || typeof input !== 'object') return null;
+  const s = (v) => (v ? String(v).trim() : '');
+  const recipe = {
+    path: s(input.path),
+    usernameSelector: s(input.usernameSelector),
+    passwordSelector: s(input.passwordSelector),
+    submitSelector: s(input.submitSelector),
+    successSelector: s(input.successSelector),
+  };
+  // Only keep it if at least the password selector or a login path is set.
+  return (recipe.passwordSelector || recipe.path) ? recipe : null;
+}
+
 /**
  * Normalize+secure an environments array for storage. `existing` is the
  * project's currently-stored environments, used to preserve encrypted secrets
@@ -74,6 +89,7 @@ export function normalizeEnvironments(input, existing = []) {
         writesAllowed: typeof env.writesAllowed === 'boolean'
           ? env.writesAllowed
           : !/prod/i.test(name),
+        login: normalizeLoginRecipe(env.login),
         testUsers: Array.isArray(env.testUsers)
           ? env.testUsers.map((u) => normalizeTestUser(u, priorById.get(u?.id) || null))
           : [],
@@ -89,6 +105,7 @@ export function maskEnvironmentsForClient(environments = []) {
     label: env.label,
     baseUrl: env.baseUrl,
     writesAllowed: env.writesAllowed,
+    login: env.login || null,
     testUsers: (env.testUsers || []).map((u) => ({
       id: u.id,
       label: u.label,
@@ -199,6 +216,7 @@ export function getEnvironmentLogin(projectId, { url = null } = {}) {
     baseUrl: env.baseUrl,
     username: user?.username || null,
     password: user?.secretEnc ? decrypt(user.secretEnc) : null,
+    loginRecipe: env.login || null,
   };
 }
 

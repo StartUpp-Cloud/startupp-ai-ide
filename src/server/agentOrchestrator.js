@@ -912,7 +912,14 @@ ${task.prompt}`;
       for (let i = 0; i <= MAX_FIX_ROUNDS; i++) {
         if (this.activeRuns.get(run.id)?.aborted) break;
         await this._event(run, null, 'visual-validation', `🔎 Visually validating ${url}${i > 0 ? ` (re-check ${i})` : ''}…`, null, opts.broadcastFn, 'info').catch(() => {});
-        evidence = await validateDeployedUrl({ url, username: login?.username, password: login?.password, label: String(run.id).slice(0, 8) });
+        evidence = await validateDeployedUrl({
+          url,
+          username: login?.username,
+          password: login?.password,
+          loginRecipe: login?.loginRecipe || null,
+          goal: run.goal,
+          label: String(run.id).slice(0, 8),
+        });
 
         if (!evidence?.available) {
           await this._event(run, null, 'visual-validation', `Visual validation unavailable: ${evidence?.reason || 'unknown'}. Start Chrome with --remote-debugging-port=9222 on the host (or use the Debug Element launcher) to enable it.`, null, opts.broadcastFn, 'warning').catch(() => {});
@@ -954,6 +961,7 @@ ${task.prompt}`;
           screenshot: evidence.screenshotPath || null,
           consoleErrors: (evidence.consoleErrors || []).slice(0, 8),
           failedRequests: (evidence.failedRequests || []).slice(0, 8),
+          intentMatch: evidence.intentMatch || null,
         },
       },
     });

@@ -102,6 +102,29 @@ export default function EnvironmentsEditor({ environments = [], onChange }) {
               <p className="text-hint">
                 Tip: add ≥2 users with different <span className="font-mono">tenantId</span> values to enable the cross-tenant isolation probe.
               </p>
+
+              <details className="rounded border border-surface-700/40 bg-surface-950/30 p-2">
+                <summary className="cursor-pointer text-xs text-surface-400">Login recipe (optional) — for reliable visual validation on authed apps</summary>
+                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {[
+                    ['path', 'Login path (e.g. /login)'],
+                    ['usernameSelector', 'Username field CSS selector'],
+                    ['passwordSelector', 'Password field CSS selector'],
+                    ['submitSelector', 'Submit button CSS selector'],
+                    ['successSelector', 'Logged-in marker selector (optional)'],
+                  ].map(([key, placeholder]) => (
+                    <input
+                      key={key}
+                      type="text"
+                      value={env.login?.[key] || ''}
+                      onChange={(e) => updateEnvironment(i, { login: { ...(env.login || {}), [key]: e.target.value } })}
+                      placeholder={placeholder}
+                      className="input !py-1.5 text-xs font-mono"
+                    />
+                  ))}
+                </div>
+                <p className="text-hint mt-1">Leave blank to use automatic best-effort login (standard email/password forms).</p>
+              </details>
             </div>
           ))}
           <button type="button" onClick={addEnvironment} className="flex items-center gap-1.5 text-sm text-primary-400 hover:text-primary-300">

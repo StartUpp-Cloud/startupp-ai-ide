@@ -146,6 +146,14 @@ function VisualValidationCard({ vv }) {
               ))}
             </ul>
           )}
+          {vv.intentMatch?.assessed && !vv.intentMatch.matches && (
+            <div className="text-[11px] text-amber-300/90">
+              <div className="font-medium">Visual review: doesn't match the request</div>
+              <ul className="mt-0.5 space-y-0.5">
+                {(vv.intentMatch.issues || []).slice(0, 6).map((it, i) => <li key={i}>• {it}</li>)}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </div>
