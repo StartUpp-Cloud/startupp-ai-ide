@@ -762,7 +762,10 @@ class TerminalServer {
           }
         }
 
-        const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({ mode: payload.mode, content: payload.content });
+        // "Validate visually" needs the orchestrator's post-run validation phase,
+        // so force orchestration when it's toggled on (even for a single command).
+        const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({ mode: payload.mode, content: payload.content })
+          || !!assistantSettings.validateVisually;
         const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
 
         runner({
@@ -774,6 +777,7 @@ class TerminalServer {
           tool: assistantSettings.tool,
           model: assistantSettings.model,
           effort: assistantSettings.effort,
+          validateVisually: assistantSettings.validateVisually,
           broadcastFn: sharedBroadcast,
         }).catch(err => {
           const errMsg = chatStore.addMessage({
@@ -892,6 +896,7 @@ class TerminalServer {
           tool: assistantSettings.tool,
           model: assistantSettings.model,
           effort: assistantSettings.effort,
+          validateVisually: assistantSettings.validateVisually,
           executeReviewedPlan: !!payload.executeReviewedPlan,
           broadcastFn: sharedBroadcast,
         }).catch(err => {

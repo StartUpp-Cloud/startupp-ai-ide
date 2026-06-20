@@ -177,6 +177,31 @@ export function resolveEnvironmentSecrets(projectId) {
  * A ready-to-run task prompt that drives the agent through a cross-tenant
  * isolation probe using the configured test users in different tenants.
  */
+/**
+ * Resolve a baseUrl + decrypted test-user login for visual validation. Prefers
+ * the environment whose baseUrl host matches `url`, else the first env with a
+ * baseUrl. Returns null if none configured.
+ */
+export function getEnvironmentLogin(projectId, { url = null } = {}) {
+  const envs = getProjectEnvironments(projectId);
+  let env = null;
+  if (url) {
+    try {
+      const host = new URL(url).host;
+      env = envs.find((e) => { try { return e.baseUrl && new URL(e.baseUrl).host === host; } catch { return false; } });
+    } catch {}
+  }
+  env = env || envs.find((e) => e.baseUrl);
+  if (!env) return null;
+  const user = (env.testUsers || []).find((u) => u.secretEnc) || (env.testUsers || [])[0] || null;
+  return {
+    environment: env.name,
+    baseUrl: env.baseUrl,
+    username: user?.username || null,
+    password: user?.secretEnc ? decrypt(user.secretEnc) : null,
+  };
+}
+
 export function buildTenantIsolationProbePrompt(projectId) {
   const envs = getProjectEnvironments(projectId);
   const target = envs.find((e) => e.writesAllowed && tenantsOf(e).length >= 2)

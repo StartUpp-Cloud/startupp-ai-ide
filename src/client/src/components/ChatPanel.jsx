@@ -1366,6 +1366,20 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
           </select>
         </div>
       )}
+
+      <label
+        className="flex items-center gap-1.5 min-w-0 cursor-pointer"
+        title="After the work is done, load the deployed URL in a browser, log in with a configured test user, and verify it renders cleanly — looping failures back to the agent. Uses the project's Environments config. Off by default."
+      >
+        <input
+          type="checkbox"
+          checked={!!session?.validateVisually}
+          disabled={disabled}
+          onChange={(e) => onUpdate({ validateVisually: e.target.checked })}
+          className="w-3.5 h-3.5 accent-primary-500 disabled:opacity-50"
+        />
+        <span className="text-[11px] text-surface-300">Validate visually</span>
+      </label>
         </>
       )}
 
@@ -2368,6 +2382,7 @@ function ChatSessionContent({
         tool: effectiveTool,
         model: sessionModel || null,
         effort: sessionEffort || null,
+        validateVisually: !!session?.validateVisually,
         activeRolePromptIds: selectedRolePromptIds,
         rolePromptInstructions,
       }));

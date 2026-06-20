@@ -112,6 +112,47 @@ function MessageChecks({ checks }) {
 }
 
 /**
+ * Post-deploy visual validation result — the deployed URL was loaded in a real
+ * browser; shows the verdict, a screenshot, and any console/network errors.
+ */
+function VisualValidationCard({ vv }) {
+  const [open, setOpen] = useState(!vv.passed);
+  const screenshotUrl = vv.screenshot ? `/api/debug/screenshots/${vv.screenshot.split('/').pop()}` : null;
+  const tone = vv.passed
+    ? { border: 'border-emerald-500/30', bg: 'bg-emerald-500/5', text: 'text-emerald-300', Icon: CheckCircle }
+    : { border: 'border-amber-500/30', bg: 'bg-amber-500/5', text: 'text-amber-300', Icon: AlertTriangle };
+  const errors = [...(vv.consoleErrors || []), ...(vv.failedRequests || [])];
+  return (
+    <div className={`mt-2 rounded-md border ${tone.border} ${tone.bg} p-2`}>
+      <button type="button" onClick={() => setOpen(!open)} className={`flex w-full items-center gap-2 text-left text-[12px] ${tone.text}`}>
+        <tone.Icon size={13} className="flex-shrink-0" />
+        <span className="font-medium">Visual validation {vv.passed ? 'passed' : 'found issues'}</span>
+        {vv.httpStatus ? <span className="text-surface-400">· HTTP {vv.httpStatus}</span> : null}
+        {vv.url ? <span className="truncate text-surface-500" title={vv.url}>· {vv.url}</span> : null}
+        <span className="ml-auto">{open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
+      </button>
+      <div className="mt-1 text-[11px] text-surface-300">{vv.summary}</div>
+      {open && (
+        <div className="mt-2 space-y-2">
+          {screenshotUrl && (
+            <a href={screenshotUrl} target="_blank" rel="noreferrer" className="block">
+              <img src={screenshotUrl} alt="Deployed page screenshot" className="max-h-72 w-full rounded border border-surface-700/40 object-contain object-top bg-surface-950/40" loading="lazy" />
+            </a>
+          )}
+          {errors.length > 0 && (
+            <ul className="space-y-0.5 text-[11px] text-red-300/90">
+              {errors.slice(0, 8).map((e, i) => (
+                <li key={i} className="truncate" title={e.text || e.url}>• {e.text || `${e.url || ''} ${e.status || e.error || ''}`}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Lightweight markdown renderer — handles the common formatting cases
  * without pulling in a heavy library.
  */
@@ -350,6 +391,7 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const diligence = message.metadata?.diligence;
   const checks = Array.isArray(message.metadata?.checks) ? message.metadata.checks : [];
   const activity = message.metadata?.activity;
+  const visualValidation = message.metadata?.visualValidation;
 
   // Suggestion buttons: render as a row of clickable chips
   if (suggestions && message.metadata?.hidden) {
@@ -469,6 +511,8 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
         )}
 
         {checks.length > 0 && <MessageChecks checks={checks} />}
+
+        {visualValidation && <VisualValidationCard vv={visualValidation} />}
 
         {diligence && (
           <DiligenceStrip diligence={diligence} />

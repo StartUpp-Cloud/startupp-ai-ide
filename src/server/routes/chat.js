@@ -141,9 +141,10 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     const wantsRolePrompts = hasOwn(req.body, 'activeRolePromptIds');
     const wantsStatus = hasOwn(req.body, 'status');
     const wantsMode = hasOwn(req.body, 'mode');
+    const wantsValidateVisually = hasOwn(req.body, 'validateVisually');
     let shouldResetCliSession = false;
 
-    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsWorktreePath && !wantsRolePrompts && !wantsStatus && !wantsMode) {
+    if (!wantsName && !wantsAssistantSettings && !wantsBranch && !wantsRepoPath && !wantsWorktreePath && !wantsRolePrompts && !wantsStatus && !wantsMode && !wantsValidateVisually) {
       return res.status(400).json({ error: 'No supported session fields were provided' });
     }
 
@@ -205,6 +206,10 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
     if (wantsMode) {
       const nextMode = String(req.body.mode).toLowerCase();
       if (['plan', 'agent', 'autonomous'].includes(nextMode)) updates.mode = nextMode;
+    }
+
+    if (wantsValidateVisually) {
+      updates.validateVisually = !!req.body.validateVisually;
     }
 
     chatStore.updateSessionMeta(projectId, sessionId, updates);

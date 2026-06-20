@@ -202,7 +202,7 @@ class AgentOrchestrator extends EventEmitter {
     return shouldOrchestrateRequest({ mode, content, executeReviewedPlan });
   }
 
-  async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, broadcastFn, skipUnread = false, executeReviewedPlan = false }) {
+  async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, validateVisually = false, broadcastFn, skipUnread = false, executeReviewedPlan = false }) {
     const recoveredContinuation = this._findRecoverableContinuationContext(projectId, sessionId, content);
     const run = {
       id: uuidv4(),
@@ -214,6 +214,7 @@ class AgentOrchestrator extends EventEmitter {
       tool,
       model,
       effort,
+      validateVisually: !!validateVisually,
       maxAttempts: DEFAULT_MAX_ATTEMPTS,
       startedAt: nowIso(),
       updatedAt: nowIso(),
@@ -221,6 +222,7 @@ class AgentOrchestrator extends EventEmitter {
         attachments,
         mode,
         executeReviewedPlan,
+        validateVisually: !!validateVisually,
         ...(recoveredContinuation ? {
           continuationContext: recoveredContinuation.context,
           continuationFromRunId: recoveredContinuation.runId,
@@ -680,6 +682,15 @@ ${task.prompt}`;
         return;
       }
 
+      // Last tier (opt-in): post-deploy visual validation on the host. Loads the
+      // deployed URL in a real browser, logs in with a configured test user,
+      // checks it loads cleanly, and loops failures back to the agent.
+      if (run.validateVisually && !active?.aborted) {
+        run.phase = 'validating-visually';
+        this._emitRun(run, broadcastFn);
+        await this._runVisualValidation(run, completed, { attachments, mode, tool, model, effort, broadcastFn, skipUnread });
+      }
+
       // Success — synthesize and return
       run.phase = 'synthesizing';
       run.updatedAt = nowIso();
@@ -871,6 +882,82 @@ ${task.prompt}`;
     const project = this._orchestratorProject(run);
     if (!project?.containerName) return;
     await removeWorktrees({ containerName: project.containerName, root, paths }).catch(() => {});
+  }
+
+  /**
+   * Post-deploy visual validation (opt-in). Resolves the deployed URL (from the
+   * agent's output or a configured environment baseUrl) + a test-user login,
+   * loads it in a host browser, and on failure feeds actionable evidence back to
+   * the agent to fix — bounded re-checks. Best-effort and non-blocking.
+   */
+  async _runVisualValidation(run, completed, opts) {
+    try {
+      const { validateDeployedUrl, buildVisualFeedback } = await import('./visualValidator.js');
+      const { getEnvironmentLogin } = await import('./projectEnvironments.js');
+
+      // Prefer a deployed URL the agent reported; else the environment baseUrl.
+      const text = completed.map((c) => String(c?.result?.content || '')).join('\n');
+      const urlFromOutput = (text.match(/https?:\/\/[^\s"'`)>\]]+/g) || [])
+        .map((u) => u.replace(/[.,);]+$/, ''))
+        .find((u) => !/githubusercontent|github\.com|npmjs\.|\bexample\.com|localhost|schema/i.test(u));
+      const login = getEnvironmentLogin(run.projectId, { url: urlFromOutput });
+      const url = urlFromOutput || login?.baseUrl;
+      if (!url) {
+        await this._event(run, null, 'visual-validation', 'Visual validation skipped: no deployed URL detected and no environment baseUrl configured.', null, opts.broadcastFn, 'info').catch(() => {});
+        return null;
+      }
+
+      const MAX_FIX_ROUNDS = 2;
+      let evidence = null;
+      for (let i = 0; i <= MAX_FIX_ROUNDS; i++) {
+        if (this.activeRuns.get(run.id)?.aborted) break;
+        await this._event(run, null, 'visual-validation', `🔎 Visually validating ${url}${i > 0 ? ` (re-check ${i})` : ''}…`, null, opts.broadcastFn, 'info').catch(() => {});
+        evidence = await validateDeployedUrl({ url, username: login?.username, password: login?.password, label: String(run.id).slice(0, 8) });
+
+        if (!evidence?.available) {
+          await this._event(run, null, 'visual-validation', `Visual validation unavailable: ${evidence?.reason || 'unknown'}. Start Chrome with --remote-debugging-port=9222 on the host (or use the Debug Element launcher) to enable it.`, null, opts.broadcastFn, 'warning').catch(() => {});
+          return evidence;
+        }
+
+        this._emitValidationMessage(run, url, evidence, opts.broadcastFn);
+        if (evidence.passed || i === MAX_FIX_ROUNDS) break;
+
+        // Failed → hand evidence to the agent to fix, then re-validate.
+        const fixTask = this._createTask(run, { title: `Fix visual validation issues (round ${i + 1})`, prompt: '(built at run time)', taskType: 'implementation' });
+        this._saveTask(fixTask);
+        fixTask.prompt = this._buildTaskPrompt(run, buildVisualFeedback(evidence, url), completed);
+        this._emitRun(run, opts.broadcastFn);
+        const res = await this._runTaskWithRetries(run, fixTask, opts);
+        completed.push({ task: fixTask, result: res });
+        if (!res.success) break;
+      }
+      return evidence;
+    } catch (err) {
+      console.warn('[agentOrchestrator] visual validation error:', err.message);
+      return null;
+    }
+  }
+
+  _emitValidationMessage(run, url, evidence, broadcastFn) {
+    const msg = chatStore.addMessage({
+      projectId: run.projectId,
+      sessionId: run.sessionId,
+      role: 'agent',
+      content: `🔎 Visual validation of ${url}: ${evidence.passed ? '✅ passed' : '⚠️ issues found'} — ${evidence.summary}`,
+      metadata: {
+        orchestratorRunId: run.id,
+        visualValidation: {
+          passed: !!evidence.passed,
+          url,
+          summary: evidence.summary,
+          httpStatus: evidence.httpStatus,
+          screenshot: evidence.screenshotPath || null,
+          consoleErrors: (evidence.consoleErrors || []).slice(0, 8),
+          failedRequests: (evidence.failedRequests || []).slice(0, 8),
+        },
+      },
+    });
+    broadcastFn?.({ type: 'chat-message', message: msg });
   }
 
   /** (Re)build a pipeline task's prompt at run time with the prior results. */

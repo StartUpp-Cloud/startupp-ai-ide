@@ -73,9 +73,14 @@ export function mergeSessionAssistantSettings(existing = {}, updates = {}, fallb
     effort: hasOwn(updates, 'effort') ? updates.effort : (toolChanged ? null : existing.effort),
   };
 
-  return resolveSessionAssistantSettings(merged, {
+  const resolved = resolveSessionAssistantSettings(merged, {
     tool: updatedTool || existing.tool || fallback.tool || 'claude',
   });
+  // Opt-in "validate visually" toggle (default off). Preserved across updates.
+  resolved.validateVisually = hasOwn(updates, 'validateVisually')
+    ? !!updates.validateVisually
+    : !!existing.validateVisually;
+  return resolved;
 }
 
 export function supportsSessionModelSelection(tool) {

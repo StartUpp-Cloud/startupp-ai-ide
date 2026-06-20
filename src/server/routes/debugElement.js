@@ -19,6 +19,17 @@ if (!fs.existsSync(SCREENSHOTS_DIR)) {
 const CDP_HOST = process.env.CDP_HOST || "http://localhost:9222";
 const CDP_TIMEOUT = 10000; // 10 seconds
 
+// Serve a captured screenshot by filename (used by visual validation results).
+// path.basename prevents directory traversal.
+router.get("/screenshots/:filename", (req, res) => {
+  const filename = path.basename(req.params.filename);
+  const filePath = path.join(SCREENSHOTS_DIR, filename);
+  if (!filePath.startsWith(SCREENSHOTS_DIR) || !fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Screenshot not found" });
+  }
+  res.sendFile(filePath);
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
