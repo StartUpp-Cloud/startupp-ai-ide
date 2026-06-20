@@ -288,6 +288,20 @@ async function startServer() {
     // Initialize WebSocket terminal server
     terminalServer.init(server);
 
+    // Clear, actionable message when the port is already taken (another instance
+    // is still running) instead of an unhandled crash + stack trace.
+    server.on("error", (err) => {
+      if (err && err.code === "EADDRINUSE") {
+        console.error(`\n✖ Port ${PORT} is already in use — another instance of the server is still running.`);
+        console.error(`  Free it and restart:`);
+        console.error(`    npm restart                       (frees the port, then starts)`);
+        console.error(`    # manual: lsof -ti tcp:${PORT} | xargs kill -9\n`);
+      } else {
+        console.error("Server failed to start:", err);
+      }
+      process.exit(1);
+    });
+
     // Start server
     server.listen(PORT, async () => {
       console.log(`Server running on port ${PORT}`);

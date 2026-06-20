@@ -13,6 +13,8 @@
     "client:dev": "cd src/client && npm run dev",
     "build": "cd src/client && npm run build",
     "start": "node src/server/index.js",
+    "stop": "lsof -ti tcp:${PORT:-55590} | xargs kill -9 2>/dev/null || true",
+    "restart": "npm run stop && npm start",
     "postinstall": "bash scripts/fix-pty-permissions.sh",
     "install:all": "npm install && cd src/client && npm install",
     "pm2:start": "pm2 start ecosystem.config.cjs",

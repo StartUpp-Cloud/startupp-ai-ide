@@ -156,6 +156,11 @@ class TerminalServer {
       path: '/ws/terminal',
     });
 
+    // The WS server re-emits the http server's listen errors (e.g. EADDRINUSE).
+    // Swallow them here so index.js's server.on('error') can report cleanly
+    // instead of an unhandled 'error' event crashing the process.
+    this.wss.on('error', () => {});
+
     // Broadcast agent shell output to all clients for live stream viewer
     agentShellPool.on('output', ({ sessionId, data, projectId, chatSessionId }) => {
       this.broadcast({ type: 'agent-shell-output', sessionId, data, projectId, chatSessionId });
