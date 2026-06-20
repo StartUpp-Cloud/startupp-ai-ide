@@ -1025,22 +1025,42 @@ function OrchestratorRunIndicator({ run }) {
   const elapsed = Math.max(0, Math.floor((Date.now() - started) / 1000));
   const mins = Math.floor(elapsed / 60);
   const secs = elapsed % 60;
-  const activeTasks = (run.tasks || []).filter(t => t.status === 'running' || t.status === 'retrying');
-  const done = (run.tasks || []).filter(t => t.status === 'completed').length;
-  const total = (run.tasks || []).length;
+  const tasks = run.tasks || [];
+  const done = tasks.filter(t => t.status === 'completed').length;
+  const total = tasks.length;
+
+  const statusIcon = (status) => {
+    if (status === 'completed') return { Icon: CheckCircle2, cls: 'text-emerald-400', spin: false };
+    if (status === 'running' || status === 'retrying') return { Icon: Loader, cls: 'text-primary-300', spin: true };
+    if (status === 'blocked' || status === 'failed' || status === 'cancelled') return { Icon: XCircle, cls: 'text-red-400', spin: false };
+    return { Icon: Circle, cls: 'text-surface-500', spin: false };
+  };
 
   return (
     <div className="mx-3 mb-2 rounded-lg border border-primary-500/25 bg-primary-500/10 px-3 py-2 text-xs text-primary-100">
       <div className="flex items-center gap-2">
         <Bot size={13} className="text-primary-300" />
         <span className="font-medium">AI orchestrator</span>
-        <span className="text-primary-300">{run.phase || run.status}</span>
-        <span className="ml-auto tabular-nums text-primary-200">{mins}m {String(secs).padStart(2, '0')}s</span>
+        <span className="text-primary-300 capitalize">{run.phase || run.status}</span>
+        <span className="ml-auto tabular-nums text-primary-200">
+          {total > 0 ? `${done}/${total} · ` : ''}{mins}m {String(secs).padStart(2, '0')}s
+        </span>
       </div>
-      <div className="mt-1 text-[11px] text-primary-200/80">
-        {total > 0 ? `${done}/${total} tasks complete` : 'Planning tasks'}
-        {activeTasks.length > 0 ? ` · ${activeTasks.map(t => t.title).join(', ')}` : ''}
-      </div>
+      {total > 0 ? (
+        <div className="mt-1.5 space-y-1">
+          {tasks.map((t) => {
+            const { Icon, cls, spin } = statusIcon(t.status);
+            return (
+              <div key={t.id} className="flex items-start gap-2">
+                <Icon size={12} className={`mt-0.5 flex-shrink-0 ${cls} ${spin ? 'animate-spin' : ''}`} />
+                <span className={t.status === 'completed' ? 'text-primary-200/70' : 'text-primary-100'}>{t.title}</span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="mt-1 text-[11px] text-primary-200/80">Planning tasks…</div>
+      )}
     </div>
   );
 }

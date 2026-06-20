@@ -604,6 +604,9 @@ ${task.prompt}`;
           if (failed) break;
         } else {
           const task = batch.tasks[0];
+          // Pipeline tasks (consolidate/validate) build their prompt now, from
+          // the results produced so far.
+          this._prepareTaskPrompt(run, task, completed);
           const result = await this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread });
           if (active?.aborted || result?.errorType === 'cancelled') throw new Error('Run cancelled');
           completed.push({ task, result });
@@ -714,14 +717,95 @@ ${task.prompt}`;
 
   async _planTasks(run, { executeReviewedPlan, runRetryContext } = {}) {
     const isRunRetry = runRetryContext?.attempt > 0;
-    const prompt = isRunRetry
-      ? this._buildRunRetryTaskPrompt(run, runRetryContext)
-      : this._buildTaskPrompt(run, run.goal, []);
-    return [this._createTask(run, {
-      title: executeReviewedPlan ? 'Execute approved plan' : isRunRetry ? `Retry user request (attempt ${runRetryContext.attempt + 1})` : 'Complete user request',
-      prompt,
-      taskType: executeReviewedPlan ? 'implementation' : 'general',
-    })];
+
+    // Approved plans and run-level retries stay single-task (already structured).
+    if (executeReviewedPlan || isRunRetry) {
+      const prompt = isRunRetry
+        ? this._buildRunRetryTaskPrompt(run, runRetryContext)
+        : this._buildTaskPrompt(run, run.goal, []);
+      return [this._createTask(run, {
+        title: executeReviewedPlan ? 'Execute approved plan' : `Retry user request (attempt ${runRetryContext.attempt + 1})`,
+        prompt,
+        taskType: executeReviewedPlan ? 'implementation' : 'general',
+      })];
+    }
+
+    // For explicitly multi-step goals, decompose into a multi-agent pipeline:
+    //   sub-tasks → consolidate → validate → (synthesize reply).
+    // Decomposition is DETERMINISTIC (no LLM in the orchestrator — all content
+    // generation stays in the CLI agents). Single-step goals fall back to one
+    // task; the CLI agent is already instructed to spin its own sub-agents.
+    const subtasks = this._heuristicDecompose(run);
+    if (!subtasks || subtasks.length <= 1) {
+      return [this._createTask(run, {
+        title: 'Complete user request',
+        prompt: this._buildTaskPrompt(run, run.goal, []),
+        taskType: 'general',
+      })];
+    }
+
+    const tasks = subtasks.map((st) =>
+      this._createTask(run, {
+        title: st.title,
+        prompt: this._buildTaskPrompt(run, st.prompt, []),
+        taskType: st.parallelSafe ? 'research' : 'implementation',
+        parallelSafe: !!st.parallelSafe,
+      }),
+    );
+
+    // One consolidator integrates the sub-agent work; one validator tests it.
+    // Their prompts are (re)built at execution time with the prior results.
+    const consolidate = this._createTask(run, { title: 'Consolidate sub-agent work', prompt: '(built at run time)', taskType: 'consolidation' });
+    consolidate.data = { ...consolidate.data, phase: 'consolidate', usePriorResults: true };
+    const validate = this._createTask(run, { title: 'Validate & test', prompt: '(built at run time)', taskType: 'validation' });
+    validate.data = { ...validate.data, phase: 'validate', usePriorResults: true };
+
+    return [...tasks, consolidate, validate];
+  }
+
+  /**
+   * Deterministically split a goal into sub-tasks from the user's OWN explicit
+   * structure (numbered or bulleted steps). No LLM — content generation stays in
+   * the CLI agents. Returns null for non-enumerated goals (→ single task).
+   * Sub-tasks run sequentially by default (they share one workspace); the
+   * consolidate phase reconciles them.
+   */
+  _heuristicDecompose(run) {
+    const goal = String(run.goal || '');
+    const itemStart = /^\s*(?:\d+[.)]|[-*•])\s+(.+)$/;
+    const items = [];
+    let current = null;
+    for (const line of goal.split('\n')) {
+      const m = line.match(itemStart);
+      if (m) {
+        if (current) items.push(current);
+        current = m[1].trim();
+      } else if (current && line.trim()) {
+        current += ' ' + line.trim();
+      }
+    }
+    if (current) items.push(current);
+
+    const cleaned = items.map((s) => s.trim()).filter((s) => s.length > 3);
+    if (cleaned.length < 2) return null;
+
+    return cleaned.slice(0, 5).map((item, i, arr) => ({
+      title: item.slice(0, 70),
+      parallelSafe: false,
+      prompt: `This is part ${i + 1} of ${arr.length} of the user's overall request. Focus ONLY on your part; later phases consolidate and validate all parts together.\n\nOVERALL REQUEST:\n${goal}\n\nYOUR PART:\n${item}`,
+    }));
+  }
+
+  /** (Re)build a pipeline task's prompt at run time with the prior results. */
+  _prepareTaskPrompt(run, task, completed) {
+    if (task.data?.phase === 'consolidate') {
+      const inner = `CONSOLIDATION PHASE — integrate the sub-agent results above into ONE coherent solution for the original request. Reconcile overlapping or conflicting changes, remove duplication, ensure consistency across files, and make any edits needed so the combined result fully satisfies:\n\n${run.goal}\n\nThen briefly report what you reconciled.`;
+      task.prompt = this._buildTaskPrompt(run, inner, completed);
+    } else if (task.data?.phase === 'validate') {
+      const inner = `VALIDATION & FINAL REPORT PHASE — this is the LAST step; your output becomes the reply to the user.\n\nFor the original request:\n\n${run.goal}\n\n1. Run the project's tests / build / typecheck (and exercise the running app via the configured test users if relevant). Report REAL pass/fail output. Fix quick failures you find; do NOT add new features. If a check cannot be run, say exactly why.\n2. Then write the user-facing summary of the COMPLETE work across all parts above (what changed, how it was verified, anything outstanding), using the standard ## Summary / ## Changes / ## Verification / ## Next report.`;
+      task.prompt = this._buildTaskPrompt(run, inner, completed);
+    }
+    return task.prompt;
   }
 
   _buildRunRetryTaskPrompt(run, retryContext) {
@@ -1075,6 +1159,14 @@ ${run.goal}`;
   _handleAgentBroadcast(run, task, data, broadcastFn) {
     if (!broadcastFn) return;
 
+    // Forward the per-task live checklist (chat-checks) to the PARENT session so
+    // the user sees engaging step-by-step status during orchestrated runs — the
+    // child agent session it was emitted under isn't the one the client watches.
+    if (data?.type === 'chat-checks') {
+      broadcastFn({ ...data, sessionId: run.sessionId, runId: run.id, taskId: task?.id });
+      return;
+    }
+
     // Unified progress dedup: both chat-progress and job-progress feed
     // through the same dedup gate so the same content is never emitted twice.
     let progressContent = null;
@@ -1181,7 +1273,13 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
   }
 
   async _synthesizeFinal(run, completed) {
-    return buildThinFinalResponse({ run, completed, profile: this._getProfile() });
+    // For a decomposed pipeline the validate phase wrote the comprehensive,
+    // user-facing summary of all parts — use it as the single final reply.
+    const validate = [...completed].reverse().find(
+      (c) => c?.task?.data?.phase === 'validate' && c?.result?.success !== false && String(c?.result?.content || '').trim(),
+    );
+    const chosen = validate ? [validate] : completed;
+    return buildThinFinalResponse({ completed: chosen, profile: this._getProfile() });
   }
 
   _saveRun(run) {
