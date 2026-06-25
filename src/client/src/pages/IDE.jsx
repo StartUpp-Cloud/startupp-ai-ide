@@ -16,7 +16,6 @@ import {
   GitBranch,
   FolderOpen,
   Sparkles,
-  FileCode,
   ArrowUpFromLine,
   Rocket,
   PackageCheck,
@@ -215,7 +214,6 @@ export default function IDE() {
   const [currentBranch, setCurrentBranch] = useState(null);
   // Container repos state
   const [containerRepos, setContainerRepos] = useState([]);
-  const [selectedSessionFiles, setSelectedSessionFiles] = useState([]);
 
   // Unread session IDs per project. Counts are derived so duplicate events stay idempotent.
   const [unreadSessions, setUnreadSessions] = useState({});
@@ -581,25 +579,6 @@ export default function IDE() {
         </div>
       )}
 
-      {/* Selected session changed files */}
-      <div className="flex-shrink-0 overflow-hidden border-t border-surface-700 bg-surface-850" style={{ minHeight: '120px', maxHeight: '40%' }}>
-        <div className="flex items-center gap-1.5 border-b border-surface-700 px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-surface-300">
-          <FileCode className="h-3 w-3 text-primary-400" />
-          Session Files
-        </div>
-        <div className="max-h-56 overflow-y-auto p-2">
-          {selectedSessionFiles.length > 0 ? selectedSessionFiles.map(file => (
-            <div key={`${file.status}:${file.path}`} className="mb-1 flex items-center gap-2 rounded border border-surface-700/50 bg-surface-900/45 px-2 py-1 font-mono text-[10px] text-surface-300">
-              <span className="w-4 flex-shrink-0 text-primary-300">{file.status || 'M'}</span>
-              <span className="truncate" title={file.path}>{file.path}</span>
-            </div>
-          )) : (
-            <div className="rounded border border-dashed border-surface-700/60 px-3 py-4 text-center text-[11px] text-surface-500">
-              Select a session to see files it changed.
-            </div>
-          )}
-        </div>
-      </div>
     </>
   );
 
@@ -735,9 +714,6 @@ export default function IDE() {
                     containerRepos={chatContainerRepos}
                     mobileLayout={isMobileLayout}
                     onProjectUpdated={(project) => setSelectedProject(project)}
-                    onSelectedSessionFilesChange={(sessionId, files) => {
-                      if (projectId === selectedProjectId) setSelectedSessionFiles(sessionId ? (files || []) : []);
-                    }}
                   />
                 </div>
               );

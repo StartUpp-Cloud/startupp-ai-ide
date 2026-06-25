@@ -2826,7 +2826,7 @@ function ChatSessionContent({
  * Main ChatPanel - manages sessions/tabs and renders all open sessions.
  * Sessions stay mounted when hidden to preserve state and continue working.
  */
-export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], mobileLayout = false, onProjectUpdated, onSelectedSessionFilesChange }) {
+export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, mode = 'agent', tool = 'claude', isActive = true, onActiveSessionChange, onUnreadChange, onProjectRead, project, containerRepos = [], mobileLayout = false, onProjectUpdated }) {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [openTabs, setOpenTabs] = useState([]);
@@ -3415,10 +3415,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     if (sessionId === activeSessionId) setActiveChangedFiles(files || []);
   }, [activeSessionId]);
 
-  useEffect(() => {
-    if (!isActive) return;
-    onSelectedSessionFilesChange?.(activeSessionId, activeChangedFiles);
-  }, [isActive, activeSessionId, activeChangedFiles, onSelectedSessionFilesChange]);
 
   useEffect(() => {
     if (!activeSessionId) {
