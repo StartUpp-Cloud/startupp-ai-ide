@@ -625,17 +625,23 @@ function MainThreadSessionBubbles({
   );
 
   return (
-    <div className={`${collapsed ? 'mx-2' : 'mx-3'} my-4 border-t border-surface-800/80 pt-3 transition-all duration-500`}>
-      <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-wide text-surface-500">
-        <MessageSquare size={12} className="text-primary-400" />
-        <span>Threads</span>
-        <span className={`text-surface-600 transition-opacity duration-500 ${collapsed ? 'opacity-0' : 'opacity-100'}`}>open a session bubble to continue it</span>
-      </div>
+    <div className={`${collapsed ? 'mx-1 my-2' : 'mx-3 my-4 border-t border-surface-800/80 pt-3'} transition-all duration-500`}>
       {collapsed ? (
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+        <div className="mb-2 flex justify-center text-surface-500" title="Threads">
+          <MessageSquare size={14} className="text-primary-400" />
+        </div>
+      ) : (
+        <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-wide text-surface-500">
+          <MessageSquare size={12} className="text-primary-400" />
+          <span>Threads</span>
+          <span className="text-surface-600">open a session bubble to continue it</span>
+        </div>
+      )}
+      {collapsed ? (
+        <div className="flex flex-col items-center gap-1.5">
           {normalSessions.map(renderBubble)}
           {pinnedSessions.length > 0 && (
-            <div className="flex flex-shrink-0 items-center gap-1.5 border-l border-surface-800/80 pl-1.5">
+            <div className="mt-1 flex flex-col items-center gap-1.5 border-t border-surface-800/80 pt-1.5">
               {pinnedSessions.map(renderBubble)}
             </div>
           )}
@@ -654,7 +660,7 @@ function MainThreadSessionBubbles({
           )}
         </div>
       )}
-      {onLoadArchived && (
+      {onLoadArchived && !collapsed && (
         <button
           type="button"
           onClick={onLoadArchived}
@@ -1457,6 +1463,9 @@ function ChatSessionContent({
   anchorScrollSignal,
   focusInputSignal = 0,
   contracted = false,
+  mainThreadRailActive = false,
+  onExpandMainThread,
+  onContractMainThread,
   mobileLayout = false,
 }) {
   const [messages, setMessages] = useState([]);
@@ -2589,6 +2598,22 @@ function ChatSessionContent({
   const renderedChatChannel = contracted ? 'assistant' : chatChannel;
   const showOnlySessions = contracted && session?.isMainThread;
 
+  if (showOnlySessions) {
+    return (
+      <button
+        type="button"
+        onClick={onExpandMainThread}
+        title="Expand chat history"
+        className="group flex h-full w-full flex-col items-center justify-center gap-3 bg-[#0d1117] text-surface-400 transition-colors hover:bg-surface-850 hover:text-surface-200"
+      >
+        <MessageSquare size={16} className="text-surface-500 transition-colors group-hover:text-primary-400" />
+        <span style={{ writingMode: 'vertical-rl' }} className="text-[11px] font-medium uppercase tracking-wide">
+          Chat History — click to expand
+        </span>
+      </button>
+    );
+  }
+
   return (
     <div
       style={{
@@ -2609,6 +2634,20 @@ function ChatSessionContent({
           onClose={() => setShowProjectContext(false)}
           onStartSession={handleStartProjectContextSession}
         />
+      )}
+
+      {mainThreadRailActive && (
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-surface-700/50 bg-surface-850/60 px-3 py-1.5">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-surface-400">Chat history</span>
+          <button
+            type="button"
+            onClick={onContractMainThread}
+            title="Contract chat history"
+            className="flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-medium text-surface-400 transition-colors hover:bg-surface-700 hover:text-surface-200"
+          >
+            <ArrowLeft size={13} /> Contract
+          </button>
+        </div>
       )}
 
       {/* Search result indicator */}
@@ -2837,9 +2876,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const [historySearchLoading, setHistorySearchLoading] = useState(false);
   const [pendingInitialMessages, setPendingInitialMessages] = useState({});
   const [pendingDirectMainMessages, setPendingDirectMainMessages] = useState({});
-  const [mainThreadPaneHovered, setMainThreadPaneHovered] = useState(false);
-  const [mainThreadPaneFocused, setMainThreadPaneFocused] = useState(false);
-  const [mainThreadHoverSuppressed, setMainThreadHoverSuppressed] = useState(false);
+  const [mainThreadExpanded, setMainThreadExpanded] = useState(false);
   const [sessionInputFocusSignal, setSessionInputFocusSignal] = useState(0);
   const sessionListRef = useRef(null);
   const sessionsRef = useRef([]);
@@ -3518,19 +3555,21 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     : childSessions;
   const allCollapsed = !activeSessionId;
   const activeChildSessionId = mainSession?.id && activeSessionId && activeSessionId !== mainSession.id ? activeSessionId : null;
-  const mainThreadPaneExpanded = !activeChildSessionId || (!mainThreadHoverSuppressed && (mainThreadPaneHovered || mainThreadPaneFocused));
+  const mainThreadPaneExpanded = !activeChildSessionId || mainThreadExpanded;
   const mainThreadAnchorScrollSignal = activeChildSessionId
     ? `${activeChildSessionId}:${mainThreadPaneExpanded ? 'expanded' : 'collapsed'}`
     : '';
   const splitGridClass = activeChildSessionId && !mobileLayout
-    ? 'md:grid-cols-[minmax(10.75rem,16.75rem)_minmax(0,1fr)] md:gap-2 md:p-2'
+    ? 'md:grid-cols-[2.75rem_minmax(0,1fr)] md:gap-2 md:p-2'
     : '';
+
+  // Opening a child session contracts the main thread to its slim label rail.
+  useEffect(() => {
+    setMainThreadExpanded(false);
+  }, [activeChildSessionId]);
 
   const handleSessionBubbleOpen = useCallback((session) => {
     if (!session?.id) return;
-    setMainThreadPaneHovered(false);
-    setMainThreadPaneFocused(false);
-    setMainThreadHoverSuppressed(true);
     setSessionInputFocusSignal(Date.now());
     if (hasHistorySearch) openHistorySession(session);
     else openSession(session.id);
@@ -3888,19 +3927,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
               return (
                 <div
                   key={tabId}
-                  onMouseEnter={isMainTab ? () => {
-                    if (!mainThreadHoverSuppressed) setMainThreadPaneHovered(true);
-                  } : undefined}
-                  onMouseLeave={isMainTab ? () => {
-                    setMainThreadPaneHovered(false);
-                    setMainThreadHoverSuppressed(false);
-                  } : undefined}
-                  onFocusCapture={isMainTab ? () => {
-                    if (!mainThreadHoverSuppressed) setMainThreadPaneFocused(true);
-                  } : undefined}
-                  onBlurCapture={isMainTab ? (event) => {
-                    if (!event.currentTarget.contains(event.relatedTarget)) setMainThreadPaneFocused(false);
-                  } : undefined}
                   className={`${visibilityClass} ${paneFrameClass} relative min-h-0 flex-col overflow-hidden bg-[#0d1117]`}
                 >
                   <div className="flex min-h-0 flex-1 flex-col">
@@ -3940,6 +3966,9 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                         anchorScrollSignal={isMainTab ? mainThreadAnchorScrollSignal : ''}
                         focusInputSignal={isActiveChildTab ? sessionInputFocusSignal : 0}
                         contracted={mainThreadPaneCollapsed}
+                        mainThreadRailActive={isMainTab && Boolean(activeChildSessionId)}
+                        onExpandMainThread={() => setMainThreadExpanded(true)}
+                        onContractMainThread={() => setMainThreadExpanded(false)}
                         mobileLayout={mobileLayout}
                       />
                     )}
