@@ -28,6 +28,7 @@ const STORAGE_KEYS = {
   LEFT_PANEL_WIDTH: 'ide-left-panel-width',
   RIGHT_PANEL_WIDTH: 'ide-right-panel-width',
   LEFT_PANEL_COLLAPSED: 'ide-left-collapsed',
+  RIGHT_PANEL_COLLAPSED: 'ide-right-collapsed',
   FORCE_MOBILE_LAYOUT: 'ide-force-mobile-layout',
 };
 
@@ -165,6 +166,9 @@ export default function IDE() {
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(() => {
     return localStorage.getItem(STORAGE_KEYS.LEFT_PANEL_COLLAPSED) === 'true';
   });
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(() => {
+    return localStorage.getItem(STORAGE_KEYS.RIGHT_PANEL_COLLAPSED) === 'true';
+  });
   const [mobileDrawer, setMobileDrawer] = useState(null);
 
   // Project state (with persistence)
@@ -262,6 +266,10 @@ export default function IDE() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.LEFT_PANEL_COLLAPSED, leftPanelCollapsed.toString());
   }, [leftPanelCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.RIGHT_PANEL_COLLAPSED, rightPanelCollapsed.toString());
+  }, [rightPanelCollapsed]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.FORCE_MOBILE_LAYOUT, forceMobileLayout.toString());
@@ -638,7 +646,7 @@ export default function IDE() {
           display: 'grid',
           gridTemplateColumns: isMobileLayout
             ? '1fr'
-            : `${leftPanelCollapsed ? 'auto' : `${leftPanelWidth}px 4px`} 1fr 4px ${rightPanelWidth}px`,
+            : `${leftPanelCollapsed ? 'auto' : `${leftPanelWidth}px 4px`} 1fr ${rightPanelCollapsed ? 'auto' : `4px ${rightPanelWidth}px`}`,
           overflow: 'hidden',
         }}
       >
@@ -745,21 +753,40 @@ export default function IDE() {
           </div>
         </div>
 
-        {/* Right resizer */}
-        {!isMobileLayout && <div
+        {/* Right resizer (hidden when collapsed) */}
+        {!isMobileLayout && !rightPanelCollapsed && <div
           className="bg-surface-700 hover:bg-primary-500 cursor-col-resize transition-colors"
           onMouseDown={() => setIsResizing('right')}
         />}
 
         {/* ── Right Panel ── */}
-        {!isMobileLayout && <div className="overflow-hidden">
-          <RightPanel
-            projectId={selectedProjectId}
-            projectPath={selectedProject?.folderPath}
-            selectedTool={selectedTool}
-            containerName={selectedProject?.containerName}
-          />
-        </div>}
+        {!isMobileLayout && (rightPanelCollapsed ? (
+          <div className="flex flex-col items-center py-2 px-1 bg-surface-850 border-l border-surface-700">
+            <button
+              onClick={() => setRightPanelCollapsed(false)}
+              className="p-1.5 hover:bg-surface-700 rounded text-surface-400 hover:text-surface-200"
+              title="Show tools panel"
+            >
+              <PanelRightOpen className="w-4 h-4" />
+            </button>
+          </div>
+        ) : (
+          <div className="relative overflow-hidden">
+            <button
+              onClick={() => setRightPanelCollapsed(true)}
+              className="absolute right-1 top-1 z-10 p-1 rounded text-surface-500 hover:bg-surface-700 hover:text-surface-200"
+              title="Collapse tools panel"
+            >
+              <PanelRightClose className="w-3.5 h-3.5" />
+            </button>
+            <RightPanel
+              projectId={selectedProjectId}
+              projectPath={selectedProject?.folderPath}
+              selectedTool={selectedTool}
+              containerName={selectedProject?.containerName}
+            />
+          </div>
+        ))}
 
         {isMobileLayout && mobileDrawer && (
           <div className="absolute inset-0 z-40 bg-surface-950/60 backdrop-blur-sm" onClick={() => setMobileDrawer(null)}>
