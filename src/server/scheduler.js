@@ -189,6 +189,10 @@ class Scheduler extends EventEmitter {
       notifyOnFailure = true,
       notifyOnSuccess = false,
       runTarget = 'container',
+      cliTool = null,
+      frequency = 'interval',
+      timeOfDay = null,
+      dayOfWeek = null,
     } = params;
 
     // Validation
@@ -201,8 +205,22 @@ class Scheduler extends EventEmitter {
     if (!VALID_TYPES.has(type)) {
       throw new Error(`type must be one of: ${[...VALID_TYPES].join(', ')}`);
     }
-    if (typeof intervalMs !== 'number' || intervalMs < MIN_INTERVAL_MS) {
-      throw new Error(`intervalMs must be a number >= ${MIN_INTERVAL_MS}`);
+    const normalizedFrequency = ['interval', 'daily', 'weekly'].includes(frequency) ? frequency : 'interval';
+
+    if (normalizedFrequency === 'interval') {
+      if (typeof intervalMs !== 'number' || intervalMs < MIN_INTERVAL_MS) {
+        throw new Error(`intervalMs must be a number >= ${MIN_INTERVAL_MS}`);
+      }
+    } else {
+      // daily / weekly: require timeOfDay
+      if (!timeOfDay || !/^([01]\d|2[0-3]):[0-5]\d$/.test(timeOfDay)) {
+        throw new Error('timeOfDay is required for daily/weekly schedules and must match HH:MM (00:00–23:59)');
+      }
+      if (normalizedFrequency === 'weekly') {
+        if (!Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+          throw new Error('dayOfWeek is required for weekly schedules and must be an integer 0–6');
+        }
+      }
     }
     if (type === 'command' && (!command || typeof command !== 'string')) {
       throw new Error('command is required for type="command"');
@@ -237,13 +255,18 @@ class Scheduler extends EventEmitter {
       webhookMethod: type === 'webhook' ? normalizedWebhookMethod : null,
       webhookBody: type === 'webhook' ? (webhookBody || null) : null,
       projectPath: projectPath || null,
-      intervalMs,
+      intervalMs: normalizedFrequency === 'interval' ? intervalMs : null,
+      frequency: normalizedFrequency,
+      timeOfDay: normalizedFrequency !== 'interval' ? timeOfDay : null,
+      dayOfWeek: normalizedFrequency === 'weekly' ? dayOfWeek : null,
+      cliTool: cliTool || null,
       enabled,
       notifyOnFailure,
       notifyOnSuccess,
       runTarget: runTarget === 'host' ? 'host' : 'container',
       lastRunAt: null,
       lastResult: null,
+      nextRunAt: null,
       runCount: 0,
       failCount: 0,
       createdAt: now,
@@ -291,6 +314,16 @@ class Scheduler extends EventEmitter {
         throw new Error(`intervalMs must be a number >= ${MIN_INTERVAL_MS}`);
       }
     }
+    if (updates.timeOfDay !== undefined && updates.timeOfDay !== null) {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(updates.timeOfDay)) {
+        throw new Error('timeOfDay must match HH:MM (00:00–23:59)');
+      }
+    }
+    if (updates.dayOfWeek !== undefined && updates.dayOfWeek !== null) {
+      if (!Number.isInteger(updates.dayOfWeek) || updates.dayOfWeek < 0 || updates.dayOfWeek > 6) {
+        throw new Error('dayOfWeek must be an integer 0–6');
+      }
+    }
     if (updates.name !== undefined) {
       if (typeof updates.name !== 'string' || updates.name.trim().length === 0) {
         throw new Error('name must be a non-empty string');
@@ -329,6 +362,10 @@ class Scheduler extends EventEmitter {
     // Determine if we need to restart the timer
     const needsTimerRestart =
       updates.intervalMs !== undefined ||
+      updates.frequency !== undefined ||
+      updates.timeOfDay !== undefined ||
+      updates.dayOfWeek !== undefined ||
+      updates.cliTool !== undefined ||
       updates.enabled !== undefined;
 
     // Apply updates
@@ -835,6 +872,73 @@ class Scheduler extends EventEmitter {
     // Stop any existing timer for this schedule
     this._stopTimer(schedule.id);
 
+    const freq = schedule.frequency || 'interval';
+
+    if (freq === 'daily' || freq === 'weekly') {
+      // Time-based scheduling: self-rescheduling setTimeout
+      const scheduleNext = async () => {
+        // Skip if already running
+        if (this.running.get(schedule.id)) {
+          console.log(`[Scheduler] Skipping "${schedule.name}" — previous run still in progress`);
+          // Re-schedule for next occurrence
+          const delay = computeMsUntilNextRun(schedule, Date.now());
+          const tid = setTimeout(scheduleNext, delay);
+          this.timers.set(schedule.id, tid);
+          return;
+        }
+
+        try {
+          // Re-read schedule from DB in case it was updated
+          const db = getDB();
+          const current = (db.data.schedules || []).find((s) => s.id === schedule.id);
+          if (!current || !current.enabled) {
+            this._stopTimer(schedule.id);
+            return;
+          }
+
+          await this._execute(current);
+
+          // Schedule the next run (using current schedule in case it was updated)
+          const db2 = getDB();
+          const updated = (db2.data.schedules || []).find((s) => s.id === schedule.id);
+          if (updated && updated.enabled) {
+            const delay = computeMsUntilNextRun(updated, Date.now());
+            // Persist nextRunAt for display
+            updated.nextRunAt = new Date(Date.now() + delay).toISOString();
+            await db2.write();
+            const tid = setTimeout(scheduleNext, delay);
+            this.timers.set(schedule.id, tid);
+          }
+        } catch (err) {
+          console.error(`[Scheduler] Error executing "${schedule.name}":`, err);
+          // Still reschedule on error
+          const delay = computeMsUntilNextRun(schedule, Date.now());
+          const tid = setTimeout(scheduleNext, delay);
+          this.timers.set(schedule.id, tid);
+        }
+      };
+
+      // Compute initial delay and persist nextRunAt
+      const delay = computeMsUntilNextRun(schedule, Date.now());
+      (async () => {
+        try {
+          const db = getDB();
+          const stored = (db.data.schedules || []).find((s) => s.id === schedule.id);
+          if (stored) {
+            stored.nextRunAt = new Date(Date.now() + delay).toISOString();
+            await db.write();
+          }
+        } catch { /* non-critical */ }
+      })();
+
+      const tid = setTimeout(scheduleNext, delay);
+      this.timers.set(schedule.id, tid);
+
+      console.log(`[Scheduler] Scheduled "${schedule.name}" (${freq}) — next run in ${Math.round(delay / 60000)}m`);
+      return;
+    }
+
+    // Interval-based (existing path)
     const intervalId = setInterval(async () => {
       // Skip if already running (prevent overlapping executions)
       if (this.running.get(schedule.id)) {

@@ -92,6 +92,9 @@ router.post('/', async (req, res) => {
       notifyOnSuccess,
       cliTool,
       runTarget,
+      frequency,
+      timeOfDay,
+      dayOfWeek,
     } = req.body;
 
     // Validate required fields
@@ -125,10 +128,24 @@ router.post('/', async (req, res) => {
         errors.push(`webhookMethod must be one of: ${[...VALID_WEBHOOK_METHODS].join(', ')}`);
       }
     }
-    if (intervalMs === undefined || intervalMs === null) {
-      errors.push('intervalMs is required');
-    } else if (typeof intervalMs !== 'number' || intervalMs < MIN_INTERVAL_MS) {
-      errors.push(`intervalMs must be a number >= ${MIN_INTERVAL_MS}`);
+    const effectiveFrequency = frequency || 'interval';
+    if (!effectiveFrequency || effectiveFrequency === 'interval') {
+      if (intervalMs === undefined || intervalMs === null) {
+        errors.push('intervalMs is required for interval schedules');
+      } else if (typeof intervalMs !== 'number' || intervalMs < MIN_INTERVAL_MS) {
+        errors.push(`intervalMs must be a number >= ${MIN_INTERVAL_MS}`);
+      }
+    } else {
+      // daily / weekly: validate timeOfDay
+      if (!timeOfDay || !/^([01]\d|2[0-3]):[0-5]\d$/.test(timeOfDay)) {
+        errors.push('timeOfDay is required for daily/weekly schedules and must match HH:MM');
+      }
+      if (effectiveFrequency === 'weekly') {
+        const dow = Number(dayOfWeek);
+        if (!Number.isInteger(dow) || dow < 0 || dow > 6) {
+          errors.push('dayOfWeek is required for weekly schedules (0=Sunday…6=Saturday)');
+        }
+      }
     }
 
     if (errors.length > 0) {
@@ -152,6 +169,9 @@ router.post('/', async (req, res) => {
       notifyOnSuccess,
       cliTool,
       runTarget,
+      frequency,
+      timeOfDay,
+      dayOfWeek,
     });
 
     res.status(201).json(schedule);
