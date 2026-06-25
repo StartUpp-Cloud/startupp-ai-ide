@@ -21,7 +21,8 @@ import { skillManager } from './skillManager.js';
 import { memoryStore } from './memoryStore.js';
 import { ollamaWorkspaceOrchestrator } from './ollamaWorkspaceOrchestrator.js';
 import { getDB } from './db.js';
-import Project from './models/Project.js';
+import Project, { findProjectById } from './models/Project.js';
+import { indexChangedFiles } from './codeIndex.js';
 import { supportsSessionEffortSelection, supportsSessionModelSelection } from './sessionSettings.js';
 import {
   isSafeOrchestratedPrompt,
@@ -1355,6 +1356,12 @@ RULES:
         jobId: job?.id || null,
         files: snapshot.files,
       });
+      try {
+        const project = findProjectById(projectId);
+        if (project?.containerName) {
+          indexChangedFiles(project, snapshot.files.map(f => f.path || f)).catch(() => {});
+        }
+      } catch {}
     };
 
     // ── Background task tracking ──

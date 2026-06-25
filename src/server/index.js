@@ -48,6 +48,7 @@ import profileRoutes from "./routes/profile.js";
 import slackRoutes from "./routes/slack.js";
 import connectionRoutes from "./routes/connections.js";
 import salesforceRoutes from "./routes/salesforce.js";
+import codeIndexRoutes from "./routes/codeIndex.js";
 import { authMiddleware, getToken } from "./authToken.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
@@ -154,6 +155,7 @@ async function startServer() {
     app.use("/api/containers", containerRoutes);
     app.use("/api/session-history", sessionHistoryRoutes);
     app.use("/api/projects", chatRoutes);
+    app.use("/api/projects", codeIndexRoutes);
     app.use("/api/profile", profileRoutes);
     app.use("/api/slack", slackRoutes);
     app.use("/api/connections", connectionRoutes);
