@@ -675,7 +675,17 @@ class Scheduler extends EventEmitter {
       case 'aider':
         command = `aider --message "${escaped}" --yes`;
         break;
+      case 'codex':
+        command = `codex exec --dangerously-bypass-approvals-and-sandbox "${escaped}"`;
+        break;
+      case 'opencode':
+        command = `opencode run "${escaped}" --dangerously-skip-permissions`;
+        break;
+      case 'gemini':
+        command = `gemini -p "${escaped}"`;
+        break;
       default:
+        // shell (and any tool that expects a raw command) runs verbatim
         command = schedule.command;
     }
 
