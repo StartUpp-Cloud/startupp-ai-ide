@@ -7,8 +7,8 @@
 import crypto from 'node:crypto';
 import { containerManager } from './containerManager.js';
 import { llmProvider } from './llmProvider.js';
-import { chunkFile, isProbablyBinary } from './codeIndexChunker.js';
-import { serializeVector } from './codeIndexMath.js';
+import { chunkFile, isProbablyBinary, dedupePointers } from './codeIndexChunker.js';
+import { serializeVector, deserializeVector, topKByCosine } from './codeIndexMath.js';
 import * as store from './sqliteStore.js';
 
 const ALLOW_EXT = ['.js', '.jsx', '.ts', '.tsx', '.py', '.go', '.rb', '.java', '.rs', '.php', '.c', '.cpp', '.h', '.cs', '.css', '.scss', '.html', '.vue', '.svelte', '.md', '.json', '.yml', '.yaml', '.sql', '.sh'];
@@ -132,4 +132,24 @@ export async function indexChangedFiles(project, filePaths) {
     if (content == null) { store.deleteFileChunks(projectId, relPath); continue; }
     await embedAndStore(projectId, relPath, content, embedModel);
   }
+}
+
+export function rankChunks(queryVec, rows, k) {
+  const withVecs = rows.map(r => ({
+    filePath: r.file_path,
+    startLine: r.start_line,
+    endLine: r.end_line,
+    summary: r.summary,
+    embedding: deserializeVector(r.embedding),
+  }));
+  const top = topKByCosine(queryVec, withVecs, Math.max(k * 3, k));
+  const pointers = top.map(({ embedding, ...rest }) => ({ ...rest, score: rest.score }));
+  return dedupePointers(pointers).slice(0, k);
+}
+
+export async function retrieveRelevant(projectId, query, { k = 8 } = {}) {
+  const rows = store.getProjectChunks(projectId);
+  if (!rows.length) return [];
+  const queryVec = await llmProvider.generateEmbedding(query);
+  return rankChunks(queryVec, rows, k);
 }
