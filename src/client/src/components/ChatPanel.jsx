@@ -632,10 +632,10 @@ function MainThreadSessionBubbles({
         <span className={`text-surface-600 transition-opacity duration-500 ${collapsed ? 'opacity-0' : 'opacity-100'}`}>open a session bubble to continue it</span>
       </div>
       {collapsed ? (
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
           {normalSessions.map(renderBubble)}
           {pinnedSessions.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 border-l border-surface-800/80 pl-1.5">
+            <div className="flex flex-shrink-0 items-center gap-1.5 border-l border-surface-800/80 pl-1.5">
               {pinnedSessions.map(renderBubble)}
             </div>
           )}

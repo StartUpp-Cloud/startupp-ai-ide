@@ -11,6 +11,8 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Maximize2,
+  Minimize2,
   ChevronDown,
   ChevronUp,
   GitBranch,
@@ -616,6 +618,35 @@ export default function IDE() {
             onClickNotification={handleNotificationClick}
           />
         }
+        layoutControls={!isMobileLayout && (
+          <div className="flex items-center gap-0.5 border-l border-surface-700/50 pl-1.5 ml-0.5">
+            <button
+              onClick={() => setLeftPanelCollapsed(v => !v)}
+              className="p-1.5 rounded hover:bg-surface-750 text-surface-400 hover:text-surface-200 transition-colors"
+              title={leftPanelCollapsed ? 'Show left sidebar' : 'Hide left sidebar'}
+            >
+              {leftPanelCollapsed ? <PanelLeftOpen className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              onClick={() => {
+                const next = !(leftPanelCollapsed && rightPanelCollapsed);
+                setLeftPanelCollapsed(next);
+                setRightPanelCollapsed(next);
+              }}
+              className={`p-1.5 rounded hover:bg-surface-750 transition-colors ${leftPanelCollapsed && rightPanelCollapsed ? 'text-primary-400 hover:text-primary-300' : 'text-surface-400 hover:text-surface-200'}`}
+              title={leftPanelCollapsed && rightPanelCollapsed ? 'Exit focus mode (show sidebars)' : 'Focus mode (collapse both sidebars)'}
+            >
+              {leftPanelCollapsed && rightPanelCollapsed ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              onClick={() => setRightPanelCollapsed(v => !v)}
+              className="p-1.5 rounded hover:bg-surface-750 text-surface-400 hover:text-surface-200 transition-colors"
+              title={rightPanelCollapsed ? 'Show right sidebar' : 'Hide right sidebar'}
+            >
+              {rightPanelCollapsed ? <PanelRightOpen className="w-3.5 h-3.5" /> : <PanelRightClose className="w-3.5 h-3.5" />}
+            </button>
+          </div>
+        )}
       />
 
       {/* ═══ Row 2: Main content ═══ */}

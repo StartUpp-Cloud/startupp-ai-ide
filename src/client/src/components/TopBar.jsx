@@ -29,6 +29,7 @@ export default function TopBar({
   onForceMobileLayoutChange,
   onProjectUpdated,
   notificationSlot,
+  layoutControls,
   projects,
 }) {
   const completedSteps = planSteps ? planSteps.filter((_, i) => i < (planCurrentStep || 0)).length : 0;
@@ -223,6 +224,8 @@ export default function TopBar({
           </button>
 
           <SystemHealth containerName={selectedProject?.containerName} />
+
+          {layoutControls}
 
           {notificationSlot}
         </div>
