@@ -1464,7 +1464,6 @@ function ChatSessionContent({
   focusInputSignal = 0,
   contracted = false,
   mainThreadRailActive = false,
-  onExpandMainThread,
   onContractMainThread,
   mobileLayout = false,
 }) {
@@ -2597,22 +2596,6 @@ function ChatSessionContent({
   const showMainThreadSessionBubbles = session?.isMainThread && !searchResults && mainThreadSessionBubbles;
   const renderedChatChannel = contracted ? 'assistant' : chatChannel;
   const showOnlySessions = contracted && session?.isMainThread;
-
-  if (showOnlySessions) {
-    return (
-      <button
-        type="button"
-        onClick={onExpandMainThread}
-        title="Expand chat history"
-        className="group flex h-full w-full flex-col items-center justify-center gap-3 bg-[#0d1117] text-surface-400 transition-colors hover:bg-surface-850 hover:text-surface-200"
-      >
-        <MessageSquare size={16} className="text-surface-500 transition-colors group-hover:text-primary-400" />
-        <span style={{ writingMode: 'vertical-rl' }} className="text-[11px] font-medium uppercase tracking-wide">
-          Chat History — click to expand
-        </span>
-      </button>
-    );
-  }
 
   return (
     <div
@@ -3920,7 +3903,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                     : 'hidden';
                 const paneFrameClass = activeChildSessionId && !mobileLayout
                   ? isMainTab
-                    ? `md:justify-self-start md:rounded-2xl md:border md:border-surface-700/55 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)] md:transition-all md:duration-500 ${mainThreadPaneCollapsed ? 'md:w-full' : 'md:z-30 md:w-[min(56rem,calc(100vw-2rem))] md:shadow-[0_20px_70px_rgba(0,0,0,0.45)]'}`
+                    ? `md:justify-self-start md:rounded-2xl md:border md:border-surface-700/55 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)] ${mainThreadPaneCollapsed ? 'md:w-full' : 'md:z-30 md:w-[min(56rem,calc(100vw-2rem))] md:shadow-[0_20px_70px_rgba(0,0,0,0.45)]'}`
                     : 'md:rounded-2xl md:border md:border-surface-800 md:shadow-[0_14px_40px_rgba(0,0,0,0.22)]'
                   : '';
 
@@ -3929,7 +3912,20 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                   key={tabId}
                   className={`${visibilityClass} ${paneFrameClass} relative min-h-0 flex-col overflow-hidden bg-[#0d1117]`}
                 >
-                  <div className="flex min-h-0 flex-1 flex-col">
+                  {mainThreadPaneCollapsed && (
+                    <button
+                      type="button"
+                      onClick={() => setMainThreadExpanded(true)}
+                      title="Expand chat history"
+                      className="group absolute inset-0 z-10 flex h-full w-full flex-col items-center justify-center gap-3 bg-[#0d1117] text-surface-400 transition-colors hover:bg-surface-850 hover:text-surface-200"
+                    >
+                      <MessageSquare size={16} className="text-surface-500 transition-colors group-hover:text-primary-400" />
+                      <span style={{ writingMode: 'vertical-rl' }} className="text-[11px] font-medium uppercase tracking-wide">
+                        Chat History — click to expand
+                      </span>
+                    </button>
+                  )}
+                  <div className={`${mainThreadPaneCollapsed ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
                     {tabSession?.pending ? (
                       <div className="flex-1 min-h-0 flex items-center justify-center text-surface-500 text-sm gap-2">
                         <Loader size={16} className="animate-spin" />
@@ -3965,9 +3961,8 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                         mainThreadSessionBubbles={mainThreadSessionBubbles}
                         anchorScrollSignal={isMainTab ? mainThreadAnchorScrollSignal : ''}
                         focusInputSignal={isActiveChildTab ? sessionInputFocusSignal : 0}
-                        contracted={mainThreadPaneCollapsed}
+                        contracted={false}
                         mainThreadRailActive={isMainTab && Boolean(activeChildSessionId)}
-                        onExpandMainThread={() => setMainThreadExpanded(true)}
                         onContractMainThread={() => setMainThreadExpanded(false)}
                         mobileLayout={mobileLayout}
                       />
