@@ -153,3 +153,12 @@ export async function retrieveRelevant(projectId, query, { k = 8 } = {}) {
   const queryVec = await llmProvider.generateEmbedding(query);
   return rankChunks(queryVec, rows, k);
 }
+
+export function formatRelevantFilesBlock(pointers) {
+  if (!pointers?.length) return '';
+  const lines = pointers.map(p => `- ${p.filePath}:${p.startLine}-${p.endLine} — ${p.summary}`);
+  return [
+    'Relevant files (from the semantic index) — read these as needed; do not assume their contents:',
+    ...lines,
+  ].join('\n');
+}

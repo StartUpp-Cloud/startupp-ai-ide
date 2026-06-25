@@ -22,7 +22,7 @@ import { memoryStore } from './memoryStore.js';
 import { ollamaWorkspaceOrchestrator } from './ollamaWorkspaceOrchestrator.js';
 import { getDB } from './db.js';
 import Project, { findProjectById } from './models/Project.js';
-import { indexChangedFiles } from './codeIndex.js';
+import { indexChangedFiles, retrieveRelevant, formatRelevantFilesBlock } from './codeIndex.js';
 import { supportsSessionEffortSelection, supportsSessionModelSelection } from './sessionSettings.js';
 import {
   isSafeOrchestratedPrompt,
@@ -901,6 +901,17 @@ RULES:
       }
     } catch (err) {
       console.warn(`[agentGateway] Context distillation failed (non-blocking):`, err.message);
+    }
+
+    // Append semantic-index file pointers (pointers only — no file text). Optional: never block the turn.
+    try {
+      const pointers = await retrieveRelevant(projectId, message, { k: 8 });
+      const relevantBlock = formatRelevantFilesBlock(pointers);
+      if (relevantBlock) {
+        distilledContext = distilledContext ? `${distilledContext}\n\n${relevantBlock}` : relevantBlock;
+      }
+    } catch (err) {
+      console.warn('[agentGateway] Relevant-files retrieval failed (non-blocking):', err.message);
     }
 
     // Fold any steers queued before this turn began (e.g. while a prior turn was
