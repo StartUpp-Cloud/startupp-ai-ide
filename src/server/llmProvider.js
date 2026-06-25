@@ -592,9 +592,10 @@ class LLMProvider extends EventEmitter {
   async generateEmbeddings(texts) {
     const { provider, model } = pickEmbeddingProvider(this.settings);
     if (provider === 'openai') {
-      const cfg = this.settings.openai;
-      const apiKey = cfg.apiKey;
-      const res = await fetch(`${cfg.endpoint}/embeddings`, {
+      const appConnection = this.getApplicationConnection('openai', 'apiKey');
+      const endpoint = appConnection?.config?.endpoint || this.settings.openai.endpoint;
+      const apiKey = appConnection?.secret || this.settings.openai.apiKey;
+      const res = await fetch(`${endpoint}/embeddings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({ model, input: texts }),

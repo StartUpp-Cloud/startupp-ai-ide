@@ -12,7 +12,7 @@ router.get('/:projectId/code-index', (req, res) => {
   const meta = getIndexMeta(projectId);
   const project = findProjectById(projectId);
   if (project?.containerName) {
-    const stale = !meta || meta.status === 'none' || meta.embedModel !== llmProvider.embeddingModelId();
+    const stale = !meta || meta.status === 'none' || meta.status === 'error' || meta.embedModel !== llmProvider.embeddingModelId();
     if (stale && meta?.status !== 'indexing') {
       // fire-and-forget on-open / stale rebuild; status is observable via this endpoint
       indexProject(project).catch(err => console.warn('[code-index] on-open index failed:', err.message));

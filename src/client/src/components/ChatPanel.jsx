@@ -102,15 +102,6 @@ function getSessionStarterText(session) {
   return String(value).replace(/\s+/g, ' ').trim();
 }
 
-function collectChangedFilesFromMessages(messages = [], liveChangedFiles = []) {
-  let files = mergeChangedFiles([], liveChangedFiles);
-  for (const message of messages) {
-    const metadata = message?.metadata || {};
-    const changedFiles = Array.isArray(metadata.changedFiles) ? metadata.changedFiles : [];
-    if (changedFiles.length > 0) files = mergeChangedFiles(files, changedFiles);
-  }
-  return files;
-}
 
 function getRepoDeployHint(repo) {
   const scripts = repo?.scripts || {};
@@ -1443,7 +1434,6 @@ function ChatSessionContent({
   onInitialMessageHandled,
   onDirectMainMessageHandled,
   isSelected,
-  onChangedFilesChange,
   mainSession,
   onOpenMain,
   onCloseSession,
@@ -2510,11 +2500,6 @@ function ChatSessionContent({
     }
   }, [messages, projectId, sessionId, wsRef, sessionMode, effectiveTool, sessionModel, sessionEffort, selectedRolePromptIds, rolePromptInstructions]);
 
-  useEffect(() => {
-    if (!isSelected) return;
-    onChangedFilesChange?.(sessionId, collectChangedFilesFromMessages(messages, liveChangedFiles));
-  }, [isSelected, sessionId, messages, liveChangedFiles, onChangedFilesChange]);
-
   // Prepare display messages
   const sortedMessages = useMemo(() =>
     [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()),
@@ -2837,7 +2822,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const [historySearchLoading, setHistorySearchLoading] = useState(false);
   const [pendingInitialMessages, setPendingInitialMessages] = useState({});
   const [pendingDirectMainMessages, setPendingDirectMainMessages] = useState({});
-  const [activeChangedFiles, setActiveChangedFiles] = useState([]);
   const [mainThreadPaneHovered, setMainThreadPaneHovered] = useState(false);
   const [mainThreadPaneFocused, setMainThreadPaneFocused] = useState(false);
   const [mainThreadHoverSuppressed, setMainThreadHoverSuppressed] = useState(false);
@@ -3411,20 +3395,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
     };
   }, [projectId, openSession, updateSessionAssistantConfig]);
 
-  const handleChangedFilesChange = useCallback((sessionId, files) => {
-    if (sessionId === activeSessionId) setActiveChangedFiles(files || []);
-  }, [activeSessionId]);
-
-
-  useEffect(() => {
-    if (!activeSessionId) {
-      setActiveChangedFiles([]);
-      return;
-    }
-    const active = sessionsRef.current.find(s => s.id === activeSessionId);
-    if (!active) setActiveChangedFiles([]);
-  }, [activeSessionId]);
-
   useEffect(() => {
     if (!projectId) return;
     const runCommandInNewSession = (event) => {
@@ -3947,7 +3917,6 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                         onInitialMessageHandled={handleInitialMessageHandled}
                         onDirectMainMessageHandled={handleDirectMainMessageHandled}
                         isSelected={activeSessionId === tabId}
-                        onChangedFilesChange={handleChangedFilesChange}
                         mainSession={mainSession}
                         onOpenMain={openMainThread}
                         onCloseSession={() => closeTab(tabId)}
