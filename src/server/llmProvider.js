@@ -146,11 +146,13 @@ const DEFAULT_LLM_SETTINGS = {
   ollama: {
     endpoint: 'http://localhost:11434',
     model: 'llama3.2',
+    embedModel: 'nomic-embed-text',
     timeout: 30000,
   },
   openai: {
     endpoint: 'https://api.openai.com/v1',
     model: 'gpt-4o-mini',
+    embedModel: 'text-embedding-3-small',
     apiKey: '', // User must provide
     timeout: 30000,
   },
@@ -186,6 +188,23 @@ const DEFAULT_LLM_SETTINGS = {
   maxTokens: 150,
   temperature: 0.3, // Low temperature for more deterministic responses
 };
+
+/**
+ * Pure routing helper — picks the embedding provider based on active settings.
+ * Returns { provider: 'ollama'|'openai', model: string }.
+ * Non-embedding providers (deepseek, github, opencode) fall back to local Ollama.
+ */
+export function pickEmbeddingProvider(settings = {}) {
+  const provider = settings.provider;
+  if (provider === 'openai') {
+    return { provider: 'openai', model: settings.openai?.embedModel || 'text-embedding-3-small' };
+  }
+  if (provider === 'ollama') {
+    return { provider: 'ollama', model: settings.ollama?.embedModel || 'nomic-embed-text' };
+  }
+  // deepseek / github / opencode have no embeddings → local Ollama fallback
+  return { provider: 'ollama', model: settings.ollama?.embedModel || 'nomic-embed-text' };
+}
 
 // System prompt for the LLM to understand its role
 const SYSTEM_PROMPT = `You are an intelligent assistant integrated into an AI Prompt IDE. Your role is to respond to prompts from AI CLI tools (Claude Code, GitHub Copilot, Aider) on behalf of the developer.
@@ -552,6 +571,57 @@ class LLMProvider extends EventEmitter {
       }
       throw error;
     }
+  }
+
+  /**
+   * Generate a single embedding vector for the given text.
+   * @param {string} text
+   * @returns {Promise<number[]>}
+   */
+  async generateEmbedding(text) {
+    const [vec] = await this.generateEmbeddings([text]);
+    return vec;
+  }
+
+  /**
+   * Generate embedding vectors for multiple texts in one call.
+   * Routes to OpenAI or Ollama based on the active provider config.
+   * @param {string[]} texts
+   * @returns {Promise<number[][]>}
+   */
+  async generateEmbeddings(texts) {
+    const { provider, model } = pickEmbeddingProvider(this.settings);
+    if (provider === 'openai') {
+      const cfg = this.settings.openai;
+      const apiKey = cfg.apiKey;
+      const res = await fetch(`${cfg.endpoint}/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, input: texts }),
+      });
+      if (!res.ok) throw new Error(`OpenAI embeddings error: ${await res.text()}`);
+      const data = await res.json();
+      return data.data.map(d => d.embedding);
+    }
+    // Ollama: /api/embed accepts a string or array as `input`, returns { embeddings: number[][] }
+    const cfg = this.settings.ollama;
+    const res = await fetch(`${cfg.endpoint}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input: texts }),
+    });
+    if (!res.ok) throw new Error(`Ollama embeddings error: ${await res.text()}`);
+    const data = await res.json();
+    return data.embeddings;
+  }
+
+  /**
+   * Returns a string ID for the active embedding model, e.g. "ollama:nomic-embed-text".
+   * @returns {string}
+   */
+  embeddingModelId() {
+    const { provider, model } = pickEmbeddingProvider(this.settings);
+    return `${provider}:${model}`;
   }
 
   /**
