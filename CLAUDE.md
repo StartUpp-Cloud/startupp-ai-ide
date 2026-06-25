@@ -7,7 +7,7 @@ StartUpp AI IDE is an open-source, self-hosted, AI-assisted development environm
 ## Tech Stack
 
 - **Frontend:** React 18, Vite, Tailwind CSS, xterm.js, Lucide icons, React Router
-- **Backend:** Express.js (ESM), LowDB (flat-file JSON database), node-pty
+- **Backend:** Express.js (ESM), SQLite (`node:sqlite`, primary store at `data/app.sqlite`; LowDB retained only for legacy compatibility), node-pty
 - **Real-time:** WebSocket (ws) for terminal I/O
 - **Containers:** Docker (each project = isolated container with dev tools)
 - **LLM:** Ollama / OpenAI / DeepSeek (pluggable provider)
@@ -22,11 +22,11 @@ StartUpp AI IDE is an open-source, self-hosted, AI-assisted development environm
 ```
 src/server/          - 35+ backend modules (PTY mgmt, container mgmt, LLM provider, scheduler, agent orchestration, safety system, etc.)
 src/server/routes/   - 28 Express route files (projects, containers, LLM, branch review, skills, debug, chat, scheduler, slack, etc.)
-src/server/models/   - 6 data models: Project, Prompt, Plan, GlobalRule, History, ChatMessage (LowDB-backed)
+src/server/models/   - 6 data models: Project, Prompt, Plan, GlobalRule, History, ChatMessage (SQLite-backed via sqliteStore.js)
 src/client/src/pages/      - 12 pages: IDE, Dashboard, Onboarding, BranchReview, DebugElement, Skills, Profile, GlobalRules, CreateProject, EditProject, QuickPrompt, ProjectDetail
 src/client/src/components/ - 31 UI components: Terminal, TopBar, ChatPanel, LiveAnalysisPanel, SchedulerPanel, NotificationCenter, ProjectManagerPanel, SystemHealth, etc.
 src/data/            - Default/seed data
-data/                - Runtime data: db.json (LowDB), screenshots, session history, chat logs, job state
+data/                - Runtime data: app.sqlite (SQLite primary store), screenshots, session history, chat logs, job state
 docker/              - Dockerfile.dev for building project containers
 scripts/             - Utility scripts (PTY permissions fix, Chrome debug launcher)
 docs/superpowers/plans/ - Documentation for planned features
@@ -49,7 +49,7 @@ docs/superpowers/plans/ - Documentation for planned features
 
 ## Architectural Decisions
 
-- **LowDB (flat JSON file)** as the database -- no external DB dependency, everything in `data/db.json`.
+- **SQLite via Node's built-in `node:sqlite`** is the primary store (`data/app.sqlite`); no external DB service. A legacy LowDB JSON layer remains for backward compatibility only.
 - **No credentials stored** -- all auth handled by native CLI OAuth (Claude, GitHub, npm) persisted in Docker volumes.
 - **ESM throughout** (`"type": "module"` in both packages).
 - **Server is single source of truth** for terminal sessions; clients attach/detach freely.
