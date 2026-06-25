@@ -253,12 +253,36 @@ function SessionBubble({
   onDelete,
   compactPreview = false,
   collapsed = false,
+  iconOnly = false,
 }) {
   const status = getSessionStatus(session, { expanded: active, active });
   const timestamp = formatSessionTimestamp(session?.createdAt || session?.updatedAt);
   const name = session?.name || 'Chat';
   const starterText = getSessionStarterText(session);
   const showStarterPreview = starterText && name !== starterText;
+
+  if (iconOnly) {
+    return (
+      <button
+        type="button"
+        onClick={() => { if (!editing) onOpen?.(session); }}
+        title={name}
+        className={`relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border transition-colors ${
+          active
+            ? 'border-primary-500/45 bg-primary-500/15 text-primary-200'
+            : session?.pinned
+            ? 'border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/15'
+            : 'border-surface-700/55 bg-surface-850/75 text-surface-400 hover:border-surface-600 hover:bg-surface-800/80'
+        }`}
+      >
+        {session?.pinned ? <Pin size={13} className="-rotate-45" /> : <MessageCircle size={14} />}
+        {session?.hasUnread && !active && (
+          <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-primary-500 ring-2 ring-surface-900" />
+        )}
+        <span className={`absolute -bottom-0.5 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
+      </button>
+    );
+  }
 
   const handleOpen = () => {
     if (!editing) onOpen?.(session);
@@ -605,6 +629,7 @@ function MainThreadSessionBubbles({
       onDelete={onDeleteSession}
       compactPreview
       collapsed={collapsed}
+      iconOnly
     />
   );
 
@@ -615,15 +640,11 @@ function MainThreadSessionBubbles({
         <span>Threads</span>
         <span className={`text-surface-600 transition-opacity duration-500 ${collapsed ? 'opacity-0' : 'opacity-100'}`}>open a session bubble to continue it</span>
       </div>
-      <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5">
         {normalSessions.map(renderBubble)}
         {pinnedSessions.length > 0 && (
-          <div className="border-t border-surface-800/80 pt-2">
-            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-amber-300/80">
-              <Pin size={10} className="-rotate-45" />
-              Pinned threads
-            </div>
-            <div className="space-y-2">{pinnedSessions.map(renderBubble)}</div>
+          <div className="flex flex-wrap items-center gap-1.5 border-l border-surface-800/80 pl-1.5">
+            {pinnedSessions.map(renderBubble)}
           </div>
         )}
       </div>
