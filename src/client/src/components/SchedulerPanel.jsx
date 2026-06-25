@@ -4,6 +4,7 @@ import {
   Terminal, TestTube, ListTodo, ChevronDown, ChevronRight,
   RefreshCw, Loader2, Globe, Sparkles, Box, Monitor,
 } from 'lucide-react';
+import { CLI_TOOLS } from '../utils/sessionAssistantOptions';
 
 // Interval presets for easy selection
 const INTERVAL_PRESETS = [
@@ -98,6 +99,9 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
   const [formIntervalMs, setFormIntervalMs] = useState(300000);
   const [formCliTool, setFormCliTool] = useState('');
   const [formRunTarget, setFormRunTarget] = useState('container');
+  const [formFrequency, setFormFrequency] = useState('interval');
+  const [formTimeOfDay, setFormTimeOfDay] = useState('09:00');
+  const [formDayOfWeek, setFormDayOfWeek] = useState(1); // Monday
   const [creating, setCreating] = useState(false);
 
   const fetchSchedules = async () => {
@@ -148,7 +152,10 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
           webhookBody: isWebhook && formWebhookBody.trim() ? formWebhookBody.trim() : undefined,
           cliTool: isWebhook ? undefined : (formCliTool || undefined),
           projectPath,
-          intervalMs: formIntervalMs,
+          frequency: isWebhook ? undefined : formFrequency,
+          intervalMs: (!isWebhook && formFrequency === 'interval') ? formIntervalMs : undefined,
+          timeOfDay: (!isWebhook && formFrequency !== 'interval') ? formTimeOfDay : undefined,
+          dayOfWeek: (!isWebhook && formFrequency === 'weekly') ? formDayOfWeek : undefined,
           runTarget: isWebhook ? undefined : formRunTarget,
           enabled: true,
         }),
@@ -175,6 +182,9 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
     setFormIntervalMs(300000);
     setFormCliTool('');
     setFormRunTarget('container');
+    setFormFrequency('interval');
+    setFormTimeOfDay('09:00');
+    setFormDayOfWeek(1);
   };
 
   const handleToggle = async (schedule) => {
@@ -230,7 +240,8 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
   const createDisabled = creating
     || !formName.trim()
     || (formType === 'command' && !formCommand.trim())
-    || (formType === 'webhook' && !formWebhookUrl.trim());
+    || (formType === 'webhook' && !formWebhookUrl.trim())
+    || (formType !== 'webhook' && formFrequency !== 'interval' && !formTimeOfDay);
 
   return (
     <div className="flex flex-col h-full bg-surface-850">
@@ -338,15 +349,25 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
             })}
           </div>
 
-          {/* Command input (only for type=command) */}
+          {/* Command / Prompt input (for type=command) */}
           {formType === 'command' && (
-            <input
-              type="text"
-              value={formCommand}
-              onChange={(e) => setFormCommand(e.target.value)}
-              placeholder="Command to run..."
-              className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 placeholder-surface-500 focus:ring-1 focus:ring-primary-500 font-mono"
-            />
+            formCliTool && formCliTool !== 'shell' ? (
+              <textarea
+                value={formCommand}
+                onChange={(e) => setFormCommand(e.target.value)}
+                placeholder="Prompt to send to the AI tool..."
+                rows={3}
+                className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 placeholder-surface-500 focus:ring-1 focus:ring-primary-500 resize-none"
+              />
+            ) : (
+              <input
+                type="text"
+                value={formCommand}
+                onChange={(e) => setFormCommand(e.target.value)}
+                placeholder="Shell command to run..."
+                className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 placeholder-surface-500 focus:ring-1 focus:ring-primary-500 font-mono"
+              />
+            )
           )}
 
           {/* Webhook fields */}
@@ -383,29 +404,38 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
           )}
 
           {/* CLI Tool selector */}
-          {formType !== 'webhook' && <div>
-            <label className="text-[10px] text-surface-500 uppercase mb-1 block">Run via</label>
-            <div className="flex gap-1 flex-wrap">
-              {[
-                { id: '', label: 'Shell', color: 'surface' },
-                { id: 'claude', label: 'Claude', color: 'orange' },
-                { id: 'copilot', label: 'Copilot', color: 'blue' },
-                { id: 'aider', label: 'Aider', color: 'green' },
-              ].map(t => (
+          {formType !== 'webhook' && (
+            <div>
+              <label className="text-[10px] text-surface-500 uppercase mb-1 block">Run via</label>
+              <div className="flex gap-1 flex-wrap">
+                {/* Shell (no AI tool) */}
                 <button
-                  key={t.id}
-                  onClick={() => setFormCliTool(t.id)}
+                  onClick={() => setFormCliTool('')}
                   className={`px-2 py-0.5 text-[10px] rounded border transition-colors ${
-                    formCliTool === t.id
-                      ? `bg-${t.color}-500/20 border-${t.color}-500/40 text-${t.color}-300`
+                    formCliTool === ''
+                      ? 'bg-surface-600/40 border-surface-500/60 text-surface-200'
                       : 'bg-surface-800 border-surface-700 text-surface-400 hover:text-surface-200'
                   }`}
                 >
-                  {t.label}
+                  Shell
                 </button>
-              ))}
+                {/* AI tools from CLI_TOOLS (exclude 'shell' — already handled above) */}
+                {CLI_TOOLS.filter(t => t.id !== 'shell').map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => setFormCliTool(t.id)}
+                    className={`px-2 py-0.5 text-[10px] rounded border transition-colors ${
+                      formCliTool === t.id
+                        ? `bg-primary-500/20 border-primary-500/40 text-primary-300`
+                        : 'bg-surface-800 border-surface-700 text-surface-400 hover:text-surface-200'
+                    }`}
+                  >
+                    {t.name}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>}
+          )}
 
           {/* Run target */}
           {formType !== 'webhook' && <div>
@@ -434,18 +464,96 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
             </div>
           </div>}
 
-          {/* Interval dropdown */}
-          <select
-            value={formIntervalMs}
-            onChange={(e) => setFormIntervalMs(Number(e.target.value))}
-            className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500"
-          >
-            {INTERVAL_PRESETS.map((preset) => (
-              <option key={preset.ms} value={preset.ms}>
-                Every {preset.label}
-              </option>
-            ))}
-          </select>
+          {/* Frequency selector */}
+          {formType !== 'webhook' && (
+            <div>
+              <label className="text-[10px] text-surface-500 uppercase mb-1 block">Frequency</label>
+              <div className="flex gap-1 mb-2">
+                {[
+                  { id: 'interval', label: 'Interval' },
+                  { id: 'daily', label: 'Daily' },
+                  { id: 'weekly', label: 'Weekly' },
+                ].map(f => (
+                  <button
+                    key={f.id}
+                    onClick={() => setFormFrequency(f.id)}
+                    className={`px-2 py-1 text-[11px] rounded border transition-colors ${
+                      formFrequency === f.id
+                        ? 'bg-primary-500/20 border-primary-500/40 text-primary-300'
+                        : 'bg-surface-800 border-surface-700 text-surface-400 hover:text-surface-200'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Interval: existing preset dropdown */}
+              {formFrequency === 'interval' && (
+                <select
+                  value={formIntervalMs}
+                  onChange={(e) => setFormIntervalMs(Number(e.target.value))}
+                  className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500"
+                >
+                  {INTERVAL_PRESETS.map((preset) => (
+                    <option key={preset.ms} value={preset.ms}>
+                      Every {preset.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {/* Daily: time picker */}
+              {formFrequency === 'daily' && (
+                <div>
+                  <label className="text-[10px] text-surface-500 mb-1 block">Time of day (server local time)</label>
+                  <input
+                    type="time"
+                    value={formTimeOfDay}
+                    onChange={(e) => setFormTimeOfDay(e.target.value)}
+                    className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500"
+                  />
+                </div>
+              )}
+
+              {/* Weekly: weekday + time picker */}
+              {formFrequency === 'weekly' && (
+                <div className="space-y-1">
+                  <label className="text-[10px] text-surface-500 mb-1 block">Day & time (server local time)</label>
+                  <select
+                    value={formDayOfWeek}
+                    onChange={(e) => setFormDayOfWeek(Number(e.target.value))}
+                    className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500"
+                  >
+                    {['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map((day, i) => (
+                      <option key={i} value={i}>{day}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="time"
+                    value={formTimeOfDay}
+                    onChange={(e) => setFormTimeOfDay(e.target.value)}
+                    className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500"
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Webhook: keep interval dropdown as-is */}
+          {formType === 'webhook' && (
+            <select
+              value={formIntervalMs}
+              onChange={(e) => setFormIntervalMs(Number(e.target.value))}
+              className="w-full px-2 py-1.5 text-xs bg-surface-800 border border-surface-700 rounded text-surface-200 focus:ring-1 focus:ring-primary-500"
+            >
+              {INTERVAL_PRESETS.map((preset) => (
+                <option key={preset.ms} value={preset.ms}>
+                  Every {preset.label}
+                </option>
+              ))}
+            </select>
+          )}
 
           {/* Actions */}
           <div className="flex gap-2">
