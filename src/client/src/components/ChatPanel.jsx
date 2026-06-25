@@ -2626,9 +2626,9 @@ function ChatSessionContent({
             type="button"
             onClick={onContractMainThread}
             title="Contract chat history"
-            className="flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-medium text-surface-400 transition-colors hover:bg-surface-700 hover:text-surface-200"
+            className="rounded p-1 text-surface-400 transition-colors hover:bg-surface-700 hover:text-surface-200"
           >
-            <ArrowLeft size={13} /> Contract
+            <X size={15} />
           </button>
         </div>
       )}
@@ -3910,19 +3910,20 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
               return (
                 <div
                   key={tabId}
-                  className={`${visibilityClass} ${paneFrameClass} relative min-h-0 flex-col overflow-hidden bg-[#0d1117]`}
+                  className={`${visibilityClass} ${paneFrameClass} relative min-h-0 overflow-hidden bg-[#0d1117] ${isMainTab && activeChildSessionId && !mobileLayout ? 'flex-row' : 'flex-col'}`}
                 >
-                  {mainThreadPaneCollapsed && (
+                  {isMainTab && activeChildSessionId && !mobileLayout && (
                     <button
                       type="button"
-                      onClick={() => setMainThreadExpanded(true)}
-                      title="Expand chat history"
-                      className="group absolute inset-0 z-10 flex h-full w-full flex-col items-center justify-center gap-3 bg-[#0d1117] text-surface-400 transition-colors hover:bg-surface-850 hover:text-surface-200"
+                      onClick={() => setMainThreadExpanded(v => !v)}
+                      title={mainThreadPaneCollapsed ? 'Expand chat history' : 'Contract chat history'}
+                      className="group flex w-11 flex-shrink-0 flex-col items-center justify-center gap-2 border-r border-surface-700/55 bg-surface-900/70 py-3 text-surface-200 transition-colors hover:bg-surface-800 hover:text-surface-50"
                     >
-                      <MessageSquare size={16} className="text-surface-500 transition-colors group-hover:text-primary-400" />
-                      <span style={{ writingMode: 'vertical-rl' }} className="text-[11px] font-medium uppercase tracking-wide">
-                        Chat History — click to expand
+                      <MessageSquare size={18} className="text-primary-400" />
+                      <span style={{ writingMode: 'vertical-rl' }} className="text-sm font-semibold uppercase tracking-wider">
+                        Chat History
                       </span>
+                      <ChevronDown size={16} className={mainThreadPaneCollapsed ? 'rotate-[-90deg] text-surface-400' : 'rotate-90 text-surface-400'} />
                     </button>
                   )}
                   <div className={`${mainThreadPaneCollapsed ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>

@@ -778,14 +778,7 @@ export default function IDE() {
             </button>
           </div>
         ) : (
-          <div className="relative overflow-hidden">
-            <button
-              onClick={() => setRightPanelCollapsed(true)}
-              className="absolute right-1 top-1 z-10 p-1 rounded text-surface-500 hover:bg-surface-700 hover:text-surface-200"
-              title="Collapse tools panel"
-            >
-              <PanelRightClose className="w-3.5 h-3.5" />
-            </button>
+          <div className="overflow-hidden">
             <RightPanel
               projectId={selectedProjectId}
               projectPath={selectedProject?.folderPath}
