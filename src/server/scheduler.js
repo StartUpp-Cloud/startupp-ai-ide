@@ -32,6 +32,49 @@ const VALID_TYPES = new Set(['command', 'test', 'plan', 'webhook']);
 const VALID_WEBHOOK_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
+ * Compute the number of milliseconds from `nowMs` until the next occurrence
+ * of the given schedule frequency/time, using server-local time.
+ *
+ * @param {{ frequency: 'daily'|'weekly', timeOfDay: string, dayOfWeek?: number }} schedule
+ * @param {number} nowMs - Current time as Unix ms (pass Date.now() from caller)
+ * @returns {number} Milliseconds until next run (always > 0)
+ */
+export function computeMsUntilNextRun({ frequency, timeOfDay, dayOfWeek }, nowMs) {
+  const [hours, minutes] = timeOfDay.split(':').map(Number);
+
+  if (frequency === 'daily') {
+    // Build a Date for "today at timeOfDay" in local time
+    const now = new Date(nowMs);
+    const candidate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0, 0);
+    let delay = candidate.getTime() - nowMs;
+    if (delay <= 0) {
+      // Already passed — schedule for tomorrow
+      candidate.setDate(candidate.getDate() + 1);
+      delay = candidate.getTime() - nowMs;
+    }
+    return delay;
+  }
+
+  if (frequency === 'weekly') {
+    const now = new Date(nowMs);
+    const todayDow = now.getDay(); // 0=Sunday
+    // Days ahead until target weekday
+    let daysAhead = ((dayOfWeek - todayDow) + 7) % 7;
+
+    const candidate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysAhead, hours, minutes, 0, 0);
+    let delay = candidate.getTime() - nowMs;
+    if (delay <= 0) {
+      // Same day but time passed (daysAhead was 0) → next week
+      candidate.setDate(candidate.getDate() + 7);
+      delay = candidate.getTime() - nowMs;
+    }
+    return delay;
+  }
+
+  throw new Error(`computeMsUntilNextRun: unsupported frequency "${frequency}"`);
+}
+
+/**
  * @typedef {Object} ScheduleLastResult
  * @property {boolean} success - Whether the last run succeeded
  * @property {string} output - Captured stdout/stderr (truncated)
