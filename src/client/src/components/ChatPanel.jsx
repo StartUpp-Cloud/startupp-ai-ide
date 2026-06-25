@@ -1615,11 +1615,14 @@ function ChatSessionContent({
     }
   }, [projectId, sessionId, isVisible, searchResults, hasMoreHistory, updateMessages]);
 
+  const isNearBottomRef = useRef(true);
+
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const distFromTop = el.scrollTop;
+    isNearBottomRef.current = distFromBottom <= 300;
     setShowJumpBottom(distFromBottom > 300);
     setShowJumpTop(distFromTop > 300);
     if (distFromTop < 120) loadOlderMessages();
@@ -1678,6 +1681,7 @@ function ChatSessionContent({
     historySinceRef.current = chatHistorySinceIso();
     historyCursorRef.current = null;
     suppressNextAutoScrollRef.current = false;
+    isNearBottomRef.current = true;
     setMessages([]);
     setLoading(true);
     setSearchResults(null);
@@ -2171,7 +2175,7 @@ function ChatSessionContent({
     } else if (isInitialLoadRef.current && currentCount > 0) {
       scheduleScrollToBottom();
       isInitialLoadRef.current = false;
-    } else if (currentCount > prevCount && prevCount > 0) {
+    } else if (currentCount > prevCount && prevCount > 0 && isNearBottomRef.current) {
       scheduleScrollToBottom();
     }
 
@@ -2181,6 +2185,7 @@ function ChatSessionContent({
   useEffect(() => {
     if (!isVisible) return;
     if (!streamingMessage && !agentBusy && !recoveryStatus.active) return;
+    if (!isNearBottomRef.current) return; // user scrolled up to read — don't yank them down
 
     return scheduleScrollToBottom();
   }, [
