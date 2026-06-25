@@ -620,7 +620,7 @@ function MainThreadSessionBubbles({
       onDelete={onDeleteSession}
       compactPreview
       collapsed={collapsed}
-      iconOnly
+      iconOnly={collapsed}
     />
   );
 
@@ -631,14 +631,29 @@ function MainThreadSessionBubbles({
         <span>Threads</span>
         <span className={`text-surface-600 transition-opacity duration-500 ${collapsed ? 'opacity-0' : 'opacity-100'}`}>open a session bubble to continue it</span>
       </div>
-      <div className="flex flex-wrap items-center gap-1.5">
-        {normalSessions.map(renderBubble)}
-        {pinnedSessions.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5 border-l border-surface-800/80 pl-1.5">
-            {pinnedSessions.map(renderBubble)}
-          </div>
-        )}
-      </div>
+      {collapsed ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {normalSessions.map(renderBubble)}
+          {pinnedSessions.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 border-l border-surface-800/80 pl-1.5">
+              {pinnedSessions.map(renderBubble)}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {normalSessions.map(renderBubble)}
+          {pinnedSessions.length > 0 && (
+            <div className="border-t border-surface-800/80 pt-2">
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-amber-300/80">
+                <Pin size={10} className="-rotate-45" />
+                Pinned threads
+              </div>
+              <div className="space-y-2">{pinnedSessions.map(renderBubble)}</div>
+            </div>
+          )}
+        </div>
+      )}
       {onLoadArchived && (
         <button
           type="button"
