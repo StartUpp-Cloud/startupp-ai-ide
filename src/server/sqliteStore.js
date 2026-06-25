@@ -194,6 +194,21 @@ function createSchema() {
       related_files
     );
 
+    CREATE TABLE IF NOT EXISTS code_chunks (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      start_line INTEGER NOT NULL,
+      end_line INTEGER NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      content_hash TEXT NOT NULL,
+      embed_model TEXT NOT NULL,
+      embedding BLOB NOT NULL,
+      indexed_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_code_chunks_project ON code_chunks(project_id);
+    CREATE INDEX IF NOT EXISTS idx_code_chunks_file ON code_chunks(project_id, file_path);
+
     CREATE TABLE IF NOT EXISTS chat_sessions (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -469,6 +484,56 @@ export function saveMemory(memory) {
     m.relatedFiles.join(' '),
   );
   return m;
+}
+
+export function replaceFileChunks(projectId, filePath, embedModel, chunks) {
+  const now = new Date().toISOString();
+  const del = db.prepare('DELETE FROM code_chunks WHERE project_id = ? AND file_path = ?');
+  const ins = db.prepare(`
+    INSERT INTO code_chunks (id, project_id, file_path, start_line, end_line, summary, content_hash, embed_model, embedding, indexed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    del.run(projectId, filePath);
+    for (const c of chunks) {
+      ins.run(`${projectId}:${filePath}:${c.startLine}`, projectId, filePath, c.startLine, c.endLine, c.summary || '', c.contentHash, embedModel, c.embedding, now);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch {}
+    throw e;
+  }
+}
+
+export function deleteFileChunks(projectId, filePath) {
+  db.prepare('DELETE FROM code_chunks WHERE project_id = ? AND file_path = ?').run(projectId, filePath);
+}
+
+export function getProjectChunks(projectId) {
+  return db.prepare('SELECT id, file_path, start_line, end_line, summary, content_hash, embed_model, embedding FROM code_chunks WHERE project_id = ?').all(projectId);
+}
+
+export function getFileHashes(projectId) {
+  const rows = db.prepare('SELECT file_path, content_hash FROM code_chunks WHERE project_id = ? GROUP BY file_path').all(projectId);
+  const map = new Map();
+  for (const r of rows) map.set(r.file_path, r.content_hash);
+  return map;
+}
+
+export function clearProjectIndex(projectId) {
+  db.prepare('DELETE FROM code_chunks WHERE project_id = ?').run(projectId);
+}
+
+export function getIndexMeta(projectId) {
+  const row = db.prepare('SELECT value FROM kv_store WHERE key = ?').get(`code_index:${projectId}`);
+  return row ? JSON.parse(row.value) : null;
+}
+
+export function setIndexMeta(projectId, meta) {
+  const now = new Date().toISOString();
+  db.prepare('INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
+    .run(`code_index:${projectId}`, JSON.stringify(meta), now);
 }
 
 function rowToMemory(row) {
