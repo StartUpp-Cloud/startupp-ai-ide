@@ -104,6 +104,12 @@ function formatAskUserQuestions(questions = []) {
   return lines.join('\n');
 }
 
+export function shouldEmitProgress({ transient = false } = {}) {
+  // Transient progress is chatter ("Sending to X…", "delegating…"). The live
+  // checklist + busy spinner convey work-in-progress, so we drop transient lines.
+  return transient !== true;
+}
+
 class AgentGateway extends EventEmitter {
   constructor() {
     super();
@@ -3718,18 +3724,9 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
     }
 
     if (transient) {
-      // Broadcast only — do not persist to disk so the message never appears in history.
-      // The client already renders these via the transient streamingMessage overlay.
-      const msg = {
-        id: `progress-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        sessionId,
-        role: 'progress',
-        content,
-        createdAt: new Date().toISOString(),
-        metadata: { tasks, live: true, transient: true },
-      };
-      broadcastFn({ type: 'chat-progress', projectId, message: msg });
-      return;
+      // Suppressed: the live checklist (chat-checks) + busy spinner are the only
+      // work-in-progress UI. We no longer broadcast transient status chatter.
+      if (!shouldEmitProgress({ transient })) return;
     }
     const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks, live: true, transient: false } });
     broadcastFn({ type: 'chat-progress', projectId, message: msg });
