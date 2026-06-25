@@ -3917,7 +3917,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                       type="button"
                       onClick={() => setMainThreadExpanded(v => !v)}
                       title={mainThreadPaneCollapsed ? 'Expand chat history' : 'Contract chat history'}
-                      className="group flex w-11 flex-shrink-0 flex-col items-center justify-center gap-2 border-r border-surface-700/55 bg-surface-900/70 py-3 text-surface-200 transition-colors hover:bg-surface-800 hover:text-surface-50"
+                      className={`group flex w-11 flex-shrink-0 flex-col items-center justify-center gap-2 bg-surface-900/70 py-3 text-surface-200 transition-colors hover:bg-surface-800 hover:text-surface-50 ${mainThreadPaneCollapsed ? 'border-r border-surface-700/55' : 'order-last border-l border-surface-700/55'}`}
                     >
                       <MessageSquare size={18} className="text-primary-400" />
                       <span style={{ writingMode: 'vertical-rl' }} className="text-sm font-semibold uppercase tracking-wider">
@@ -3926,7 +3926,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                       <ChevronDown size={16} className={mainThreadPaneCollapsed ? 'rotate-[-90deg] text-surface-400' : 'rotate-90 text-surface-400'} />
                     </button>
                   )}
-                  <div className={`${mainThreadPaneCollapsed ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
+                  <div className={`${mainThreadPaneCollapsed ? 'hidden' : 'flex'} min-h-0 min-w-0 flex-1 flex-col`}>
                     {tabSession?.pending ? (
                       <div className="flex-1 min-h-0 flex items-center justify-center text-surface-500 text-sm gap-2">
                         <Loader size={16} className="animate-spin" />
