@@ -307,6 +307,11 @@ class PTYManager extends EventEmitter {
     try {
       const ptyProcess = pty.spawn(shell, args, {
         name: 'xterm-256color',
+        // Force winpty over ConPTY: node-pty's ConPTY console-list-agent throws
+        // "AttachConsole failed" under a PM2 (console-less) service on Node 24 +
+        // Windows, which CRASHES the whole server on PTY create/kill. winpty is
+        // stable here. (Ignored on non-Windows.)
+        useConpty: false,
         cols,
         rows,
         cwd: spawnCwd,
@@ -418,6 +423,7 @@ class PTYManager extends EventEmitter {
         try {
           const ptyProcess = pty.spawn(shell, args, {
             name: 'xterm-256color',
+            useConpty: false, // see note above — avoid ConPTY crash under PM2 on Windows
             cols,
             rows,
             cwd: spawnCwd,

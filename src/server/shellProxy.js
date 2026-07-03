@@ -132,6 +132,7 @@ class ShellProxy extends EventEmitter {
 
     const ptyProcess = pty.spawn(shell, args, {
       name: 'xterm-256color',
+      useConpty: false, // avoid ConPTY console-list-agent crash under PM2 on Windows
       cols: 120,
       rows: 30,
       cwd,

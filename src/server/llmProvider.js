@@ -111,6 +111,7 @@ function runOpenCodePty(args, { timeout, cwd } = {}) {
     const spawnArgs = isWin ? ['/c', 'opencode', ...args] : args;
     const ptyProcess = pty.spawn(spawnCmd, spawnArgs, {
       name: 'xterm-256color',
+      useConpty: false, // avoid ConPTY console-list-agent crash under PM2 on Windows
       cols: 120,
       rows: 40,
       cwd: cwd || process.cwd(),
