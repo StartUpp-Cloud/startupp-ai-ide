@@ -43,7 +43,9 @@ class AgentShellPool extends EventEmitter {
     let containerName = null;
     let workingDir = null;
 
-    if (project?.containerName) {
+    // Host-runtime projects always run on the host, even if a stale containerName
+    // lingers from a previous container setup.
+    if (project?.runtime !== 'host' && project?.containerName) {
       containerName = project.containerName;
       const { containerManager } = await import('./containerManager.js');
       const status = containerManager.getContainerStatus(containerName);

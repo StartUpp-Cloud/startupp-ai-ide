@@ -1305,7 +1305,7 @@ class TerminalServer {
 
       if (projectId && !cwd) {
         const project = Project.findById(projectId);
-        if (project?.containerName) {
+        if (project?.runtime !== 'host' && project?.containerName) {
           // Container-based project
           containerName = project.containerName;
 

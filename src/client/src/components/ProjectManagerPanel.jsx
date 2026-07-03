@@ -737,8 +737,11 @@ function EditModal({ project, onClose, onSaved }) {
     description: project.description,
     rules: project.rules?.length > 0 ? [...project.rules] : [""],
     selectedPresets: project.selectedPresets || [],
+    excludedPresetRules: project.excludedPresetRules || [],
     gitUrl: project.gitUrl || "",
     ports: (project.containerPorts || []).join(", "),
+    runtime: project.runtime === "host" ? "host" : "container",
+    folderPath: project.folderPath || "",
   });
   const [saving, setSaving] = useState(false);
   const [showPresets, setShowPresets] = useState(
@@ -751,12 +754,15 @@ function EditModal({ project, onClose, onSaved }) {
     if (!form.validateForm()) return;
     try {
       setSaving(true);
+      const isHost = form.formData.runtime === "host";
       await updateProject(project.id, {
         name: form.formData.name.trim(),
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
         excludedPresetRules: form.formData.excludedPresetRules || [],
+        runtime: isHost ? "host" : "container",
+        folderPath: isHost ? form.formData.folderPath.trim() : null,
         containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
         environments,
       });
