@@ -1436,6 +1436,37 @@ RULES:
   }
 
   /**
+   * Turn a cursor tool_call object into a friendly live-progress label. Cursor
+   * encodes the tool type as the object KEY (e.g. readToolCall, shellToolCall)
+   * with an `args` payload (path/command/query/…).
+   * @returns {{label, bare, detail, isShell, isMinor}}
+   */
+  _cursorToolLabel(tc) {
+    const fallback = { label: '🔧 working…', bare: 'working', detail: '', isShell: false, isMinor: true };
+    if (!tc || typeof tc !== 'object') return fallback;
+    const key = Object.keys(tc).find((k) => /ToolCall$/.test(k));
+    const name = key ? key.replace(/ToolCall$/, '').toLowerCase() : '';
+    const args = (key && tc[key]?.args) || {};
+    const base = (p) => String(p || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || String(p || '');
+    const trim = (c) => String(c || '').replace(/\s+/g, ' ').trim().slice(0, 90);
+    const mk = (icon, verb, detail, opts = {}) => ({
+      label: `${icon} ${verb}${detail ? ' ' + detail : ''}`.trim(),
+      bare: `${verb}${detail ? ' ' + detail : ''}`.trim(),
+      detail, isShell: !!opts.isShell, isMinor: !!opts.isMinor,
+    });
+    if (/read|cat|view|open/.test(name)) return mk('📖', 'Reading', base(args.path || args.file || args.target_file), { isMinor: true });
+    if (/write|create|newfile/.test(name)) return mk('✏️', 'Creating', base(args.path || args.file || args.target_file));
+    if (/edit|apply|patch|str_replace|multiedit|replace/.test(name)) return mk('✏️', 'Editing', base(args.path || args.file || args.target_file));
+    if (/shell|terminal|command|bash|exec|runcommand|(^run)/.test(name)) return mk('⚙️', 'Running:', trim(args.command || args.cmd || args.script), { isShell: true });
+    if (/ls|list|dir|glob|tree/.test(name)) return mk('📂', 'Listing', base(args.path || args.dir || '.'), { isMinor: true });
+    if (/grep|search|find|codebase|semantic/.test(name)) return mk('🔎', 'Searching', trim(args.query || args.pattern || args.regex || args.q || ''), { isMinor: true });
+    if (/delete|remove|(^rm)/.test(name)) return mk('🗑️', 'Deleting', base(args.path || args.file));
+    if (/web|fetch|browse|url/.test(name)) return mk('🌐', 'Fetching', trim(args.url || ''));
+    if (/todo|plan/.test(name)) return mk('📝', 'Planning', '', { isMinor: true });
+    return mk('🔧', name || 'tool', '');
+  }
+
+  /**
    * Run cursor-agent OUTSIDE a PTY (child_process pipe) so it emits clean
    * stream-json. With a controlling terminal it renders a full-screen TUI that
    * shreds the JSON — no stdout/stderr/TERM trick stops it. Piped, there is no
@@ -1501,7 +1532,14 @@ RULES:
 
       let buf = '', stderr = '', sessionId = null, resultText = null, isError = false;
       const assistantParts = [];
-      let lastToolProgressAt = 0, lastFilePoll = 0, killedForAbort = false;
+      let lastFilePoll = 0, killedForAbort = false;
+      let thinkingBuf = '', lastThinkingAt = 0, lastMinorAt = 0, progressCount = 0;
+      const MAX_PROGRESS = 80; // cap live-progress messages per turn (DB safety)
+      const emitProgress = (content) => {
+        if (progressCount >= MAX_PROGRESS) return;
+        progressCount++;
+        this._addProgressMessage(projectId, chatSessionId, content, broadcastFn);
+      };
 
       const pollFiles = () => {
         if (!fileTracker || !broadcastFn) return;
@@ -1516,19 +1554,54 @@ RULES:
 
       const handleEvent = (ev) => {
         if (ev.session_id) sessionId = ev.session_id;
+
+        // Thinking — accumulate deltas, surface a short summary when a block ends.
+        if (ev.type === 'thinking') {
+          if (ev.subtype === 'delta' && ev.text) thinkingBuf += ev.text;
+          else if (ev.subtype === 'completed' && thinkingBuf.trim()) {
+            const now = Date.now();
+            if (now - lastThinkingAt > 1500) { lastThinkingAt = now; emitProgress(`💭 ${thinkingBuf.replace(/\s+/g, ' ').trim().slice(0, 140)}`); }
+            thinkingBuf = '';
+          }
+          return;
+        }
+
         if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
           for (const b of ev.message.content) {
             if (b?.type === 'text' && b.text) { assistantParts.push(b.text); if (onChunk) onChunk(b.text + '\n'); }
           }
-        } else if (ev.type === 'tool_call' && (ev.subtype === 'started' || !ev.subtype)) {
-          const desc = ev.description || ev.tool_call?.description || ev.tool_call?.function?.name || ev.name || 'working…';
-          const now = Date.now();
-          if (now - lastToolProgressAt > 1200) {
-            lastToolProgressAt = now;
-            this._addProgressMessage(projectId, chatSessionId, `🔧 ${String(desc).replace(/\s+/g, ' ').slice(0, 110)}`, broadcastFn);
+          return;
+        }
+
+        if (ev.type === 'tool_call') {
+          const info = this._cursorToolLabel(ev.tool_call);
+          if (ev.subtype === 'started' || !ev.subtype) {
+            // Always show meaningful actions (edits/commands/deletes); throttle the
+            // frequent minor ones (reads/lists/searches) so bursts don't spam.
+            const now = Date.now();
+            if (!info.isMinor || now - lastMinorAt > 800) {
+              if (info.isMinor) lastMinorAt = now;
+              emitProgress(info.label);
+            }
+            pollFiles();
+          } else if (ev.subtype === 'completed') {
+            const tc = ev.tool_call || {};
+            const key = Object.keys(tc).find(k => /ToolCall$/.test(k));
+            const result = key ? tc[key]?.result : null;
+            const failed = result && (result.error || result.failure) && !result.success;
+            if (failed) {
+              const err = String(result.error?.message || result.error?.content || result.error || 'failed').replace(/\s+/g, ' ').slice(0, 100);
+              emitProgress(`❌ ${info.bare} — ${err}`);
+            } else if (info.isShell) {
+              // Command completion is a verification signal worth surfacing.
+              emitProgress(`✅ Ran: ${info.detail}`);
+            }
+            pollFiles();
           }
-          pollFiles();
-        } else if (ev.type === 'result') {
+          return;
+        }
+
+        if (ev.type === 'result') {
           if (typeof ev.result === 'string') resultText = ev.result;
           if (ev.is_error === true || ev.subtype === 'error') isError = true;
         }
