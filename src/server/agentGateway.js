@@ -32,7 +32,7 @@ import {
 } from './agentAutoConfirm.js';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import { resolveSalesforceContext } from './salesforce/salesforceContextResolver.js';
 import { buildCompactSalesforceContext } from './salesforce/salesforceContextService.js';
 import { shouldSuppressAgentProgress } from './orchestratorLiveness.js';
@@ -49,7 +49,7 @@ import {
 import { checklistTracker } from './checklistTracker.js';
 import { drainSteers, buildSteerPrompt } from './steeringInbox.js';
 import { buildEnvironmentsSummary } from './projectEnvironments.js';
-import { runHostShell } from './hostShell.js';
+import { runHostShell, findGitBash } from './hostShell.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -1436,6 +1436,164 @@ RULES:
   }
 
   /**
+   * Run cursor-agent OUTSIDE a PTY (child_process pipe) so it emits clean
+   * stream-json. With a controlling terminal it renders a full-screen TUI that
+   * shreds the JSON — no stdout/stderr/TERM trick stops it. Piped, there is no
+   * terminal to draw on, so the output is clean; we parse it for live progress,
+   * the final result, and the session id (resume). Returns the same shape as
+   * _attemptCliTool: { success, displayOutput, cleanOutput, ... }.
+   */
+  async _attemptCursorPiped(projectId, chatSessionId, message, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
+    const tool = 'cursor';
+    const { job, onChunk, distilledContext, fileTracker } = streamOpts;
+    const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
+    const worktreeOverride = this._sessionWorkDir(projectId, sessionMeta);
+
+    // Reuse the PTY command builder purely to assemble the prompt + resolve
+    // cliState/resume/model (with all its side effects), then extract the pieces
+    // to run without a shell/TTY.
+    const salesforceContext = await this._buildSalesforcePromptContext(projectId, sessionMeta);
+    const builtCmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode, assistantSettings, distilledContext, salesforceContext);
+    const b64 = builtCmd.match(/printf %s '([A-Za-z0-9+/=]+)'/);
+    const fullPrompt = b64 ? Buffer.from(b64[1], 'base64').toString('utf8') : message;
+    const model = (builtCmd.match(/--model '([^']*)'/) || [])[1] || 'auto';
+    const resumeId = (builtCmd.match(/--resume '([^']*)'/) || [])[1] || null;
+
+    const project = findProjectById(projectId);
+    const isContainer = project?.runtime !== 'host' && !!project?.containerName;
+    const workDir = worktreeOverride || project?.folderPath || undefined;
+
+    const cursorArgs = ['-p', '--output-format', 'stream-json', '--force', '--trust', '--model', model];
+    if (resumeId) cursorArgs.push('--resume', resumeId);
+    cursorArgs.push(fullPrompt);
+
+    // Spawn config — never allocate a PTY (stdio: pipe).
+    let spawnCmd, spawnArgs, spawnCwd;
+    if (isContainer) {
+      // docker exec WITHOUT -t → no TTY inside the container either.
+      spawnCmd = 'docker';
+      spawnArgs = ['exec', '-w', workDir || '/workspace', project.containerName, 'cursor-agent', ...cursorArgs];
+    } else if (process.platform === 'win32') {
+      // cursor-agent is a git-bash shim on Windows; run it via bash with clean
+      // argv passing (`"$@"`), no TTY. bash inherits piped stdio → cursor sees no
+      // terminal → clean stream-json.
+      spawnCmd = findGitBash() || 'bash';
+      spawnArgs = ['-c', 'cursor-agent "$@"', 'cursor-agent', ...cursorArgs];
+      spawnCwd = workDir;
+    } else {
+      spawnCmd = 'cursor-agent';
+      spawnArgs = cursorArgs;
+      spawnCwd = workDir;
+    }
+
+    this._addProgressMessage(projectId, chatSessionId,
+      resumeId ? '↻ Continuing with Cursor…' : '→ Asking Cursor…', broadcastFn, null, { transient: true });
+
+    return await new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(spawnCmd, spawnArgs, { cwd: spawnCwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      } catch (err) {
+        resolve({ success: false, retry: false, error: `Failed to launch cursor-agent: ${err.message}` });
+        return;
+      }
+      if (job) { try { jobManager.startJob(job.id, `cursor-${child.pid}`); } catch {} }
+
+      let buf = '', stderr = '', sessionId = null, resultText = null, isError = false;
+      const assistantParts = [];
+      let lastToolProgressAt = 0, lastFilePoll = 0, killedForAbort = false;
+
+      const pollFiles = () => {
+        if (!fileTracker || !broadcastFn) return;
+        const now = Date.now();
+        if (now - lastFilePoll < 5000) return;
+        lastFilePoll = now;
+        const snap = fileTracker.poll();
+        if (snap.changed && snap.files.length) {
+          broadcastFn({ type: 'session-file-changes', projectId, sessionId: chatSessionId, jobId: job?.id || null, files: snap.files });
+        }
+      };
+
+      const handleEvent = (ev) => {
+        if (ev.session_id) sessionId = ev.session_id;
+        if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
+          for (const b of ev.message.content) {
+            if (b?.type === 'text' && b.text) { assistantParts.push(b.text); if (onChunk) onChunk(b.text + '\n'); }
+          }
+        } else if (ev.type === 'tool_call' && (ev.subtype === 'started' || !ev.subtype)) {
+          const desc = ev.description || ev.tool_call?.description || ev.tool_call?.function?.name || ev.name || 'working…';
+          const now = Date.now();
+          if (now - lastToolProgressAt > 1200) {
+            lastToolProgressAt = now;
+            this._addProgressMessage(projectId, chatSessionId, `🔧 ${String(desc).replace(/\s+/g, ' ').slice(0, 110)}`, broadcastFn);
+          }
+          pollFiles();
+        } else if (ev.type === 'result') {
+          if (typeof ev.result === 'string') resultText = ev.result;
+          if (ev.is_error === true || ev.subtype === 'error') isError = true;
+        }
+      };
+
+      child.stdout.on('data', (d) => {
+        const s = d.toString();
+        if (job) { try { jobManager.recordOutput(job.id, s); } catch {} } // heartbeat + output file + progress
+        buf += s;
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+          const i = line.indexOf('{');
+          if (i < 0) continue;
+          try { handleEvent(JSON.parse(line.slice(i))); } catch { /* partial/non-json line */ }
+        }
+      });
+      child.stderr.on('data', (d) => { if (stderr.length < 8000) stderr += d.toString(); });
+
+      const abortTimer = setInterval(() => {
+        if (ctx?.aborted && child && !child.killed) { killedForAbort = true; try { child.kill('SIGTERM'); } catch {} }
+      }, 1000);
+
+      child.on('error', (err) => {
+        clearInterval(abortTimer);
+        resolve({ success: false, retry: false, error: `cursor-agent spawn error: ${err.message}` });
+      });
+
+      child.on('close', (code) => {
+        clearInterval(abortTimer);
+        const i = buf.indexOf('{'); // flush trailing line
+        if (i >= 0) { try { handleEvent(JSON.parse(buf.slice(i))); } catch {} }
+        pollFiles();
+
+        if (killedForAbort || ctx?.aborted) {
+          resolve({ success: false, aborted: true, displayOutput: resultText || assistantParts.join('\n\n') || '' });
+          return;
+        }
+
+        if (sessionId) {
+          const prev = this._getCliState(chatSessionId, tool);
+          this._setCliState(chatSessionId, tool, { ...(prev || {}), cliSessionId: sessionId, messageCount: (prev?.messageCount || 0) + 1, workDir: worktreeOverride || null });
+          this._storeToolSession(projectId, chatSessionId, tool, sessionId, worktreeOverride || null);
+        }
+
+        let text = resultText || assistantParts.join('\n\n') || '';
+        const combined = `${text}\n${stderr}`;
+        if (/out of usage|ActionRequiredError|Increase limits for faster/i.test(combined)) {
+          resolve({ success: false, retry: false, error: 'Cursor: this model is out of usage. Switch the Cursor model to **Auto** (free) and retry.', displayOutput: text || undefined });
+          return;
+        }
+        if (isError) {
+          resolve({ success: false, retry: true, retryReason: (text || 'cursor error').slice(0, 100), retryType: 'error', displayOutput: text });
+          return;
+        }
+        if (!text) {
+          resolve({ success: false, retry: true, retryReason: `cursor-agent exited ${code} with no parseable output`, retryType: 'error', displayOutput: (stderr || '').slice(0, 500) });
+          return;
+        }
+        resolve({ success: true, displayOutput: text, cleanOutput: text });
+      });
+    });
+  }
+
+  /**
    * Single attempt to run a CLI tool command.
    * Returns: { success, displayOutput, cleanOutput, retry, retryReason, retryType, error }
    * @param {Object} streamOpts - Optional streaming options
@@ -1443,6 +1601,12 @@ RULES:
    * @param {Function} streamOpts.onChunk - Callback for each output chunk (for persistence)
    */
   async _attemptCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
+    // Cursor renders a full-screen TUI whenever it has a controlling terminal,
+    // which shreds its stream-json in the shared agent PTY. Run it OUTSIDE the
+    // PTY (child_process pipe) so it emits clean JSON — see _attemptCursorPiped.
+    if (tool === 'cursor') {
+      return await this._attemptCursorPiped(projectId, chatSessionId, message, assistantSettings, broadcastFn, ctx, attempt, mode, streamOpts);
+    }
     const { job, onChunk, distilledContext, fileTracker } = streamOpts;
 
     const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
@@ -2730,23 +2894,16 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       case 'gemini':
         return `gemini -p ${promptArg}`;
       case 'cursor': {
-        // Cursor CLI (Composer agent), headless. -p = print/non-interactive with
-        // full tool access; --force allows edits/commands; --trust skips the
-        // workspace-trust prompt (required in headless). stream-json emits a
-        // session_id we capture for --resume (multi-turn memory) and a result
-        // event the completion detector already recognizes.
-        // Default to --model auto: Cursor's free tier (picks the best available
-        // model, incl. Composer) — the account default can be a paid model that
-        // returns "out of usage".
+        // NOTE: cursor is NOT executed through this PTY command path — it runs via
+        // _attemptCursorPiped (child_process, no TTY) because a controlling
+        // terminal makes cursor render a TUI that shreds its stream-json. This case
+        // still exists so _attemptCursorPiped can reuse the exact prompt/model/
+        // resume assembly (it extracts them from this string). Default model 'auto'
+        // = Cursor's free tier.
         const cursorModel = assistantSettings?.model || 'auto';
         let cmd = `cursor-agent -p --output-format stream-json --force --trust --model ${this._quoteCliArg(cursorModel)}`;
         if (cliState?.cliSessionId) cmd += ` --resume ${this._quoteCliArg(cliState.cliSessionId)}`;
         cmd += ` ${promptArg}`;
-        // Pipe stdout through cat so cursor-agent sees a non-TTY and emits CLEAN
-        // stream-json. Inside the harness PTY its stdout is a TTY, so it otherwise
-        // renders a status-line TUI (ESC[..H cursor moves) that shreds the JSON —
-        // breaking live-progress parsing AND result/completion detection.
-        cmd += ` | cat`;
         return cmd;
       }
       case 'shell':
