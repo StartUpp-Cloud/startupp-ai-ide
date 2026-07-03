@@ -40,7 +40,9 @@ const DEFAULT_DILIGENCE_SETTINGS = {
   minConfidence: 0.7,
   // Tools the loop is allowed to drive. Weak local models (ollama) and Aider's
   // direct-edit format are intentionally excluded — the loop would just churn.
-  tools: ['claude', 'codex', 'opencode', 'copilot'],
+  // Cursor (free Auto tier) benefits most: the plan→verify→iterate doctrine +
+  // completion gate is what lifts a cheaper model toward premium-agent behavior.
+  tools: ['claude', 'codex', 'opencode', 'copilot', 'cursor'],
 };
 
 export function getDiligenceSettings() {

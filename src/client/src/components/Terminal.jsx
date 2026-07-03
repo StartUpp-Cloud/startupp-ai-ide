@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
 import { Zap, X, MessageSquare, Bot, Brain, Sparkles, Cpu, Settings, Shield, AlertTriangle, FolderOpen } from 'lucide-react';
 import LLMSettingsPanel from './LLMSettingsPanel';
 import '@xterm/xterm/css/xterm.css';
@@ -21,6 +22,33 @@ const CLI_TOOLS = [
   { id: 'copilot', name: 'GitHub Copilot', icon: '\u{1F419}' },
   { id: 'aider', name: 'Aider', icon: '\u{1F465}' },
 ];
+
+// ── Predictive local echo helpers ──
+// Render plain typing instantly, then reconcile against the shell's own echo so
+// characters never double up. Only plain printable text is ever predicted.
+
+// True if `data` is safe to echo locally: plain printable text, no control chars,
+// no ESC sequences (arrows/function keys), no DEL.
+function isPrintableInput(data) {
+  if (!data) return false;
+  for (let i = 0; i < data.length; i++) {
+    const c = data.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f) return false;
+  }
+  return true;
+}
+
+// Detect the last alt-screen enter/leave toggle in a raw output chunk. Full-screen
+// apps (vim, less, the Claude/aider TUIs) switch to the alternate buffer — we must
+// never predict there. Returns 'enter' | 'leave' | null.
+function scanAltScreen(data) {
+  if (!data) return null;
+  let state = null;
+  const re = /\x1b\[\?(?:1049|1047|47)(h|l)/g;
+  let m;
+  while ((m = re.exec(data))) state = m[1] === 'h' ? 'enter' : 'leave';
+  return state;
+}
 
 export default function Terminal({ projectId, projects = [], onSessionChange, onSessionsChange, initialSessionId = null, isUtility = false }) {
   const terminalRef = useRef(null);
@@ -47,11 +75,36 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
   // Error auto-capture state
   const [capturedError, setCapturedError] = useState(null); // { text, timestamp }
-  const [terminalOutputBuffer, setTerminalOutputBuffer] = useState(''); // Recent output for context capture
+  // Recent output for "Fix this" context capture. Kept in a ref (not state) so
+  // high-throughput terminal output doesn't trigger a React re-render per chunk —
+  // it's only read on demand via window._getTerminalOutput.
+  const terminalOutputBufferRef = useRef('');
   const selectedProject = projects.find((project) => project.id === projectId) || null;
 
   // Settings panel state
   const [showLLMSettings, setShowLLMSettings] = useState(false);
+
+  // ── Predictive local echo state (refs — no re-render) ──
+  const altScreenRef = useRef(false);       // full-screen app active → don't predict
+  const predictedBufRef = useRef('');       // locally-echoed chars awaiting the shell's echo
+  const passwordCtxRef = useRef(false);     // likely password prompt → don't predict
+  const echoEnabledRef = useRef(true);
+  const [echoEnabled, setEchoEnabled] = useState(() => {
+    try { return localStorage.getItem('term_local_echo') !== '0'; } catch { return true; }
+  });
+  useEffect(() => {
+    echoEnabledRef.current = echoEnabled;
+    try { localStorage.setItem('term_local_echo', echoEnabled ? '1' : '0'); } catch {}
+    // Clear any in-flight predictions when toggling.
+    predictedBufRef.current = '';
+  }, [echoEnabled]);
+
+  // Reset predictive-echo state on any session/screen transition.
+  const resetEcho = useCallback(() => {
+    altScreenRef.current = false;
+    predictedBufRef.current = '';
+    passwordCtxRef.current = false;
+  }, []);
 
   // Track project-to-session mapping (projectId -> sessionId)
   const projectSessionsRef = useRef(new Map());
@@ -118,8 +171,18 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     xterm.loadAddon(fitAddon);
     xterm.loadAddon(webLinksAddon);
 
-
     xterm.open(terminalRef.current);
+
+    // GPU-accelerated rendering. Falls back to the DOM renderer automatically if
+    // WebGL is unavailable or the context is lost (e.g. GPU reset, tab throttling).
+    try {
+      const webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => webglAddon.dispose());
+      xterm.loadAddon(webglAddon);
+    } catch (err) {
+      console.warn('[Terminal] WebGL renderer unavailable, using DOM renderer:', err?.message);
+    }
+
     fitAddon.fit();
 
     xtermRef.current = xterm;
@@ -133,6 +196,24 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     // raw single-key input and terminal query responses.
     xterm.onData((data) => {
       if (!sessionIdRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+      // Predictive local echo — render plain typing immediately so it feels
+      // instant; the shell's own echo is reconciled away in the 'output' handler
+      // so characters never double up. Suppressed in full-screen apps and at
+      // password prompts (see altScreen/passwordCtx tracking below).
+      if (echoEnabledRef.current && !altScreenRef.current && !passwordCtxRef.current) {
+        if (isPrintableInput(data)) {
+          xterm.write(data);
+          predictedBufRef.current += data;
+        } else if (data === '\x7f' && predictedBufRef.current) {
+          // Backspace over our own predicted text — erase locally too.
+          xterm.write('\b \b');
+          predictedBufRef.current = predictedBufRef.current.slice(0, -1);
+        }
+      }
+      // Submitting a line ends any password entry.
+      if (data === '\r' || data === '\n') passwordCtxRef.current = false;
+
       wsRef.current.send(JSON.stringify({
         type: 'input',
         sessionId: sessionIdRef.current,
@@ -140,19 +221,27 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
       }));
     });
 
-    // Handle resize - always include sessionId
-    const handleResize = () => {
-      if (fitAddonRef.current) {
-        fitAddonRef.current.fit();
-        if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
-          wsRef.current.send(JSON.stringify({
-            type: 'resize',
-            sessionId: sessionIdRef.current,
-            cols: xterm.cols,
-            rows: xterm.rows,
-          }));
-        }
+    // Handle resize - always include sessionId.
+    // Debounced: a single layout change (e.g. dragging a panel divider) fires the
+    // ResizeObserver many times per second; refitting + sending a resize on every
+    // callback thrashes the PTY ioctl and garbles output. Coalesce to one fit per
+    // ~100ms idle so we only refit once the drag settles.
+    const doResize = () => {
+      if (!fitAddonRef.current) return;
+      fitAddonRef.current.fit();
+      if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
+        wsRef.current.send(JSON.stringify({
+          type: 'resize',
+          sessionId: sessionIdRef.current,
+          cols: xterm.cols,
+          rows: xterm.rows,
+        }));
       }
+    };
+    let resizeTimer = null;
+    const handleResize = () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(doResize, 100);
     };
 
     const resizeObserver = new ResizeObserver(handleResize);
@@ -161,6 +250,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     // No banner — session auto-connects and scrollback replays the terminal state
 
     return () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
       resizeObserver.disconnect();
       xterm.dispose();
       xtermRef.current = null;
@@ -355,6 +445,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
       case 'session-created':
         // Server sends this only to the client that requested the session
+        resetEcho();
         setSessionId(msg.sessionId);
         sessionIdRef.current = msg.sessionId; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.sessionId);
@@ -380,6 +471,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         break;
 
       case 'attached':
+        resetEcho();
         setSessionId(msg.session.id);
         sessionIdRef.current = msg.session.id; // Sync immediately — don't wait for useEffect
         onSessionChange?.(msg.session.id);
@@ -399,6 +491,16 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         // Filter out DA/tmux capability responses from output
         // Patterns: \x1b[?1;2c  or bare  0;276;0c  (repeated, no escape prefix)
         let outputData = msg.data;
+
+        // ── Predictive-echo bookkeeping (uses raw, unscrubbed data) ──
+        const alt = scanAltScreen(msg.data);
+        if (alt === 'enter') { altScreenRef.current = true; predictedBufRef.current = ''; }
+        else if (alt === 'leave') { altScreenRef.current = false; }
+        if (msg.data && /(?:password|passphrase|pin|verification code|one-time)\b[^\n]{0,40}:?\s*$/i.test(msg.data.slice(-140))) {
+          passwordCtxRef.current = true;
+          predictedBufRef.current = '';
+        }
+
         if (outputData) {
           outputData = outputData
             // ── DA response artifacts ──
@@ -417,6 +519,24 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
             .replace(/;\d+R/g, '')                   // Bare CPR fragment: ;165R, ;56R
             .replace(/(?:^|\D)\d{1,3}R(?=\D|$)/g, (m) => m.replace(/\d+R/, '')); // Bare: 1R, 56R (not in words)
         }
+        // ── Reconcile predictive echo ──
+        // The shell echoes back the characters we already showed locally; strip
+        // the matching prefix so they don't render twice. If the output diverges
+        // while predictions are still outstanding (echo-off, a program redrew the
+        // line, etc.), erase our stale predicted chars so the screen matches the
+        // server exactly. A fully-consumed match with predictions still pending is
+        // normal (the rest of the echo arrives in a later chunk) — not a divergence.
+        if (predictedBufRef.current && outputData) {
+          const buf = predictedBufRef.current;
+          let i = 0;
+          while (i < outputData.length && i < buf.length && outputData[i] === buf[i]) i++;
+          predictedBufRef.current = buf.slice(i);
+          outputData = outputData.slice(i);
+          if (outputData.length > 0 && predictedBufRef.current.length > 0) {
+            xtermRef.current?.write('\b \b'.repeat(predictedBufRef.current.length));
+            predictedBufRef.current = '';
+          }
+        }
         if (outputData) xtermRef.current?.write(outputData);
 
         // Dispatch event for LiveAnalysisPanel to consume (main terminal only)
@@ -426,11 +546,12 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
           }));
         }
 
-        // Buffer recent output for context capture (keep last 5000 chars)
-        setTerminalOutputBuffer(prev => {
-          const updated = prev + (msg.data || '');
-          return updated.length > 5000 ? updated.slice(-5000) : updated;
-        });
+        // Buffer recent output for context capture (keep last 5000 chars).
+        // Ref update — no setState, so this does not re-render the component.
+        {
+          const updatedBuf = terminalOutputBufferRef.current + (msg.data || '');
+          terminalOutputBufferRef.current = updatedBuf.length > 5000 ? updatedBuf.slice(-5000) : updatedBuf;
+        }
 
         // Auto-detect errors in output (only for main terminal)
         if (!isUtility) {
@@ -504,6 +625,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         // Server returns sessions filtered by project + role
         const activeSessions = (msg.sessions || []).filter(s => s.status === 'active');
 
+        resetEcho();
         xtermRef.current?.reset();
         // Pause cursor blink during transition — re-enabled on attach/create
         xtermRef.current?.options && (xtermRef.current.options.cursorBlink = false);
@@ -625,7 +747,7 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
         setPromptSuggestion(null);
         break;
     }
-  }, [onSessionChange, autoResponderEnabled, isUtility, restartSession]);
+  }, [onSessionChange, autoResponderEnabled, isUtility, restartSession, resetEcho]);
 
   // When projectId changes: ask the server for sessions for this project + role.
   // The server response (project-sessions) triggers attach or create.
@@ -761,9 +883,9 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
   // Expose terminal output capture for "Fix this" integration
   useEffect(() => {
     if (window && !isUtility) {
-      window._getTerminalOutput = () => terminalOutputBuffer;
+      window._getTerminalOutput = () => terminalOutputBufferRef.current;
     }
-  }, [terminalOutputBuffer, isUtility]);
+  }, [isUtility]);
 
   // Custom response input state
   const [customResponse, setCustomResponse] = useState('');
@@ -1007,6 +1129,19 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
 
             {/* Right: settings + status */}
             <div className="flex items-center gap-1.5 flex-shrink-0">
+              <button
+                onClick={() => setEchoEnabled((v) => !v)}
+                className={`p-1 rounded transition-colors ${
+                  echoEnabled
+                    ? 'bg-primary-600/30 text-primary-300 hover:bg-primary-600/40'
+                    : 'bg-gray-700 text-gray-500 hover:text-gray-300 hover:bg-gray-600'
+                }`}
+                title={echoEnabled
+                  ? 'Instant typing (local echo): ON — click to disable if characters ever look doubled'
+                  : 'Instant typing (local echo): OFF'}
+              >
+                <Zap className="w-3 h-3" />
+              </button>
               <button
                 onClick={() => setShowLLMSettings(true)}
                 className="p-1 rounded bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600 transition-colors"

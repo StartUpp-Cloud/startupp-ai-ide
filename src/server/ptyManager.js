@@ -7,10 +7,11 @@ import * as pty from 'node-pty';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execSync, exec } from 'child_process';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { sessionHistory } from './sessionHistory.js';
+import { findGitBash } from './hostShell.js';
 import { dockerEnvFlags, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
 import { resolveEnvironmentSecrets } from './projectEnvironments.js';
 
@@ -188,10 +189,16 @@ class PTYManager extends EventEmitter {
     const isWindows = os.platform() === 'win32';
 
     if (isWindows) {
-      return {
-        shell: 'powershell.exe',
-        args: [],
-      };
+      // Prefer Git Bash so host/local terminals behave like Linux (bash + GNU
+      // coreutils, and the POSIX quick-commands work). `--login` sources the
+      // MSYS profile that puts /usr/bin on PATH; `-i` makes it interactive.
+      // Opt out with IDE_HOST_SHELL=powershell.
+      const forced = (process.env.IDE_HOST_SHELL || '').toLowerCase();
+      if (forced !== 'powershell' && forced !== 'pwsh') {
+        const bash = findGitBash();
+        if (bash) return { shell: bash, args: ['--login', '-i'] };
+      }
+      return { shell: 'powershell.exe', args: [] };
     }
 
     return {
@@ -678,15 +685,16 @@ class PTYManager extends EventEmitter {
     const socketPath = (role === 'agent' && sessionId)
       ? `/tmp/${role}-${sessionId}.dtach`
       : `/tmp/${role}-session.dtach`;
-    try {
-      // Kill any dtach process using this socket, then remove the socket file
-      execSync(
-        `${dockerBin} exec ${containerName} sh -c "pkill -f 'dtach -A ${socketPath}' 2>/dev/null; rm -f '${socketPath}'"`,
-        { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' },
-      );
-    } catch {
-      // Best-effort — container may be stopped or dtach already gone
-    }
+    // Fire-and-forget async: this runs on every session create AND exit. A
+    // synchronous `docker exec` here (up to a 5s timeout) blocks the Node event
+    // loop, stalling I/O for every other terminal. Agent sockets use a unique
+    // per-session path that doesn't exist yet at create time, so not awaiting the
+    // cleanup before spawn is safe (nothing to collide with).
+    exec(
+      `${dockerBin} exec ${containerName} sh -c "pkill -f 'dtach -A ${socketPath}' 2>/dev/null; rm -f '${socketPath}'"`,
+      { timeout: 5000 },
+      () => { /* best-effort — container may be stopped or dtach already gone */ },
+    );
   }
 
   /**

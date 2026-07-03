@@ -1,10 +1,12 @@
 export const CLI_TOOLS = [
+  { id: 'auto', name: 'Auto', color: 'text-amber-300', context: 'Free agent drafts (Cursor/local), premium reviews & verifies (Claude/OpenCode/Codex)' },
   { id: 'claude', name: 'Claude', color: 'text-orange-400', context: 'Full conversation memory via --resume' },
   { id: 'copilot', name: 'Copilot', color: 'text-blue-400', context: 'Full conversation memory via --resume' },
   { id: 'opencode', name: 'OpenCode', color: 'text-violet-400', context: 'Full conversation memory via --session' },
   { id: 'codex', name: 'Codex', color: 'text-emerald-400', context: 'Full conversation memory via exec resume' },
   { id: 'aider', name: 'Aider', color: 'text-green-400', context: 'Context from git history + repo map' },
   { id: 'gemini', name: 'Gemini', color: 'text-cyan-400', context: 'Per-message context' },
+  { id: 'cursor', name: 'Cursor', color: 'text-fuchsia-400', context: 'Cursor Composer agent via cursor-agent -p' },
   { id: 'ollama', name: 'Ollama', color: 'text-sky-400', context: 'Local models via Ollama — context injected per-message' },
   { id: 'shell', name: 'Shell only', color: 'text-surface-400', context: 'Direct shell commands' },
 ];
@@ -121,6 +123,13 @@ const MODEL_OPTIONS = {
     { value: 'anthropic/claude-opus-4-5', label: 'Anthropic: claude-opus-4-5' },
     { value: 'openai/gpt-4o', label: 'OpenAI: gpt-4o' },
     { value: 'openai/o1', label: 'OpenAI: o1' },
+  ],
+  cursor: [
+    { value: '', label: 'Auto (free · default)' },
+    { value: 'auto', label: 'Auto (explicit)' },
+    { value: 'composer', label: 'Composer (may require quota)' },
+    { value: 'sonnet-4-thinking', label: 'sonnet-4-thinking (paid)' },
+    { value: 'gpt-5', label: 'gpt-5 (paid)' },
   ],
   codex: [
     { value: '', label: 'Tool default' },

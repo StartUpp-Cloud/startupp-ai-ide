@@ -684,6 +684,9 @@ class Scheduler extends EventEmitter {
       case 'gemini':
         command = `gemini -p "${escaped}"`;
         break;
+      case 'cursor':
+        command = `cursor-agent -p --force --trust --model auto "${escaped}"`;
+        break;
       default:
         // shell (and any tool that expects a raw command) runs verbatim
         command = schedule.command;

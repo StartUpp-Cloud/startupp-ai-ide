@@ -7,6 +7,8 @@ const defaultFormData = {
   selectedPresets: [],
   excludedPresetRules: [],
   ports: "",
+  runtime: "container", // 'container' (Docker) | 'host' (runs on the host machine)
+  folderPath: "", // host working directory (used when runtime === 'host')
 };
 
 export default function useProjectForm(initialData) {
@@ -56,6 +58,8 @@ export default function useProjectForm(initialData) {
     const hasPresets = formData.selectedPresets.length > 0;
     if (validRules.length === 0 && !hasPresets)
       newErrors.rules = "Add at least one rule or select a preset";
+    if (formData.runtime === "host" && !formData.folderPath.trim())
+      newErrors.folderPath = "Host projects need a folder path on this machine";
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -74,6 +78,8 @@ export default function useProjectForm(initialData) {
       selectedPresets: project.selectedPresets || [],
       excludedPresetRules: project.excludedPresetRules || [],
       ports: (project.containerPorts || []).join(", "),
+      runtime: project.runtime === "host" ? "host" : "container",
+      folderPath: project.folderPath || "",
     });
     setErrors({});
   };

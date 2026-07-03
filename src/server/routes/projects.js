@@ -134,7 +134,7 @@ router.get("/:id", async (req, res) => {
 // POST /api/projects - Create new project
 router.post("/", async (req, res) => {
   try {
-    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath, stack, stackManualOverride, salesforce, environments } = req.body;
+    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath, runtime, stack, stackManualOverride, salesforce, environments } = req.body;
 
     // Handle project cloning
     if (cloneFromId) {
@@ -201,6 +201,7 @@ router.post("/", async (req, res) => {
       selectedPresets: validPresets,
       promptSettings: normalizePromptSettings(promptSettings),
       folderPath: folderPath || null,
+      runtime: runtime === "host" ? "host" : "container",
       stack,
       stackManualOverride,
       salesforce: normalizeSalesforceSettings(salesforce),
@@ -269,7 +270,7 @@ router.post("/:id/clone", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, rules, selectedPresets, promptSettings, folderPath, containerName, gitUrl, repos, containerPorts, containerStatus, environments } = req.body;
+    const { name, description, rules, selectedPresets, promptSettings, folderPath, containerName, runtime, gitUrl, repos, containerPorts, containerStatus, environments } = req.body;
 
     const project = Project.findById(id);
     if (!project) {
@@ -333,6 +334,7 @@ router.put("/:id", async (req, res) => {
     // Handle folder path updates (allow null to clear)
     if (folderPath !== undefined) updates.folderPath = folderPath || null;
     if (containerName !== undefined) updates.containerName = containerName || null;
+    if (runtime !== undefined) updates.runtime = runtime === "host" ? "host" : "container";
     if (gitUrl !== undefined) updates.gitUrl = gitUrl || null;
     if (repos !== undefined) updates.repos = Array.isArray(repos) ? repos : [];
     if (containerPorts !== undefined) updates.containerPorts = Array.isArray(containerPorts) ? containerPorts : [];

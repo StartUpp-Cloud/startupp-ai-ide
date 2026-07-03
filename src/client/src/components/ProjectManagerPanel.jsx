@@ -615,40 +615,46 @@ function CreateModal({ onClose, onCreated }) {
     if (!form.validateForm()) return;
     try {
       setSaving(true);
+      const isHost = form.formData.runtime === "host";
       const projectData = {
         name: form.formData.name.trim(),
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
         excludedPresetRules: form.formData.excludedPresetRules || [],
-        containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
+        runtime: isHost ? "host" : "container",
+        folderPath: isHost ? form.formData.folderPath.trim() : null,
+        containerPorts: isHost ? [] : (form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : []),
       };
 
       const newProject = await createProject(projectData);
 
-      // Create a Docker container for the project
-      try {
-        await fetch('/api/containers/build-image', { method: 'POST' });
-        const containerRes = await fetch('/api/containers', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            projectId: newProject.id,
-            name: projectData.name,
-            repos: projectData.repos,
-            ports: projectData.containerPorts,
-          }),
-        });
-        const containerData = await containerRes.json();
-        if (containerData.containerName) {
-          await fetch(`/api/projects/${newProject.id}`, {
-            method: 'PUT',
+      // Container-runtime projects get an isolated Docker container. Host-runtime
+      // projects run directly on the host machine using folderPath — no container.
+      if (!isHost) {
+        try {
+          await fetch('/api/containers/build-image', { method: 'POST' });
+          const containerRes = await fetch('/api/containers', {
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ containerName: containerData.containerName }),
+            body: JSON.stringify({
+              projectId: newProject.id,
+              name: projectData.name,
+              repos: projectData.repos,
+              ports: projectData.containerPorts,
+            }),
           });
+          const containerData = await containerRes.json();
+          if (containerData.containerName) {
+            await fetch(`/api/projects/${newProject.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ containerName: containerData.containerName }),
+            });
+          }
+        } catch {
+          // Container creation is best-effort
         }
-      } catch {
-        // Container creation is best-effort
       }
 
       onCreated(newProject.id);

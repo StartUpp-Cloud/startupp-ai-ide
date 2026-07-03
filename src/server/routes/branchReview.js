@@ -11,6 +11,7 @@ import { execSync } from 'child_process';
 import { llmProvider } from '../llmProvider.js';
 import { findProjectById } from '../models/Project.js';
 import { containerManager } from '../containerManager.js';
+import { runHostShell } from '../hostShell.js';
 import path from 'path';
 
 const router = express.Router();
@@ -37,7 +38,9 @@ function run(cmd, ctx) {
       env: { ...process.env, PATH: `${process.env.PATH || ''}:${extraPaths}` },
     }).trim();
   }
-  return execSync(cmd, { cwd: ctx.projectPath, encoding: 'utf-8', stdio: 'pipe' }).trim();
+  // Host project — run on the host, through Git Bash on Windows so POSIX bits
+  // (git pipelines, `head`, quoting) behave like they do inside a Linux container.
+  return runHostShell(cmd, { cwd: ctx.projectPath }).trim();
 }
 
 /**

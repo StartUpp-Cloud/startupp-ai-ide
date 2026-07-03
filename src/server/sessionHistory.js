@@ -43,7 +43,9 @@ class SessionHistory {
       try {
         const cleanText = redactSecrets((scrollback || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''));
         const header = `Session: ${sessionId}\nProject: ${meta.projectId || 'unknown'}\nRole: ${meta.role || 'main'}\nSaved: ${new Date().toISOString()}\n${'─'.repeat(60)}\n`;
-        fs.writeFileSync(path.join(LIVE_DIR, `${sessionId}.txt`), header + cleanText, 'utf-8');
+        // Async write — keep the (up-to-100KB) disk write off the WebSocket/PTY
+        // event loop so high-throughput output doesn't stall terminal I/O.
+        fs.promises.writeFile(path.join(LIVE_DIR, `${sessionId}.txt`), header + cleanText, 'utf-8').catch(() => {});
       } catch { /* non-critical */ }
     }, 3000));
   }

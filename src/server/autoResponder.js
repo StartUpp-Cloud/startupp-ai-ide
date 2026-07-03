@@ -221,7 +221,12 @@ class AutoResponder extends EventEmitter {
       await db.write();
     }
 
-    this.patterns = db.data.autoResponder.patterns;
+    // Fall back to defaults if the persisted config exists but has no patterns
+    // array (e.g. a partial migration) — otherwise compilePatterns throws and
+    // blocks server startup.
+    this.patterns = Array.isArray(db.data.autoResponder.patterns)
+      ? db.data.autoResponder.patterns
+      : DEFAULT_PATTERNS;
     this.compilePatterns();
 
     // Initialize smart engine for NLP-based analysis
@@ -254,7 +259,7 @@ class AutoResponder extends EventEmitter {
    */
   compilePatterns() {
     this.compiledPatterns.clear();
-    for (const pattern of this.patterns) {
+    for (const pattern of this.patterns || []) {
       try {
         this.compiledPatterns.set(pattern.id, new RegExp(pattern.pattern, 'im'));
       } catch (e) {

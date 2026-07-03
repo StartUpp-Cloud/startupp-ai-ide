@@ -104,7 +104,12 @@ function runOpenCodePty(args, { timeout, cwd } = {}) {
   return new Promise((resolve, reject) => {
     let output = '';
     let settled = false;
-    const ptyProcess = pty.spawn('opencode', args, {
+    // On Windows, `opencode` is a `.cmd` shim node-pty can't launch directly —
+    // run it through cmd.exe. On POSIX, spawn it directly.
+    const isWin = process.platform === 'win32';
+    const spawnCmd = isWin ? (process.env.COMSPEC || 'cmd.exe') : 'opencode';
+    const spawnArgs = isWin ? ['/c', 'opencode', ...args] : args;
+    const ptyProcess = pty.spawn(spawnCmd, spawnArgs, {
       name: 'xterm-256color',
       cols: 120,
       rows: 40,
@@ -1395,11 +1400,15 @@ class LLMProvider extends EventEmitter {
     }
 
     try {
+      // On Windows the `opencode` binary is an npm `.cmd`/`.ps1` shim, which
+      // CreateProcess can't launch directly — Node needs a shell to resolve it
+      // via PATHEXT. On POSIX, run it directly.
       const { stdout } = await execFileAsync('opencode', ['models'], {
         encoding: 'utf-8',
         timeout: 8000,
         maxBuffer: OPENCODE_MODELS_MAX_BUFFER,
         windowsHide: true,
+        shell: process.platform === 'win32',
       });
 
       const models = parseOpenCodeModels(stdout);

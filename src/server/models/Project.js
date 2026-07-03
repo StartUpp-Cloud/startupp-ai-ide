@@ -63,6 +63,10 @@ export function normalizeStackSettings(project) {
   project.stackManualOverride = project.stackManualOverride === true;
   project.stackDetection = project.stackDetection || null;
   project.salesforce = project.salesforce && typeof project.salesforce === "object" ? project.salesforce : {};
+  // Runtime mode: 'container' (Docker, default) or 'host' (runs on the host
+  // machine using folderPath as the working directory). Legacy projects have no
+  // runtime field and default to 'container'.
+  project.runtime = project.runtime === "host" ? "host" : "container";
   return project;
 }
 
@@ -101,6 +105,7 @@ export async function createProject({
   promptSettings,
   folderPath,
   containerName,
+  runtime,
   gitUrl,
   repos,
   containerPorts,
@@ -117,8 +122,9 @@ export async function createProject({
     description: description.trim(),
     rules: rules.filter((r) => r && r.trim()).map((r) => r.trim()),
     promptSettings: normalizePromptSettings(promptSettings),
-    folderPath: folderPath || null, // Local filesystem path for workspace
+    folderPath: folderPath || null, // Local filesystem path / host working dir
     containerName: containerName || null, // Docker container name
+    runtime: runtime === "host" ? "host" : "container", // 'container' | 'host'
     gitUrl: gitUrl || null, // Backward compat: single git URL
     repos: repos || [], // Array of { url, folder } for multi-repo workspaces
     containerPorts: containerPorts || [], // Port mappings e.g. ['3000:3000']

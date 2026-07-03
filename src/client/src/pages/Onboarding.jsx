@@ -38,8 +38,11 @@ export default function Onboarding({ onSetupComplete }) {
   const [testError, setTestError] = useState("");
   const [llmReady, setLlmReady] = useState(false);
 
-  // OpenAI / DeepSeek
+  // OpenAI / DeepSeek / GitHub (PAT reuses apiKey)
   const [apiKey, setApiKey] = useState("");
+  // GitHub Models (Copilot) + OpenCode CLI
+  const [githubModel, setGithubModel] = useState("openai/gpt-4o-mini");
+  const [opencodeModel, setOpencodeModel] = useState("");
 
   // Project form
   const form = useProjectForm();
@@ -123,6 +126,18 @@ export default function Onboarding({ onSetupComplete }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ apiKey }),
         });
+      } else if (llmProvider === "github" && apiKey) {
+        await fetch("/api/llm/github/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey, model: githubModel || undefined }),
+        });
+      } else if (llmProvider === "opencode") {
+        await fetch("/api/llm/opencode/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: opencodeModel }),
+        });
       }
 
       // Step 3: Test the connection
@@ -148,39 +163,45 @@ export default function Onboarding({ onSetupComplete }) {
     if (!form.validateForm()) return;
     try {
       setSaving(true);
+      const isHost = form.formData.runtime === "host";
       const projectData = {
         name: form.formData.name.trim(),
         description: form.formData.description.trim(),
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
         excludedPresetRules: form.formData.excludedPresetRules || [],
-        containerPorts: form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : [],
+        runtime: isHost ? "host" : "container",
+        folderPath: isHost ? form.formData.folderPath.trim() : null,
+        containerPorts: isHost ? [] : (form.formData.ports ? form.formData.ports.split(',').map(p => p.trim()).filter(Boolean) : []),
       };
 
       const newProject = await createProject(projectData);
 
-      // Create container for the project
-      try {
-        await fetch('/api/containers/build-image', { method: 'POST' });
-        const containerRes = await fetch('/api/containers', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            projectId: newProject.id,
-            name: projectData.name,
-            repos: projectData.repos,
-            ports: projectData.containerPorts,
-          }),
-        });
-        const containerData = await containerRes.json();
-        if (containerData.containerName) {
-          await fetch(`/api/projects/${newProject.id}`, {
-            method: 'PUT',
+      // Container-runtime projects get an isolated container; host-runtime
+      // projects run on the host machine using folderPath — no container.
+      if (!isHost) {
+        try {
+          await fetch('/api/containers/build-image', { method: 'POST' });
+          const containerRes = await fetch('/api/containers', {
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ containerName: containerData.containerName }),
+            body: JSON.stringify({
+              projectId: newProject.id,
+              name: projectData.name,
+              repos: projectData.repos,
+              ports: projectData.containerPorts,
+            }),
           });
-        }
-      } catch { /* container creation is best-effort */ }
+          const containerData = await containerRes.json();
+          if (containerData.containerName) {
+            await fetch(`/api/projects/${newProject.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ containerName: containerData.containerName }),
+            });
+          }
+        } catch { /* container creation is best-effort */ }
+      }
 
       // Unlock the setup gate, then navigate to IDE
       onSetupComplete?.();
@@ -263,6 +284,8 @@ export default function Onboarding({ onSetupComplete }) {
                   { id: "ollama", name: "Ollama", desc: "Local" },
                   { id: "openai", name: "OpenAI", desc: "Cloud" },
                   { id: "deepseek", name: "DeepSeek", desc: "Cloud" },
+                  { id: "github", name: "GitHub Models", desc: "Copilot" },
+                  { id: "opencode", name: "OpenCode", desc: "CLI" },
                 ].map((p) => (
                   <button
                     key={p.id}
@@ -328,17 +351,59 @@ export default function Onboarding({ onSetupComplete }) {
               </div>
             )}
 
-            {/* OpenAI / DeepSeek: API key */}
-            {(llmProvider === "openai" || llmProvider === "deepseek") && (
+            {/* OpenAI / DeepSeek / GitHub: API key (or PAT) */}
+            {(llmProvider === "openai" || llmProvider === "deepseek" || llmProvider === "github") && (
               <div>
-                <label className="label">API Key</label>
+                <label className="label">
+                  {llmProvider === "github" ? "GitHub Token (PAT with Copilot access)" : "API Key"}
+                </label>
                 <input
                   type="password"
                   value={apiKey}
                   onChange={(e) => { setApiKey(e.target.value); setTestResult(null); setLlmReady(false); }}
                   className="input"
-                  placeholder={`Enter your ${llmProvider === "openai" ? "OpenAI" : "DeepSeek"} API key`}
+                  placeholder={
+                    llmProvider === "openai" ? "Enter your OpenAI API key"
+                      : llmProvider === "deepseek" ? "Enter your DeepSeek API key"
+                      : "ghp_… (GitHub token with Copilot access)"
+                  }
                 />
+                {llmProvider === "github" && (
+                  <p className="text-[11px] text-surface-500 mt-1">Free with a GitHub Copilot subscription — runs on GitHub Models.</p>
+                )}
+              </div>
+            )}
+
+            {/* GitHub Models: model */}
+            {llmProvider === "github" && (
+              <div>
+                <label className="label">Model</label>
+                <input
+                  type="text"
+                  value={githubModel}
+                  onChange={(e) => { setGithubModel(e.target.value); setTestResult(null); setLlmReady(false); }}
+                  className="input"
+                  placeholder="openai/gpt-4o-mini"
+                />
+                <p className="text-[11px] text-surface-500 mt-1">e.g. openai/gpt-4o, openai/gpt-4o-mini, meta-llama/Llama-4-Scout-17B-16E-Instruct</p>
+              </div>
+            )}
+
+            {/* OpenCode CLI: optional model */}
+            {llmProvider === "opencode" && (
+              <div>
+                <label className="label">Model <span className="text-surface-600 text-xs font-normal">— optional</span></label>
+                <input
+                  type="text"
+                  value={opencodeModel}
+                  onChange={(e) => { setOpencodeModel(e.target.value); setTestResult(null); setLlmReady(false); }}
+                  className="input"
+                  placeholder="leave blank to use OpenCode's default"
+                />
+                <p className="text-[11px] text-surface-500 mt-1">
+                  Uses the local <code className="text-primary-300">opencode</code> CLI as the orchestrator model.
+                  Install it from the Shell tab quick commands if it isn't available yet.
+                </p>
               </div>
             )}
 
@@ -360,7 +425,7 @@ export default function Onboarding({ onSetupComplete }) {
             <div className="flex gap-3">
               <button
                 onClick={handleTestConnection}
-                disabled={testing || (llmProvider === "ollama" && !selectedModel) || ((llmProvider === "openai" || llmProvider === "deepseek") && !apiKey)}
+                disabled={testing || (llmProvider === "ollama" && !selectedModel) || ((llmProvider === "openai" || llmProvider === "deepseek" || llmProvider === "github") && !apiKey)}
                 className="flex-1 btn-secondary flex items-center justify-center gap-2"
               >
                 {testing ? (

@@ -49,6 +49,7 @@ import {
 import { checklistTracker } from './checklistTracker.js';
 import { drainSteers, buildSteerPrompt } from './steeringInbox.js';
 import { buildEnvironmentsSummary } from './projectEnvironments.js';
+import { runHostShell } from './hostShell.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -189,7 +190,11 @@ class AgentGateway extends EventEmitter {
     if (repoPath) return repoPath;
 
     const project = projectId ? Project.findById(projectId) : null;
-    return project?.containerName ? '/workspace' : null;
+    if (project?.containerName) return '/workspace';
+    // Host-runtime projects run directly on the host machine; the agent's
+    // working directory is the project's folder on disk.
+    if (project?.runtime === 'host' && project?.folderPath) return project.folderPath;
+    return null;
   }
 
   _sessionWorkContext(projectId, sessionMeta) {
@@ -314,6 +319,12 @@ class AgentGateway extends EventEmitter {
       const assistantSettings = { model, effort };
       const isOllamaAssistant = ollamaWorkspaceOrchestrator.isOllamaAssistant(tool);
 
+      // Auto mode: two-stage draft→finalize pipeline. Intercept before the normal
+      // routing so an auto turn is never re-routed through smart-route/plan/ollama.
+      if (tool === 'auto') {
+        return await this._executeAutoPipeline({ projectId, sessionId, content: fullContent, mode, broadcastFn, ctx, skipUnread });
+      }
+
       if (mode !== 'plan' && this._requiresRepoInspection(fullContent)) {
         this._addProgressMessage(projectId, sessionId, `This needs ${tool}'s repository access — delegating...`, broadcastFn, null, { transient: true });
         return await this._sendToCliTool(projectId, sessionId, fullContent, tool, assistantSettings, broadcastFn, ctx, 'agent', skipUnread);
@@ -364,6 +375,127 @@ class AgentGateway extends EventEmitter {
       this._lastProgress.delete(sessionId);
       broadcastFn({ type: 'agent-status', projectId, sessionId, busy: false });
     }
+  }
+
+  // ── Auto mode: draft (free) → finalize (premium review + verify) ────────────
+
+  /**
+   * Probe which coding-assistant CLIs are actually available in the environment
+   * the agents run in — inside the container for container projects, on the host
+   * (via Git Bash on Windows) for host projects. Cached briefly per project.
+   * Returns a Set of tool ids (e.g. {'cursor','opencode'}).
+   */
+  async _probeAvailableTools(projectId) {
+    if (!this._toolAvailabilityCache) this._toolAvailabilityCache = new Map();
+    const cached = this._toolAvailabilityCache.get(projectId);
+    if (cached && (Date.now() - cached.at) < 5 * 60 * 1000) return cached.tools;
+
+    const project = projectId ? findProjectById(projectId) : null;
+    const candidates = ['cursor-agent', 'claude', 'opencode', 'codex', 'gemini', 'ollama'];
+    // `; true` at the end so a not-found last probe doesn't make the shell exit
+    // non-zero (which would throw away the stdout of the ones that WERE found).
+    const cmd = candidates.map((c) => `command -v ${c} >/dev/null 2>&1 && echo ${c}`).join('; ') + '; true';
+
+    let out = '';
+    try {
+      if (project?.containerName) {
+        const { containerManager } = await import('./containerManager.js');
+        out = containerManager.execInContainer(project.containerName, cmd, { timeout: 8000 }) || '';
+      } else if (project?.folderPath) {
+        out = runHostShell(cmd, { cwd: project.folderPath, timeout: 8000 }) || '';
+      }
+    } catch { /* best-effort — leave `out` empty on failure */ }
+
+    const tools = new Set();
+    for (const line of String(out).split('\n')) {
+      const t = line.trim();
+      if (t) tools.add(t === 'cursor-agent' ? 'cursor' : t);
+    }
+    this._toolAvailabilityCache.set(projectId, { at: Date.now(), tools });
+    return tools;
+  }
+
+  /** Constrained review+verify prompt handed to the premium finalizer. */
+  _buildFinalizerPrompt(goal, draft) {
+    const draftSummary = String(draft?.content || '').slice(0, 4000);
+    return [
+      'You are the FINALIZER in a two-stage pipeline. A fast drafting agent has already implemented an initial version of the request below and left its changes on disk in THIS workspace.',
+      '',
+      'Your job is to REVIEW and FINALIZE — not to rewrite:',
+      '- Read the drafter\'s ACTUAL changes (run `git diff`) and the original request.',
+      '- Fix real defects, incorrect logic, and any part of the request that is missing or does not actually work.',
+      '- Do NOT rewrite or restyle working code, and do NOT add features that were not requested.',
+      '- VERIFY: run the project\'s tests / build / typecheck. If new logic has no test, add one and run it. Report the real command output.',
+      '- If the draft is already correct and verified, make no changes and say so briefly.',
+      '',
+      '=== ORIGINAL REQUEST ===',
+      goal,
+      '',
+      '=== DRAFTING AGENT REPORT (reference only — verify against the real diff, do not trust blindly) ===',
+      draftSummary || '(no summary provided)',
+    ].join('\n');
+  }
+
+  /**
+   * Auto pipeline: pick the best available FREE drafter (Cursor > local Ollama)
+   * and PREMIUM finalizer (Claude > OpenCode > Codex) from what's installed, then
+   * draft → finalize. Degrades gracefully when only some tools are present.
+   */
+  async _executeAutoPipeline({ projectId, sessionId, content, mode, broadcastFn, ctx, skipUnread }) {
+    const available = await this._probeAvailableTools(projectId);
+    const LABEL = { cursor: 'Cursor', ollama: 'local Ollama', claude: 'Claude Code', opencode: 'OpenCode', codex: 'Codex' };
+
+    const drafter = ['cursor', 'ollama'].find((t) => available.has(t)) || null;
+    const finalizer = ['claude', 'opencode', 'codex'].find((t) => available.has(t)) || null;
+
+    // Nothing installed.
+    if (!drafter && !finalizer) {
+      this._addErrorMessage(projectId, sessionId,
+        'Auto mode needs at least one coding assistant installed (Cursor, Claude, OpenCode, or Codex). Open the Shell tab and use the quick-commands to install and log in to one, then try again.',
+        broadcastFn);
+      return { success: false, error: 'No coding assistant available for Auto mode' };
+    }
+
+    // No free drafter → Auto degrades to the best premium tool directly (still gets diligence).
+    if (!drafter) {
+      this._addProgressMessage(projectId, sessionId,
+        `Auto: no free drafter (Cursor/local) found — using ${LABEL[finalizer]} directly.`, broadcastFn);
+      return await this._sendToCliTool(projectId, sessionId, content, finalizer, {}, broadcastFn, ctx, mode, skipUnread);
+    }
+
+    // ── Phase 1: DRAFT (free, fast) — full diligence loop via _sendToCliTool ──
+    this._addProgressMessage(projectId, sessionId,
+      `🖊️ Auto · Phase 1 — drafting with ${LABEL[drafter]} (free)…`, broadcastFn);
+    const draft = await this._sendToCliTool(projectId, sessionId, content, drafter, {}, broadcastFn, ctx, mode, true);
+
+    if (ctx?.aborted) return draft;
+
+    if (!draft?.success) {
+      // Draft failed — hand the whole task to the premium tool if we have one.
+      if (finalizer) {
+        this._addProgressMessage(projectId, sessionId,
+          `Auto: ${LABEL[drafter]} draft did not complete — handing the full task to ${LABEL[finalizer]}.`, broadcastFn);
+        return await this._sendToCliTool(projectId, sessionId, content, finalizer, {}, broadcastFn, ctx, mode, skipUnread);
+      }
+      return draft;
+    }
+
+    // No premium finalizer, or a non-editing mode → the free draft is the result.
+    if (!finalizer) {
+      this._addProgressMessage(projectId, sessionId,
+        `Auto: no premium finalizer available — returning ${LABEL[drafter]}'s work.`, broadcastFn);
+      return draft;
+    }
+    if (mode === 'plan' || mode === 'plan-review') return draft;
+
+    // ── Phase 2: FINALIZE (premium: constrained review + verification) ──
+    this._addProgressMessage(projectId, sessionId,
+      `🔎 Auto · Phase 2 — ${LABEL[finalizer]} reviewing & verifying the draft…`, broadcastFn);
+    const finalized = await this._sendToCliTool(
+      projectId, sessionId, this._buildFinalizerPrompt(content, draft), finalizer, {}, broadcastFn, ctx, mode, skipUnread,
+    );
+
+    return finalized?.success ? finalized : draft;
   }
 
   /**
@@ -1689,6 +1821,23 @@ RULES:
         }
         return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
       }
+    } else if (tool === 'cursor') {
+      const parsed = this._parseCursorJsonOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+      if (parsed.sessionId) {
+        const prevState = this._getCliState(chatSessionId, tool);
+        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1, workDir: worktreeOverride || null };
+        this._setCliState(chatSessionId, tool, newState);
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
+      }
+      if (parsed.isError) {
+        // Out-of-quota on a paid model is terminal (retrying won't help) — tell
+        // the user to switch to the free Auto model. Other errors are retryable.
+        if (parsed.errorType === 'usage') {
+          return { success: false, retry: false, error: displayOutput, displayOutput };
+        }
+        return { success: false, retry: true, retryReason: (displayOutput || '').slice(0, 100), retryType: 'error', displayOutput };
+      }
     } else if (tool === 'ollama') {
       const parsed = this._parseOllamaOutput(cleanOutput, cmd);
       displayOutput = parsed.text;
@@ -2353,6 +2502,8 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       parts.push('IMPORTANT: Follow all project conventions and rules established in the repository.');
     } else if (tool === 'opencode') {
       parts.push('IMPORTANT: Read CLAUDE.md (if present) and always follow all project conventions and rules established there.');
+    } else if (tool === 'cursor') {
+      parts.push('IMPORTANT: Follow all project conventions and rules. Read AGENTS.md, CLAUDE.md, and any .cursor/rules files if present, and always follow the rules established there.');
     } else if (tool === 'codex') {
       parts.push('IMPORTANT: Follow all project conventions and rules. Read any CLAUDE.md, AGENTS.md, or .codex/ rules files if present.');
       parts.push('\nCODEX EXECUTION STANDARD: Use your highest practical reasoning depth and spend the time needed to solve the request correctly. Before changing behavior, inspect the relevant code paths and existing tests. Prefer a complete first pass over a fast shallow response. Iterate until the implementation is coherent with local patterns, edge cases are considered, and the result has been verified. Run the most relevant validation commands available for the changed surface; if a validation cannot be run, state exactly why. Do not stop after only describing changes when code or verification is needed.');
@@ -2575,6 +2726,21 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       }
       case 'gemini':
         return `gemini -p ${promptArg}`;
+      case 'cursor': {
+        // Cursor CLI (Composer agent), headless. -p = print/non-interactive with
+        // full tool access; --force allows edits/commands; --trust skips the
+        // workspace-trust prompt (required in headless). stream-json emits a
+        // session_id we capture for --resume (multi-turn memory) and a result
+        // event the completion detector already recognizes.
+        // Default to --model auto: Cursor's free tier (picks the best available
+        // model, incl. Composer) — the account default can be a paid model that
+        // returns "out of usage".
+        const cursorModel = assistantSettings?.model || 'auto';
+        let cmd = `cursor-agent -p --output-format stream-json --force --trust --model ${this._quoteCliArg(cursorModel)}`;
+        if (cliState?.cliSessionId) cmd += ` --resume ${this._quoteCliArg(cliState.cliSessionId)}`;
+        cmd += ` ${promptArg}`;
+        return cmd;
+      }
       case 'shell':
       default:
         return message;
@@ -3530,6 +3696,67 @@ NEEDS_USER`,
 
   _parseOpencodeJsonOutput(cleanOutput, cmd) {
     return parseOpencodeJsonOutput(cleanOutput, cmd, this._extractToolResponse.bind(this));
+  }
+
+  /**
+   * Parse Cursor CLI --output-format stream-json (JSONL events).
+   *
+   * Event shapes (empirically captured):
+   *   {"type":"system","subtype":"init","session_id":"...","model":"Auto"}
+   *   {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"..."}]},"session_id":"..."}
+   *   {"type":"result","subtype":"success","is_error":false,"result":"<final text>","session_id":"...","usage":{...}}
+   * session_id is captured for --resume (multi-turn memory).
+   */
+  _parseCursorJsonOutput(cleanOutput, cmd) {
+    let sessionId = null;
+    let isError = false;
+    let errorType = null;
+    let resultText = null;
+    const assistantParts = [];
+
+    for (const line of cleanOutput.split('\n')) {
+      const idx = line.indexOf('{');
+      if (idx < 0) continue;
+      let json;
+      try { json = JSON.parse(line.slice(idx)); } catch { continue; }
+
+      if (json.session_id) sessionId = json.session_id;
+
+      if (json.type === 'assistant' && Array.isArray(json.message?.content)) {
+        for (const c of json.message.content) {
+          if (c?.type === 'text' && c.text) assistantParts.push(c.text);
+        }
+      }
+
+      if (json.type === 'result') {
+        if (typeof json.result === 'string') resultText = json.result;
+        if (json.is_error === true || json.subtype === 'error') isError = true;
+      }
+
+      if (json.type === 'error') {
+        isError = true;
+        const msg = json.message || json.error || '';
+        if (/auth|401|unauthorized|not.*logged.?in/i.test(msg)) errorType = 'auth';
+        else if (/429|rate.?limit|too many/i.test(msg)) errorType = 'rate_limit';
+        else if (/out of usage|increase limits/i.test(msg)) errorType = 'usage';
+        if (msg) assistantParts.push(`\n\n**Error:** ${msg}`);
+      }
+    }
+
+    let text = resultText || assistantParts.join('\n\n');
+    if (!text) text = this._extractToolResponse(cleanOutput, cmd);
+
+    // "Out of usage" for a paid model surfaces as an ActionRequiredError string
+    // even when is_error isn't set — detect it so we don't retry uselessly.
+    if (!isError && /ActionRequiredError|out of usage|Increase limits for faster/i.test(cleanOutput)) {
+      isError = true;
+      errorType = 'usage';
+      if (!text || text.length < 10) {
+        text = 'Cursor: this model is out of usage. Switch the Cursor model to **Auto** (free) and retry.';
+      }
+    }
+
+    return { text, sessionId, isError, errorType };
   }
 
   /**

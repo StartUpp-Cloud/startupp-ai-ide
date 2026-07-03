@@ -20,16 +20,30 @@ const DEFAULT_HEIGHT = 180;
 
 const QUICK_COMMANDS = [
   { label: 'Quick commands...', command: '' },
-  { label: 'Login to GitHub', command: "printf 'Y\\n\\n' | script -qfec 'BROWSER=false gh auth login --hostname github.com --git-protocol https --web' /dev/null && gh auth setup-git" },
+  // ── GitHub ──
+  { label: 'Login to GitHub', command: "BROWSER=false gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git" },
   { label: 'GitHub auth status', command: 'gh auth status' },
+  // ── AI coding assistants: install ──
   { label: 'Install Claude Code', command: 'npm install -g @anthropic-ai/claude-code' },
   { label: 'Install OpenCode', command: 'npm install -g opencode-ai' },
-  { label: 'Install GitHub Copilot extension', command: 'gh extension install github/gh-copilot' },
+  { label: 'Install GitHub Copilot CLI', command: 'npm install -g @github/copilot' },
+  { label: 'Install GitHub Copilot (gh extension)', command: 'gh extension install github/gh-copilot' },
+  { label: 'Install Codex CLI', command: 'npm install -g @openai/codex' },
+  { label: 'Install Gemini CLI', command: 'npm install -g @google/gemini-cli' },
+  { label: 'Install Aider', command: 'pip3 install --user aider-chat' },
+  { label: 'Install Cursor CLI', command: 'curl https://cursor.com/install -fsS | bash' },
+  { label: 'Install Ollama', command: 'curl -fsSL https://ollama.com/install.sh | sh' },
+  // ── AI coding assistants: login / auth ──
+  { label: 'Login to Claude Code', command: 'claude' },
+  { label: 'Login to Codex', command: 'codex login' },
+  { label: 'Login to Gemini', command: 'gemini' },
+  { label: 'Login to Cursor', command: 'cursor-agent login' },
+  // ── Salesforce ──
   { label: 'Install Salesforce CLI', command: 'npm install -g @salesforce/cli' },
   { label: 'Login to Salesforce', command: 'sf org login web' },
+  // ── Utilities ──
   { label: 'Install pnpm', command: 'npm install -g pnpm' },
-  { label: 'Install Aider', command: 'pip3 install --user aider-chat' },
-  { label: 'Check tool versions', command: 'node -v && npm -v && gh --version && claude --version 2>/dev/null || true && opencode --version 2>/dev/null || true && sf --version 2>/dev/null || true' },
+  { label: 'Check tool versions', command: 'node -v; npm -v; gh --version 2>/dev/null; claude --version 2>/dev/null; opencode --version 2>/dev/null; copilot --version 2>/dev/null; codex --version 2>/dev/null; gemini --version 2>/dev/null; aider --version 2>/dev/null; sf --version 2>/dev/null; true' },
 ];
 
 function getStoredHeight() {

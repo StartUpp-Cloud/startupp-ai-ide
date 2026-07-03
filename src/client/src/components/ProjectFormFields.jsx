@@ -78,64 +78,118 @@ const ProjectFormFields = ({
         )}
       </div>
 
-      {/* Port Mappings */}
+      {/* Runtime mode: Container vs Host */}
       <div>
-        <label className="label">
-          Port Mappings <span className="text-surface-600 text-xs font-normal">— optional</span>
-        </label>
-        <input
-          type="text"
-          value={formData.ports}
-          onChange={(e) => handleInputChange("ports", e.target.value)}
-          className="input"
-          placeholder="3000:3000, 8080:8080"
-        />
-        <p className="text-hint mt-1">
-          Expose container ports for dev servers. Leave empty if not needed.
-        </p>
+        <label className="label">Runtime</label>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => handleInputChange("runtime", "container")}
+            className={`flex flex-col items-start gap-0.5 p-3 rounded-lg border text-left transition-colors ${
+              formData.runtime !== "host"
+                ? "border-primary-500/50 bg-primary-500/10"
+                : "border-surface-700 hover:border-surface-600"
+            }`}
+          >
+            <span className="text-sm font-medium text-surface-100">Container</span>
+            <span className="text-[11px] text-surface-400">Isolated Docker container per project</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleInputChange("runtime", "host")}
+            className={`flex flex-col items-start gap-0.5 p-3 rounded-lg border text-left transition-colors ${
+              formData.runtime === "host"
+                ? "border-primary-500/50 bg-primary-500/10"
+                : "border-surface-700 hover:border-surface-600"
+            }`}
+          >
+            <span className="text-sm font-medium text-surface-100">Host machine</span>
+            <span className="text-[11px] text-surface-400">Use a host folder + installed tools</span>
+          </button>
+        </div>
       </div>
 
-      {/* Getting started guide */}
-      <div className="p-3 bg-surface-800/50 border border-surface-700 rounded-lg">
-        <div className="flex items-center gap-2 mb-2">
-          <TerminalIcon className="w-4 h-4 text-primary-400" />
-          <span className="text-sm font-medium text-surface-200">Getting started</span>
+      {formData.runtime === "host" ? (
+        /* Host folder path */
+        <div>
+          <label className="label">
+            Project Folder <span className="text-danger-400">*</span>
+          </label>
+          <input
+            type="text"
+            value={formData.folderPath}
+            onChange={(e) => handleInputChange("folderPath", e.target.value)}
+            className={errors.folderPath ? "input-error" : "input"}
+            placeholder="/Users/you/code/my-app  or  C:\\Users\\you\\code\\my-app"
+          />
+          <p className="text-hint mt-1">
+            Absolute path to the project folder on this machine. Terminals and the AI
+            assistant run here directly, using your installed tools — no container.
+          </p>
+          {errors.folderPath && <p className="text-error">{errors.folderPath}</p>}
         </div>
-        <p className="text-xs text-surface-400 mb-2">
-          Your project runs in an isolated container. After creating it,
-          use the terminal to set up your tools and clone your repos:
-        </p>
-        <div className="space-y-1.5 text-[11px] font-mono">
-          <div className="flex items-start gap-2">
-            <span className="text-green-400 mt-px">$</span>
-            <div>
-              <code className="text-surface-300">gh auth login</code>
-              <span className="text-surface-600 ml-2">— connect GitHub</span>
+      ) : (
+        <>
+          {/* Port Mappings */}
+          <div>
+            <label className="label">
+              Port Mappings <span className="text-surface-600 text-xs font-normal">— optional</span>
+            </label>
+            <input
+              type="text"
+              value={formData.ports}
+              onChange={(e) => handleInputChange("ports", e.target.value)}
+              className="input"
+              placeholder="3000:3000, 8080:8080"
+            />
+            <p className="text-hint mt-1">
+              Expose container ports for dev servers. Leave empty if not needed.
+            </p>
+          </div>
+
+          {/* Getting started guide */}
+          <div className="p-3 bg-surface-800/50 border border-surface-700 rounded-lg">
+            <div className="flex items-center gap-2 mb-2">
+              <TerminalIcon className="w-4 h-4 text-primary-400" />
+              <span className="text-sm font-medium text-surface-200">Getting started</span>
+            </div>
+            <p className="text-xs text-surface-400 mb-2">
+              Your project runs in an isolated container. After creating it,
+              use the terminal to set up your tools and clone your repos:
+            </p>
+            <div className="space-y-1.5 text-[11px] font-mono">
+              <div className="flex items-start gap-2">
+                <span className="text-green-400 mt-px">$</span>
+                <div>
+                  <code className="text-surface-300">gh auth login</code>
+                  <span className="text-surface-600 ml-2">— connect GitHub</span>
+                </div>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-green-400 mt-px">$</span>
+                <div>
+                  <code className="text-surface-300">git clone https://github.com/org/repo.git</code>
+                  <span className="text-surface-600 ml-2">— clone your code</span>
+                </div>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-green-400 mt-px">$</span>
+                <div>
+                  <code className="text-surface-300">claude</code>
+                  <span className="text-surface-600 ml-2">— connect Claude Code</span>
+                </div>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-green-400 mt-px">$</span>
+                <div>
+                  <code className="text-surface-300">npm login</code>
+                  <span className="text-surface-600 ml-2">— connect npm (if needed)</span>
+                </div>
+              </div>
             </div>
           </div>
-          <div className="flex items-start gap-2">
-            <span className="text-green-400 mt-px">$</span>
-            <div>
-              <code className="text-surface-300">git clone https://github.com/org/repo.git</code>
-              <span className="text-surface-600 ml-2">— clone your code</span>
-            </div>
-          </div>
-          <div className="flex items-start gap-2">
-            <span className="text-green-400 mt-px">$</span>
-            <div>
-              <code className="text-surface-300">claude</code>
-              <span className="text-surface-600 ml-2">— connect Claude Code</span>
-            </div>
-          </div>
-          <div className="flex items-start gap-2">
-            <span className="text-green-400 mt-px">$</span>
-            <div>
-              <code className="text-surface-300">npm login</code>
-              <span className="text-surface-600 ml-2">— connect npm (if needed)</span>
-            </div>
-          </div>
-        </div>
-      </div>
+        </>
+      )}
 
       {/* Presets */}
       <div className="card">

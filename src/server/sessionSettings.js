@@ -1,4 +1,4 @@
-const SESSION_TOOLS = ['claude', 'copilot', 'opencode', 'codex', 'aider', 'gemini', 'ollama', 'shell'];
+const SESSION_TOOLS = ['auto', 'claude', 'copilot', 'opencode', 'codex', 'cursor', 'aider', 'gemini', 'ollama', 'shell'];
 
 const TOOL_EFFORT_LEVELS = {
   claude: ['low', 'medium', 'high', 'max'],
@@ -18,7 +18,7 @@ function normalizeTool(tool, fallback = 'claude') {
 }
 
 function supportsModelSelection(tool) {
-  return tool === 'claude' || tool === 'copilot' || tool === 'opencode' || tool === 'codex' || tool === 'ollama' || tool === 'aider';
+  return tool === 'claude' || tool === 'copilot' || tool === 'opencode' || tool === 'codex' || tool === 'cursor' || tool === 'ollama' || tool === 'aider';
 }
 
 function supportsEffortSelection(tool) {

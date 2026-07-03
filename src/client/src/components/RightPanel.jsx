@@ -1,5 +1,6 @@
 import SchedulerPanel from './SchedulerPanel';
 import ContainerFilesPanel from './ContainerFilesPanel';
+import FilesPanel from './FilesPanel';
 import CodeIndexStatus from './CodeIndexStatus';
 
 export default function RightPanel({ projectId, projectPath, selectedTool, containerName }) {
@@ -11,9 +12,14 @@ export default function RightPanel({ projectId, projectPath, selectedTool, conta
         <SchedulerPanel projectId={projectId} projectPath={projectPath} selectedTool={selectedTool} />
       </div>
 
-      {/* Bottom: Container Files */}
+      {/* Bottom: Files — container files for container projects, host filesystem
+          files for host-runtime projects (no container). */}
       <div className="min-h-[320px] flex-1 overflow-hidden md:min-h-0">
-        <ContainerFilesPanel projectId={projectId} containerName={containerName} />
+        {containerName ? (
+          <ContainerFilesPanel projectId={projectId} containerName={containerName} />
+        ) : (
+          <FilesPanel projectId={projectId} project={{ folderPath: projectPath }} />
+        )}
       </div>
     </div>
   );

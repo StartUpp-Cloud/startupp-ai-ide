@@ -28,8 +28,14 @@ import {
 
 // ── CLI tool badge labels ──────────────────────────────────────────────────────
 const CLI_LABELS = {
+  auto: 'Auto',
   claude: 'Claude',
   copilot: 'Copilot',
+  opencode: 'OpenCode',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  gemini: 'Gemini',
+  ollama: 'Ollama',
   aider: 'Aider',
 };
 
