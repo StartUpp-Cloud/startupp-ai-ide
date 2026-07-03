@@ -3894,6 +3894,18 @@ NEEDS_USER`,
       return '';
     }
 
+    // Guard against dumping a giant raw buffer. When stream-json is shredded by a
+    // tool's TUI escapes (see the cursor `| cat` fix), the line filters above miss
+    // it and megabytes of raw events would land in the chat. Detect raw-JSON-ish
+    // content and return a short note instead; otherwise hard-cap the size.
+    const rawJsonMarkers = (result.match(/"type"\s*:\s*"(assistant|result|system|user|tool_use|content_block)/g) || []).length;
+    if (rawJsonMarkers > 3 && result.length > 4000) {
+      return '⚠️ The assistant produced output that could not be parsed into a clean response (a terminal-formatting issue). Any file changes it made are still on disk — check them. Re-running should produce a clean report.';
+    }
+    if (result.length > 40000) {
+      return result.slice(0, 20000) + `\n\n… [output truncated — ${result.length} chars total]`;
+    }
+
     return result;
   }
 
