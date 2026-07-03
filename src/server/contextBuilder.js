@@ -355,7 +355,7 @@ class ContextBuilder {
    */
   getGitInfo(projectPath) {
     try {
-      const execOpts = { cwd: projectPath, encoding: 'utf-8', timeout: 5000 };
+      const execOpts = { cwd: projectPath, encoding: 'utf-8', timeout: 5000, windowsHide: true };
 
       const branch = execSync('git branch --show-current', execOpts).trim();
 

@@ -5,6 +5,7 @@ const EXEC_OPTIONS = (projectPath) => ({
   cwd: projectPath,
   encoding: 'utf-8',
   stdio: 'pipe',
+  windowsHide: true, // no console window flash on Windows
 });
 
 class GitManager {

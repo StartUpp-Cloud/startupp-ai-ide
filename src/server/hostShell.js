@@ -46,7 +46,9 @@ export function findGitBash() {
  * @param {{cwd?: string, timeout?: number, maxBuffer?: number}} [opts]
  */
 export function runHostShell(cmd, { cwd, timeout = 30000, maxBuffer = 10 * 1024 * 1024 } = {}) {
-  const options = { cwd, encoding: 'utf-8', stdio: 'pipe', timeout, maxBuffer };
+  // windowsHide prevents a console window from flashing on every invocation —
+  // these run frequently (git status polling, availability probes, diffs).
+  const options = { cwd, encoding: 'utf-8', stdio: 'pipe', timeout, maxBuffer, windowsHide: true };
   if (os.platform() === 'win32') {
     const bash = findGitBash();
     if (bash) options.shell = bash; // Node runs `bash -c "<cmd>"`

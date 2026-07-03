@@ -31,6 +31,7 @@ const EXTRA_PATHS = [
 const EXEC_OPTS_BASE = {
   encoding: "utf-8",
   stdio: "pipe",
+  windowsHide: true, // no console window flash on Windows
   env: {
     ...process.env,
     PATH: `${process.env.PATH || ""}${path.delimiter}${EXTRA_PATHS}`,

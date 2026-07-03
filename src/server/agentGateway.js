@@ -411,7 +411,9 @@ class AgentGateway extends EventEmitter {
       const t = line.trim();
       if (t) tools.add(t === 'cursor-agent' ? 'cursor' : t);
     }
-    this._toolAvailabilityCache.set(projectId, { at: Date.now(), tools });
+    // Only cache a successful probe. A transient empty result (early startup,
+    // shell hiccup) must NOT stick for 5 minutes and break Auto.
+    if (tools.size > 0) this._toolAvailabilityCache.set(projectId, { at: Date.now(), tools });
     return tools;
   }
 
@@ -921,6 +923,7 @@ RULES:
           encoding: 'utf8',
           stdio: 'pipe',
           timeout: 5000,
+          windowsHide: true, // don't flash a console window on each poll
         }).trim();
       }
     } catch {
