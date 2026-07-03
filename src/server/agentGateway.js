@@ -2742,6 +2742,11 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
         let cmd = `cursor-agent -p --output-format stream-json --force --trust --model ${this._quoteCliArg(cursorModel)}`;
         if (cliState?.cliSessionId) cmd += ` --resume ${this._quoteCliArg(cliState.cliSessionId)}`;
         cmd += ` ${promptArg}`;
+        // Pipe stdout through cat so cursor-agent sees a non-TTY and emits CLEAN
+        // stream-json. Inside the harness PTY its stdout is a TTY, so it otherwise
+        // renders a status-line TUI (ESC[..H cursor moves) that shreds the JSON —
+        // breaking live-progress parsing AND result/completion detection.
+        cmd += ` | cat`;
         return cmd;
       }
       case 'shell':
