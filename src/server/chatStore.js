@@ -373,13 +373,31 @@ class ChatStore {
     }
 
     if (partialTextBlocks.length > 0) {
-      const partialContent = partialTextBlocks.join('').trim();
+      // Genuine assistant text — keep it, but cap so a very long partial can't
+      // bloat the chat/DB.
+      let partialContent = partialTextBlocks.join('').trim();
+      if (partialContent.length > 40000) partialContent = partialContent.slice(-40000);
       if (partialContent.length > 20) {
         return { content: `${partialContent}\n\n---\n🔄 *Recovered partial response. The system will continue automatically.*`, cliSessionId };
       }
     }
 
-    return { content: this._filterMeaningfulLines(clean), cliSessionId };
+    // Fallback: nothing structured was extracted. The buffer is often raw
+    // stream-json fragmented across PTY chunks (a line may start mid-object like
+    // `,"session_id":…`), so NEVER dump it whole — that's how a ~2MB raw message
+    // ends up in the chat. Detect raw-JSON-ish content and return a short note;
+    // otherwise return meaningful lines, hard-capped.
+    const filtered = this._filterMeaningfulLines(clean);
+    const looksLikeRawJson =
+      /"type"\s*:\s*"(assistant|result|system|user|tool_use|content_block)/.test(filtered) ||
+      /^[\s]*[,{]\s*"(session_id|type|delta|message)"/.test(filtered.trimStart().slice(0, 200));
+    if (looksLikeRawJson || filtered.length > 8000) {
+      return {
+        content: '🔄 *Recovered an interrupted response that could not be fully parsed (the server likely restarted mid-run). Continuing automatically.*',
+        cliSessionId,
+      };
+    }
+    return { content: filtered, cliSessionId };
   }
 
   _parseRawChunksToContent(rawContent) {

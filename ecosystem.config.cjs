@@ -14,7 +14,7 @@ module.exports = {
       // Heap below the RSS restart ceiling so native/PTY buffers have headroom
       // and V8 GCs before PM2 kills the process mid-run.
       max_memory_restart: "4G",
-      node_args: "--max-old-space-size=3072",
+      node_args: "--max-old-space-size=3072 --require ./scripts/silence-child-process.cjs",
       // Give in-flight work a moment to settle on shutdown/reload.
       kill_timeout: 10000,
       env: {
