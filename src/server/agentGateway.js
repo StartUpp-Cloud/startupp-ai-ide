@@ -1667,6 +1667,164 @@ RULES:
   }
 
   /**
+   * Parse a completed tool run's raw output into a result — per-tool JSON
+   * parsing, session-id capture (resume), and retry/terminal classification.
+   * Shared by the pipe runner and the legacy PTY path.
+   */
+  _finalizeToolOutput(tool, totalOutput, cmd, cliState, chatSessionId, projectId, worktreeOverride) {
+    const cleanOutput = this._stripAnsi(totalOutput).trim();
+    if (!cleanOutput) {
+      return { success: false, retry: true, retryReason: 'No output received', retryType: 'timeout' };
+    }
+
+    let displayOutput = cleanOutput;
+    if (tool === 'claude' || tool === 'copilot') {
+      const parsed = this._parseJsonToolOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+      if (parsed.sessionId && !parsed.isError) {
+        const prevState = this._getCliState(chatSessionId, tool);
+        const newState = { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1, workDir: worktreeOverride || null };
+        this._setCliState(chatSessionId, tool, newState);
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
+      }
+      if (parsed.isIncomplete) return { success: false, retry: true, retryReason: 'Claude stopped before a final answer', retryType: 'incomplete-output', displayOutput, cleanOutput };
+      if (parsed.requiresUserInput) return { success: false, retry: false, retryReason: 'Coding agent needs user input', retryType: 'needs-user', errorType: 'needs-user', requiresUserInput: true, displayOutput, error: displayOutput, cleanOutput };
+      if (parsed.isError) {
+        if (parsed.errorType === 'auth' || parsed.errorType === 'rate_limit' || parsed.errorType === 'usage') return { success: false, retry: false, displayOutput, error: displayOutput };
+        if (/No conversation found with session ID/i.test(displayOutput)) return { success: false, retry: true, retryReason: `${tool} session not found`, retryType: 'context-lost', displayOutput };
+        if (/context.*overflow|token.*limit|too many tokens/i.test(displayOutput)) return { success: false, retry: true, retryReason: 'Context limit reached', retryType: 'context-limit', displayOutput, cleanOutput };
+        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+      }
+    } else if (tool === 'opencode') {
+      const parsed = this._parseOpencodeJsonOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+      if (parsed.sessionId) {
+        const prevState = this._getCliState(chatSessionId, tool);
+        this._setCliState(chatSessionId, tool, { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1, workDir: worktreeOverride || null });
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
+      }
+      if (parsed.finishReason === 'length' || parsed.finishReason === 'max_tokens') return { success: false, retry: true, retryReason: 'Context limit reached', retryType: 'context-limit', displayOutput, cleanOutput };
+      if (parsed.isIncomplete) return { success: false, retry: true, retryReason: 'OpenCode did not return a final answer', retryType: 'incomplete-output', displayOutput, cleanOutput };
+      if (parsed.isError) {
+        if (parsed.isPermanentError) return { success: false, retry: false, error: displayOutput, displayOutput };
+        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error', displayOutput };
+      }
+    } else if (tool === 'codex') {
+      const parsed = this._parseCodexJsonOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+      if (parsed.sessionId) {
+        const prevState = this._getCliState(chatSessionId, tool);
+        this._setCliState(chatSessionId, tool, { ...(prevState || {}), cliSessionId: parsed.sessionId, messageCount: (cliState?.messageCount || 0) + 1, workDir: worktreeOverride || null });
+        this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
+      }
+      if (parsed.isError) {
+        if (parsed.errorType === 'auth') return { success: false, retry: true, retryReason: 'Codex transient auth error', retryType: 'codex-transient' };
+        if (parsed.errorType === 'rate_limit') return { success: false, retry: true, retryReason: 'Codex rate limit', retryType: 'codex-rate-limit' };
+        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+      }
+    } else if (tool === 'ollama') {
+      const parsed = this._parseOllamaOutput(cleanOutput, cmd);
+      displayOutput = parsed.text;
+      if (parsed.isError) return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+    } else {
+      displayOutput = this._extractToolResponse(cleanOutput, cmd);
+    }
+
+    const lostContextPattern = /(?:^|\n)\s*(?:i (?:don'?t|do not) have (?:the )?(?:conversation|prior|previous|chat|session) context|i (?:can'?t|cannot) access (?:the )?(?:prior|previous|earlier) conversation|it (?:looks|seems) like (?:we'?re|we are) at the start of (?:a|the) conversation)/i;
+    if (lostContextPattern.test(displayOutput)) {
+      return { success: false, retry: true, retryReason: `${tool} lost context`, retryType: 'context-lost', displayOutput };
+    }
+    return { success: true, displayOutput, cleanOutput };
+  }
+
+  /**
+   * Run any agent CLI tool via a NON-PTY child process (`bash -c <cmd>` on host,
+   * `docker exec … bash -lc <cmd>` in a container). node-pty is unreliable under
+   * a console-less service on Windows; headless CLIs don't need a terminal.
+   * Streams progress + heartbeat, then parses via _finalizeToolOutput.
+   */
+  async _attemptToolPiped(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
+    const { job, onChunk, distilledContext, fileTracker } = streamOpts;
+    const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
+    const worktreeOverride = this._sessionWorkDir(projectId, sessionMeta);
+    const salesforceContext = await this._buildSalesforcePromptContext(projectId, sessionMeta);
+    const cmd = this._buildToolCommand(tool, message, chatSessionId, projectId, mode, assistantSettings, distilledContext, salesforceContext);
+    const cliState = this._getCliState(chatSessionId, tool); // after build (reflects resume resolution)
+
+    const project = findProjectById(projectId);
+    const isContainer = project?.runtime !== 'host' && !!project?.containerName;
+    const workDir = worktreeOverride || project?.folderPath || undefined;
+
+    this._addProgressMessage(projectId, chatSessionId,
+      cliState?.cliSessionId ? `↻ Continuing with ${tool}…` : `→ Asking ${tool}…`, broadcastFn, null, { transient: true });
+
+    let spawnCmd, spawnArgs, spawnCwd;
+    if (isContainer) {
+      spawnCmd = 'docker';
+      spawnArgs = ['exec', '-w', workDir || '/workspace', project.containerName, 'bash', '-lc', cmd];
+    } else if (process.platform === 'win32') {
+      spawnCmd = findGitBash() || 'bash';
+      spawnArgs = ['-c', cmd];
+      spawnCwd = workDir;
+    } else {
+      spawnCmd = process.env.SHELL || '/bin/bash';
+      spawnArgs = ['-c', cmd];
+      spawnCwd = workDir;
+    }
+
+    return await new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(spawnCmd, spawnArgs, { cwd: spawnCwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      } catch (err) {
+        resolve({ success: false, retry: true, retryReason: `Failed to launch ${tool}: ${err.message}`, error: err.message });
+        return;
+      }
+      if (job) { try { jobManager.startJob(job.id, `${tool}-${child.pid}`); } catch {} }
+
+      let totalOutput = '', stderrBuf = '', lastProgress = 0, lastFilePoll = 0, killedForAbort = false;
+      const pollFiles = () => {
+        if (!fileTracker || !broadcastFn) return;
+        const now = Date.now();
+        if (now - lastFilePoll < 5000) return;
+        lastFilePoll = now;
+        const snap = fileTracker.poll();
+        if (snap.changed && snap.files.length) {
+          broadcastFn({ type: 'session-file-changes', projectId, sessionId: chatSessionId, jobId: job?.id || null, files: snap.files });
+        }
+      };
+      child.stdout.on('data', (d) => {
+        const s = d.toString();
+        totalOutput += s;
+        if (onChunk) onChunk(s);
+        if (job) { try { jobManager.recordOutput(job.id, s); } catch {} }
+        const now = Date.now();
+        if (now - lastProgress > 2000) {
+          const event = this._parseStreamEvent(this._stripAnsi(s));
+          if (event) { lastProgress = now; this._addProgressMessage(projectId, chatSessionId, event, broadcastFn); }
+        }
+        pollFiles();
+      });
+      child.stderr.on('data', (d) => { if (stderrBuf.length < 16000) stderrBuf += d.toString(); });
+
+      const abortTimer = setInterval(() => {
+        if (ctx?.aborted && child && !child.killed) { killedForAbort = true; try { child.kill('SIGTERM'); } catch {} }
+      }, 1000);
+      child.on('error', (err) => {
+        clearInterval(abortTimer);
+        resolve({ success: false, retry: true, retryReason: `${tool} spawn error: ${err.message}`, error: err.message });
+      });
+      child.on('close', () => {
+        clearInterval(abortTimer);
+        pollFiles();
+        if (killedForAbort || ctx?.aborted) { resolve({ success: false, aborted: true, displayOutput: '' }); return; }
+        const combined = totalOutput.trim() ? totalOutput : `${totalOutput}\n${stderrBuf}`;
+        resolve(this._finalizeToolOutput(tool, combined, cmd, cliState, chatSessionId, projectId, worktreeOverride));
+      });
+    });
+  }
+
+  /**
    * Single attempt to run a CLI tool command.
    * Returns: { success, displayOutput, cleanOutput, retry, retryReason, retryType, error }
    * @param {Object} streamOpts - Optional streaming options
@@ -1680,6 +1838,13 @@ RULES:
     if (tool === 'cursor') {
       return await this._attemptCursorPiped(projectId, chatSessionId, message, assistantSettings, broadcastFn, ctx, attempt, mode, streamOpts);
     }
+    // ALL agent CLI tools now run pipe-based (no PTY). node-pty's ConPTY/winpty
+    // is unreliable under a console-less service (PM2) on Windows — it either
+    // crashes the server (AttachConsole) or fails with "CreateProcess failed".
+    // Headless CLIs (-p/run/exec) don't need a terminal, so child_process pipe
+    // is both robust and clean. (The legacy PTY code below is now unreachable.)
+    return await this._attemptToolPiped(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode, streamOpts);
+    /* eslint-disable no-unreachable */
     const { job, onChunk, distilledContext, fileTracker } = streamOpts;
 
     const sessionMeta = chatSessionId && projectId ? chatStore.getSession(projectId, chatSessionId) : null;
