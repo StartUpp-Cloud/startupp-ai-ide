@@ -1534,6 +1534,9 @@ RULES:
       const assistantParts = [];
       let lastFilePoll = 0, killedForAbort = false;
       let thinkingBuf = '', lastThinkingAt = 0, lastMinorAt = 0, progressCount = 0;
+      const startedAt = Date.now();
+      let lastOutputAt = startedAt, timedOut = false;
+      const IDLE_MS = 6 * 60 * 1000, MAX_MS = 30 * 60 * 1000;
       const MAX_PROGRESS = 80; // cap live-progress messages per turn (DB safety)
       const emitProgress = (content) => {
         if (progressCount >= MAX_PROGRESS) return;
@@ -1609,6 +1612,7 @@ RULES:
 
       child.stdout.on('data', (d) => {
         const s = d.toString();
+        lastOutputAt = Date.now();
         if (job) { try { jobManager.recordOutput(job.id, s); } catch {} } // heartbeat + output file + progress
         buf += s;
         let nl;
@@ -1622,8 +1626,17 @@ RULES:
       child.stderr.on('data', (d) => { if (stderr.length < 8000) stderr += d.toString(); });
 
       const abortTimer = setInterval(() => {
-        if (ctx?.aborted && child && !child.killed) { killedForAbort = true; try { child.kill('SIGTERM'); } catch {} }
-      }, 1000);
+        if (!child || child.killed) return;
+        if (ctx?.aborted) { killedForAbort = true; try { child.kill('SIGTERM'); } catch {} return; }
+        // Safety net: a blocking command (interactive deploy prompt, dev server,
+        // watch) would otherwise hang the turn forever.
+        const now = Date.now();
+        if (now - lastOutputAt > IDLE_MS || now - startedAt > MAX_MS) {
+          timedOut = true;
+          try { child.kill('SIGTERM'); } catch {}
+          setTimeout(() => { try { if (child && !child.killed) child.kill('SIGKILL'); } catch {} }, 3000);
+        }
+      }, 5000);
 
       child.on('error', (err) => {
         clearInterval(abortTimer);
@@ -1635,6 +1648,14 @@ RULES:
         const i = buf.indexOf('{'); // flush trailing line
         if (i >= 0) { try { handleEvent(JSON.parse(buf.slice(i))); } catch {} }
         pollFiles();
+
+        if (timedOut) {
+          const partial = resultText || assistantParts.join('\n\n') || '';
+          const note = '\n\n⚠️ *Stopped: Cursor hit the idle/time limit — likely stuck on a long-running or blocking command (e.g. a deploy waiting for input). Check what completed; you may need to re-run the last step.*';
+          if (partial.length > 20) { resolve({ success: true, displayOutput: partial + note, cleanOutput: partial }); return; }
+          resolve({ success: false, retry: false, error: `Cursor stopped (idle/timeout) before finishing — a command likely blocked.${stderr ? ' ' + stderr.slice(0, 200) : ''}`, displayOutput: partial });
+          return;
+        }
 
         if (killedForAbort || ctx?.aborted) {
           resolve({ success: false, aborted: true, displayOutput: resultText || assistantParts.join('\n\n') || '' });
@@ -1790,6 +1811,9 @@ RULES:
       if (job) { try { jobManager.startJob(job.id, `${tool}-${child.pid}`); } catch {} }
 
       let totalOutput = '', stderrBuf = '', lastProgress = 0, lastFilePoll = 0, killedForAbort = false;
+      const startedAt = Date.now();
+      let lastOutputAt = startedAt, timedOut = false;
+      const IDLE_MS = 6 * 60 * 1000, MAX_MS = 30 * 60 * 1000;
       const pollFiles = () => {
         if (!fileTracker || !broadcastFn) return;
         const now = Date.now();
@@ -1802,6 +1826,7 @@ RULES:
       };
       child.stdout.on('data', (d) => {
         const s = d.toString();
+        lastOutputAt = Date.now();
         totalOutput += s;
         if (onChunk) onChunk(s);
         if (job) { try { jobManager.recordOutput(job.id, s); } catch {} }
@@ -1815,8 +1840,16 @@ RULES:
       child.stderr.on('data', (d) => { if (stderrBuf.length < 16000) stderrBuf += d.toString(); });
 
       const abortTimer = setInterval(() => {
-        if (ctx?.aborted && child && !child.killed) { killedForAbort = true; try { child.kill('SIGTERM'); } catch {} }
-      }, 1000);
+        if (!child || child.killed) return;
+        if (ctx?.aborted) { killedForAbort = true; try { child.kill('SIGTERM'); } catch {} return; }
+        // Safety net: a blocking command would otherwise hang the turn forever.
+        const now = Date.now();
+        if (now - lastOutputAt > IDLE_MS || now - startedAt > MAX_MS) {
+          timedOut = true;
+          try { child.kill('SIGTERM'); } catch {}
+          setTimeout(() => { try { if (child && !child.killed) child.kill('SIGKILL'); } catch {} }, 3000);
+        }
+      }, 5000);
       child.on('error', (err) => {
         clearInterval(abortTimer);
         resolve({ success: false, retry: true, retryReason: `${tool} spawn error: ${err.message}`, error: err.message });
@@ -1826,7 +1859,12 @@ RULES:
         pollFiles();
         if (killedForAbort || ctx?.aborted) { resolve({ success: false, aborted: true, displayOutput: '' }); return; }
         const combined = totalOutput.trim() ? totalOutput : `${totalOutput}\n${stderrBuf}`;
-        resolve(this._finalizeToolOutput(tool, combined, cmd, cliState, chatSessionId, projectId, worktreeOverride));
+        const res = this._finalizeToolOutput(tool, combined, cmd, cliState, chatSessionId, projectId, worktreeOverride);
+        if (timedOut) {
+          if (res.success) { res.displayOutput = `${res.displayOutput || ''}\n\n⚠️ *Stopped: ${tool} hit the idle/time limit — likely a blocking command. Verify what completed; re-run the last step if needed.*`; return resolve(res); }
+          return resolve({ success: false, retry: false, error: `${tool} stopped (idle/timeout) before finishing — a command likely blocked.`, displayOutput: res.displayOutput });
+        }
+        resolve(res);
       });
     });
   }
