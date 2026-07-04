@@ -17,17 +17,31 @@ import { execSync } from 'child_process';
 
 // Locate Git Bash on Windows. We deliberately avoid C:\Windows\System32\bash.exe
 // (the WSL launcher — a different filesystem). Only Git-for-Windows' bash.
+//
+// We PREFER `usr\bin\bash.exe` (the real MSYS2 bash, ~2.4 MB) over `bin\bash.exe`
+// (a ~47 KB launcher that re-execs after console/tty setup). Under a console-less
+// PM2 service on Windows, the launcher's terminal detection is exactly the kind of
+// startup step that has intermittently failed with a cryptic `spawn … ENOENT`;
+// the real bash has no such wrapper, so it is the more stable choice for the
+// headless child_process spawns the agent CLIs use. Both accept the same args and
+// resolve msys-2.0.dll from their own directory, so this is a safe swap.
 let _cachedGitBash; // undefined = unchecked, null = not found, string = path
 export function findGitBash() {
   if (_cachedGitBash !== undefined) return _cachedGitBash;
 
   const envShell = process.env.IDE_HOST_SHELL;
+  const roots = [
+    process.env.GIT_INSTALL_ROOT || null,
+    'C:\\Program Files\\Git',
+    'C:\\Program Files (x86)\\Git',
+    process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Programs\\Git` : null,
+  ].filter(Boolean);
+
   const candidates = [
     envShell && /bash\.exe$/i.test(envShell) ? envShell : null,
-    process.env.GIT_INSTALL_ROOT ? `${process.env.GIT_INSTALL_ROOT}\\bin\\bash.exe` : null,
-    'C:\\Program Files\\Git\\bin\\bash.exe',
-    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-    process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Programs\\Git\\bin\\bash.exe` : null,
+    // Prefer the real bash (usr\bin) over the launcher (bin) for every root.
+    ...roots.map((r) => `${r}\\usr\\bin\\bash.exe`),
+    ...roots.map((r) => `${r}\\bin\\bash.exe`),
   ].filter(Boolean);
 
   for (const p of candidates) {

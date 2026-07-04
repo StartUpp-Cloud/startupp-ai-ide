@@ -429,12 +429,32 @@ class AgentGateway extends EventEmitter {
       '- Do NOT rewrite or restyle working code, and do NOT add features that were not requested.',
       '- VERIFY: run the project\'s tests / build / typecheck. If new logic has no test, add one and run it. Report the real command output.',
       '- If the draft is already correct and verified, make no changes and say so briefly.',
+      '- COMPLETE the task per the PROJECT RULES above: once the work is verified and you are confident, follow whatever the rules/environment say about finishing — e.g. committing, pushing, or deploying. If the rules do not call for it, leave the changes staged for the human.',
+      '- Write your final message FOR A HUMAN: what changed, why, verification result, and what (if anything) was committed/deployed. Keep it concise — no internal checklists.',
       '',
       '=== ORIGINAL REQUEST ===',
       goal,
       '',
       '=== DRAFTING AGENT REPORT (reference only — verify against the real diff, do not trust blindly) ===',
       draftSummary || '(no summary provided)',
+    ].join('\n');
+  }
+
+  /**
+   * Fallback used when every premium finalizer is unavailable (rate limit or a
+   * transient spawn failure). The FREE drafter finishes the job itself and writes
+   * a proper human-facing response, so the user never receives a raw self-review
+   * QA dump. Resumes the drafter's session, so it already has the full context.
+   */
+  _buildWrapupPrompt(goal) {
+    return [
+      'The premium review agent is unavailable, so YOU are finishing this task end-to-end. Work from the changes already in this workspace.',
+      '- VERIFY: run the project\'s build / typecheck / relevant tests and FIX anything broken. Report the real command output.',
+      '- COMPLETE per the PROJECT RULES above: once verified and you are confident, follow whatever the rules/environment say about finishing (committing, pushing, deploying). If the rules do not call for it, leave the changes staged.',
+      '- Then write ONE clear, concise summary FOR A HUMAN: what changed and why, the verification result, what (if anything) was committed or deployed, and anything they should check. Do NOT output internal QA/checklist notes.',
+      '',
+      '=== ORIGINAL REQUEST ===',
+      goal,
     ].join('\n');
   }
 
@@ -568,12 +588,37 @@ class AgentGateway extends EventEmitter {
     }
 
     // ── Phase 3: FINALIZE (premium, visible, with fallback) ──
-    const finalized = await this._runFinalizerFallback({
-      projectId, sessionId, prompt: this._buildFinalizerPrompt(content, latest),
+    const finalizerPrompt = this._buildFinalizerPrompt(content, latest);
+    let finalized = await this._runFinalizerFallback({
+      projectId, sessionId, prompt: finalizerPrompt,
       finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'Phase 3',
     });
+
+    // The whole premium chain can fail together on a transient Windows/PM2 spawn
+    // hiccup or a shared rate-limit window. Give it one more pass after a short
+    // backoff before giving up on premium review.
+    if (!finalized && !ctx?.aborted && finalizers.length) {
+      const retryOk = await this._waitForRetryBackoff(ctx, 8000);
+      if (retryOk) {
+        this._addProgressMessage(projectId, sessionId, 'Auto: premium finalizers were unavailable — retrying the review pass…', broadcastFn);
+        finalized = await this._runFinalizerFallback({
+          projectId, sessionId, prompt: finalizerPrompt,
+          finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'Phase 3 (retry)',
+        });
+      }
+    }
     if (finalized) return finalized;
-    // Every finalizer failed — surface the free work we do have.
+
+    // Still no premium reviewer → the FREE agent finishes the job and writes a
+    // proper human-facing response (verify + complete per project rules), so the
+    // user never gets a raw self-review QA dump. Resumes the drafter's session.
+    if (!ctx?.aborted) {
+      this._addProgressMessage(projectId, sessionId, `Auto: premium review unavailable — ${LABEL[drafter]} is finishing up and writing the summary…`, broadcastFn);
+      const wrapup = await this._sendToCliTool(projectId, sessionId, this._buildWrapupPrompt(content), drafter, {}, broadcastFn, ctx, mode, skipUnread);
+      if (wrapup?.success) return wrapup;
+    }
+
+    // Last resort (wrap-up also failed / aborted): surface the free work we have.
     this._postAutoFinal(projectId, sessionId, latest, broadcastFn, skipUnread);
     return latest;
   }
@@ -1929,7 +1974,16 @@ RULES:
 
     const project = findProjectById(projectId);
     const isContainer = project?.runtime !== 'host' && !!project?.containerName;
-    const workDir = worktreeOverride || project?.folderPath || undefined;
+    let workDir = worktreeOverride || project?.folderPath || undefined;
+
+    // Guard the spawn cwd for host runs: a stale/missing worktree dir makes
+    // CreateProcess fail with a cryptic "spawn <shell> ENOENT" that looks like the
+    // shell is missing when it's really the cwd. Fall back to a dir that exists.
+    if (!isContainer && workDir && !fs.existsSync(workDir)) {
+      const fallback = project?.folderPath && fs.existsSync(project.folderPath) ? project.folderPath : undefined;
+      console.warn(`[agentGateway] ${tool} cwd '${workDir}' does not exist — falling back to ${fallback || 'the server process cwd'}`);
+      workDir = fallback;
+    }
 
     this._addProgressMessage(projectId, chatSessionId,
       cliState?.cliSessionId ? `↻ Continuing with ${tool}…` : `→ Asking ${tool}…`, broadcastFn, null, { transient: true });
