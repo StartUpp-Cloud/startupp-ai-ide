@@ -2758,7 +2758,12 @@ function ChatSessionContent({
           <LiveChecksPanel checks={liveChecks} />
         )}
 
-        {!showOnlySessions && streamingMessage && (
+        {/* Only show the streaming bubble once it has REAL content. While it's a
+            bare placeholder ("Thinking…"/"Processing…"), the live-progress box
+            above already conveys activity — a second placeholder box is a
+            confusing duplicate. */}
+        {!showOnlySessions && streamingMessage
+          && !['Thinking...', 'Processing...', 'Running shell command...'].includes((streamingMessage.content || '').trim()) && (
           <ChatMessage
             key={streamingMessage.id}
             message={streamingMessage}
