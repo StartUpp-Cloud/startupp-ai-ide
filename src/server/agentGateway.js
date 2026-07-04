@@ -4581,15 +4581,21 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
     }
     this._lastProgress.set(sessionId, { content, ts: now });
 
-    // When running under orchestrator, never persist here — orchestrator handles durable events
     const ctx = this._running.get(sessionId);
-    if (ctx?.orchestrated && !transient) {
-      transient = true;
+    if (ctx?.orchestrated) {
+      // Under the orchestrator we don't persist progress here (it owns durable
+      // events), but we DO forward it ephemerally so the run's live feed shows
+      // real agent activity — e.g. Cursor's thinking / tool calls during an Auto
+      // run. _handleAgentBroadcast applies its own suppression + dedup before it
+      // surfaces as an agent-progress event. Previously this was dropped outright,
+      // so autonomous runs looked frozen ("Listening for the next signal...").
+      broadcastFn({ type: 'chat-progress', projectId, sessionId, message: { content, metadata: { tasks, live: true, transient: true } } });
+      return;
     }
 
     if (transient) {
-      // Suppressed: the live checklist (chat-checks) + busy spinner are the only
-      // work-in-progress UI. We no longer broadcast transient status chatter.
+      // Non-orchestrated transient chatter ("Sending to X…") is dropped — the
+      // live checklist + busy spinner convey work-in-progress.
       if (!shouldEmitProgress({ transient })) return;
     }
     const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks, live: true, transient: false } });
