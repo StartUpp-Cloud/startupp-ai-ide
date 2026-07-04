@@ -455,7 +455,9 @@ class AgentGateway extends EventEmitter {
     for (let i = 0; i < finalizers.length; i++) {
       const fin = finalizers[i];
       this._addProgressMessage(projectId, sessionId, `🔎 Auto · ${phase} — ${LABEL[fin]} reviewing & verifying…`, broadcastFn);
-      const res = await this._sendToCliTool(projectId, sessionId, prompt, fin, {}, broadcastFn, ctx, mode, skipUnread);
+      // leanContext: the finalizer reviews the actual diff, so skip the heavy
+      // skills/memory blocks — big token savings on the premium (rate-limited) call.
+      const res = await this._sendToCliTool(projectId, sessionId, prompt, fin, { leanContext: true }, broadcastFn, ctx, mode, skipUnread);
       if (res?.success) return res;
       if (ctx?.aborted) return null;
       const reason = `${res?.error || ''} ${res?.retryReason || ''}`;
@@ -3025,8 +3027,10 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     const environments = buildEnvironmentsSummary(projectId);
     if (environments) parts.push(`\n${environments}`);
 
-    // Active skills (skip for Ollama models and Aider — incompatible tool-use format)
-    if (!isOllamaModel && tool !== 'aider') {
+    // Active skills (skip for Ollama models and Aider — incompatible tool-use
+    // format; skip in leanContext, e.g. the Auto finalizer, which reviews the
+    // actual diff and doesn't need the drafter's skill packs re-sent).
+    if (!isOllamaModel && tool !== 'aider' && !assistantSettings?.leanContext) {
       const skillContext = skillManager.buildSkillContext(projectId);
       if (skillContext) parts.push(`\n${skillContext}`);
     }
@@ -3155,7 +3159,9 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       fullMessage = `${salesforceContext}\n\n---\n\n${fullMessage}`;
     }
 
-    const memoryContext = this._buildProjectMemoryContext(projectId, message);
+    // Project memory is soft background context; skip it for leanContext calls
+    // (the Auto finalizer) — hard constraints live in project rules, which stay.
+    const memoryContext = assistantSettings?.leanContext ? null : this._buildProjectMemoryContext(projectId, message);
     if (memoryContext) {
       fullMessage = `[Project Context — apply these durable project facts, preferences, handoffs, decisions, and prior outcomes. Do not repeat this block back.]\n${memoryContext}\n\n---\n\n${fullMessage}`;
     }
