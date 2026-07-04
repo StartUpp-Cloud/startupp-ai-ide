@@ -1560,6 +1560,54 @@ RULES:
   }
 
   /**
+   * Resolve how to launch cursor-agent on Windows WITHOUT depending on Git Bash
+   * being spawnable or on cursor-agent being on the shell's PATH — both have
+   * failed under console-less PM2 with a cryptic `spawn <bash> ENOENT`. Mirrors
+   * ~/.local/bin/cursor-agent: prefer the bundled node.exe + newest version's
+   * index.js (a plain node spawn, argv passed directly, no shell re-parse), then
+   * the installed .cmd via cmd.exe, then the git-bash shim. Returns
+   * { cmd, prefixArgs } or null if nothing launchable is found.
+   */
+  _resolveCursorAgentWin() {
+    const localAppData = process.env.LOCALAPPDATA
+      || (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Local') : null);
+    const base = localAppData ? path.join(localAppData, 'cursor-agent') : null;
+
+    if (base) {
+      // 1) Bundled node + newest version's index.js — most robust (no shell).
+      try {
+        const versionsDir = path.join(base, 'versions');
+        const verRe = /^\d{4}\.\d{1,2}\.\d{1,2}(-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$/;
+        const versions = fs.existsSync(versionsDir)
+          ? fs.readdirSync(versionsDir).filter(v => verRe.test(v)).sort().reverse()
+          : [];
+        for (const ver of versions) {
+          const nodeExe = path.join(versionsDir, ver, 'node.exe');
+          const indexJs = path.join(versionsDir, ver, 'index.js');
+          if (fs.existsSync(nodeExe) && fs.existsSync(indexJs)) {
+            return { cmd: nodeExe, prefixArgs: [indexJs] };
+          }
+        }
+      } catch { /* fall through */ }
+
+      // 2) Installed launcher via cmd.exe (re-parses args, but works).
+      try {
+        const cmdPath = path.join(base, 'cursor-agent.cmd');
+        if (fs.existsSync(cmdPath)) {
+          const comSpec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
+          return { cmd: comSpec, prefixArgs: ['/d', '/s', '/c', cmdPath] };
+        }
+      } catch { /* fall through */ }
+    }
+
+    // 3) Last resort: the git-bash shim (original behaviour).
+    const bash = findGitBash();
+    if (bash) return { cmd: bash, prefixArgs: ['-c', 'cursor-agent "$@"', 'cursor-agent'] };
+
+    return null;
+  }
+
+  /**
    * Run cursor-agent OUTSIDE a PTY (child_process pipe) so it emits clean
    * stream-json. With a controlling terminal it renders a full-screen TUI that
    * shreds the JSON — no stdout/stderr/TERM trick stops it. Piped, there is no
@@ -1585,7 +1633,16 @@ RULES:
 
     const project = findProjectById(projectId);
     const isContainer = project?.runtime !== 'host' && !!project?.containerName;
-    const workDir = worktreeOverride || project?.folderPath || undefined;
+    let workDir = worktreeOverride || project?.folderPath || undefined;
+
+    // Guard the spawn cwd for host runs: a stale/missing worktree dir makes
+    // CreateProcess fail with a cryptic "spawn <shell> ENOENT" that looks like the
+    // shell is missing when it's really the cwd. Fall back to a dir that exists.
+    if (!isContainer && workDir && !fs.existsSync(workDir)) {
+      const fallback = project?.folderPath && fs.existsSync(project.folderPath) ? project.folderPath : undefined;
+      console.warn(`[agentGateway] cursor cwd '${workDir}' does not exist — falling back to ${fallback || 'the server process cwd'}`);
+      workDir = fallback;
+    }
 
     const cursorArgs = ['-p', '--output-format', 'stream-json', '--force', '--trust', '--model', model];
     if (resumeId) cursorArgs.push('--resume', resumeId);
@@ -1598,11 +1655,16 @@ RULES:
       spawnCmd = 'docker';
       spawnArgs = ['exec', '-w', workDir || '/workspace', project.containerName, 'cursor-agent', ...cursorArgs];
     } else if (process.platform === 'win32') {
-      // cursor-agent is a git-bash shim on Windows; run it via bash with clean
-      // argv passing (`"$@"`), no TTY. bash inherits piped stdio → cursor sees no
-      // terminal → clean stream-json.
-      spawnCmd = findGitBash() || 'bash';
-      spawnArgs = ['-c', 'cursor-agent "$@"', 'cursor-agent', ...cursorArgs];
+      // Resolve cursor-agent WITHOUT relying on Git Bash being spawnable or on
+      // cursor-agent being on the shell PATH (both ENOENT'd under console-less
+      // PM2). Prefers the bundled node.exe + index.js — a plain node spawn.
+      const resolved = this._resolveCursorAgentWin();
+      if (!resolved) {
+        return { success: false, retry: false, requiresUserInput: false,
+          error: 'Could not find the Cursor CLI (cursor-agent) to launch. Install it (open the Shell tab and run the Cursor install quick-command), then try again.' };
+      }
+      spawnCmd = resolved.cmd;
+      spawnArgs = [...resolved.prefixArgs, ...cursorArgs];
       spawnCwd = workDir;
     } else {
       spawnCmd = 'cursor-agent';
