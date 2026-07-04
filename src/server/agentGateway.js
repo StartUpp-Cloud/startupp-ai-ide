@@ -471,9 +471,34 @@ class AgentGateway extends EventEmitter {
   }
 
   /**
+   * Post the result of a silently-run Auto phase (draft / self-review) to chat as
+   * the final message. Used when every premium finalizer fails or the run is
+   * aborted, so the user still sees the free agent's work instead of nothing.
+   */
+  _postAutoFinal(projectId, sessionId, result, broadcastFn, skipUnread = false) {
+    if (!result) return;
+    const body = result.success
+      ? (result.content || result.displayOutput || 'Done.')
+      : (result.error || result.displayOutput || 'The task did not complete.');
+    this._addAgentMessage(projectId, sessionId, body, broadcastFn, {
+      tool: result.tool,
+      ...(result.rawOutput ? { rawOutput: result.rawOutput } : {}),
+      ...(result.changedFiles?.length ? { changedFiles: result.changedFiles } : {}),
+      ...(result.diligence ? { diligence: result.diligence } : {}),
+      ...(!result.success ? { error: true } : {}),
+    }, skipUnread);
+  }
+
+  /**
    * Auto pipeline: FREE drafter (Cursor > local Ollama) drafts → self-reviews its
    * own compile/type errors → a PREMIUM finalizer (Claude > OpenCode > Codex, with
    * fallback on rate-limit/failure) reviews & verifies. Degrades gracefully.
+   *
+   * The free draft + self-review phases run SILENTLY (progress box only, no chat
+   * message) so the user sees a single final response — the premium finalizer's —
+   * instead of two or three "final-looking" reports. When no finalizer runs (none
+   * available / draft is the deliverable / all finalizers fail), the last free
+   * result is posted explicitly via _postAutoFinal.
    */
   async _executeAutoPipeline({ projectId, sessionId, content, mode, broadcastFn, ctx, skipUnread }) {
     const available = await this._probeAvailableTools(projectId);
@@ -497,40 +522,60 @@ class AgentGateway extends EventEmitter {
     }
 
     // ── Phase 1: DRAFT (free) ──
+    // Silent when a premium finalizer will follow (that report supersedes the
+    // draft); visible when the draft itself is the final deliverable.
+    const draftSilent = finalizers.length > 0;
     this._addProgressMessage(projectId, sessionId, `🖊️ Auto · Phase 1 — drafting with ${LABEL[drafter]} (free)…`, broadcastFn);
-    const draft = await this._sendToCliTool(projectId, sessionId, content, drafter, {}, broadcastFn, ctx, mode, true);
-    if (ctx?.aborted) return draft;
+    const draft = await this._sendToCliTool(projectId, sessionId, content, drafter, {}, broadcastFn, ctx, mode, draftSilent ? true : skipUnread, draftSilent);
+    if (ctx?.aborted) {
+      if (draftSilent) this._postAutoFinal(projectId, sessionId, draft, broadcastFn, skipUnread);
+      return draft;
+    }
 
     if (!draft?.success) {
       if (finalizers.length) {
         this._addProgressMessage(projectId, sessionId, `Auto: ${LABEL[drafter]} draft did not complete — handing the full task to a premium agent.`, broadcastFn);
         const r = await this._runFinalizerFallback({ projectId, sessionId, prompt: content, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'recovery' });
-        return r || draft;
+        if (r) return r;
+        // Every finalizer failed — surface the (silent) draft failure instead of nothing.
+        this._postAutoFinal(projectId, sessionId, draft, broadcastFn, skipUnread);
+        return draft;
       }
-      return draft;
+      return draft; // no finalizers → draft was visible already
     }
 
     if (!finalizers.length) {
+      // Draft ran visibly and is the deliverable.
       this._addProgressMessage(projectId, sessionId, `Auto: no premium finalizer available — returning ${LABEL[drafter]}'s work.`, broadcastFn);
       return draft;
     }
-    if (mode === 'plan' || mode === 'plan-review') return draft;
+    if (mode === 'plan' || mode === 'plan-review') {
+      // Draft ran silently; it's the plan output — post it.
+      this._postAutoFinal(projectId, sessionId, draft, broadcastFn, skipUnread);
+      return draft;
+    }
 
-    // ── Phase 2: SELF-REVIEW (free) — the drafter fixes its own compile/type/
-    //    import/syntax errors first, so the premium reviewer isn't spent on dumb
-    //    mistakes (and we make fewer/cheaper premium calls). Resumes the session. ──
+    // ── Phase 2: SELF-REVIEW (free, silent) — the drafter fixes its own compile/
+    //    type/import/syntax errors first, so the premium reviewer isn't spent on
+    //    dumb mistakes (and we make fewer/cheaper premium calls). Resumes session. ──
     let latest = draft;
     this._addProgressMessage(projectId, sessionId, `🔧 Auto · Phase 2 — ${LABEL[drafter]} self-reviewing (build / type / lint)…`, broadcastFn);
-    const selfReview = await this._sendToCliTool(projectId, sessionId, this._buildSelfReviewPrompt(), drafter, {}, broadcastFn, ctx, mode, true);
-    if (ctx?.aborted) return selfReview?.success ? selfReview : draft;
+    const selfReview = await this._sendToCliTool(projectId, sessionId, this._buildSelfReviewPrompt(), drafter, {}, broadcastFn, ctx, mode, true, true);
     if (selfReview?.success) latest = selfReview;
+    if (ctx?.aborted) {
+      this._postAutoFinal(projectId, sessionId, latest, broadcastFn, skipUnread);
+      return latest;
+    }
 
-    // ── Phase 3: FINALIZE (premium, with fallback) ──
+    // ── Phase 3: FINALIZE (premium, visible, with fallback) ──
     const finalized = await this._runFinalizerFallback({
       projectId, sessionId, prompt: this._buildFinalizerPrompt(content, latest),
       finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'Phase 3',
     });
-    return finalized || latest;
+    if (finalized) return finalized;
+    // Every finalizer failed — surface the free work we do have.
+    this._postAutoFinal(projectId, sessionId, latest, broadcastFn, skipUnread);
+    return latest;
   }
 
   /**
@@ -999,18 +1044,23 @@ RULES:
    * - JOB PERSISTENCE: Full operation tracked via JobManager for reliability
    * - STREAMING PERSISTENCE: Saves response chunks to disk as they arrive
    */
-  async _sendToCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, mode = 'agent', skipUnread = false) {
+  async _sendToCliTool(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, mode = 'agent', skipUnread = false, silent = false) {
     const MAX_ATTEMPTS = 3;
 
-    // Create a streaming message placeholder BEFORE starting
-    // This ensures the response is persisted even if connection drops mid-stream
-    const streamingMsg = chatStore.createStreamingMessage({
-      projectId,
-      sessionId: chatSessionId,
-      role: 'agent',
-      initialContent: `Waiting for ${tool}...`,
-      metadata: { tool, streaming: true },
-    });
+    // Create a streaming message placeholder BEFORE starting.
+    // silent = run the tool (+ diligence + progress) WITHOUT posting a chat
+    // message — used by Auto's intermediate phases (draft, self-review) so only
+    // the final phase posts one message. It still uses a synthetic id so all the
+    // job/return plumbing works; nothing is persisted or broadcast for it.
+    const streamingMsg = silent
+      ? { id: `silent-${tool}-${Date.now()}` }
+      : chatStore.createStreamingMessage({
+        projectId,
+        sessionId: chatSessionId,
+        role: 'agent',
+        initialContent: `Waiting for ${tool}...`,
+        metadata: { tool, streaming: true },
+      });
 
     // Create a job for reliable tracking
     const job = jobManager.createJob({
@@ -1045,8 +1095,8 @@ RULES:
     };
     jobManager.on('job-progress', jobProgressHandler);
 
-    // Notify client that streaming has started
-    broadcastFn({
+    // Notify client that streaming has started (skip for silent intermediate phases)
+    if (!silent) broadcastFn({
       type: 'chat-message-stream-start',
       projectId,
       sessionId: chatSessionId,
@@ -1055,7 +1105,7 @@ RULES:
     });
 
     // Begin deriving a live checklist from the agent's streaming output.
-    checklistTracker.start({ messageId: streamingMsg.id, projectId, sessionId: chatSessionId, tool, broadcastFn });
+    if (!silent) checklistTracker.start({ messageId: streamingMsg.id, projectId, sessionId: chatSessionId, tool, broadcastFn });
 
     let chunkIndex = 0;
 
@@ -1101,17 +1151,19 @@ RULES:
       // NOTE: Raw chunks are saved to disk but NOT broadcast to client
       // Client only sees progress messages and the final cleaned response
       onChunk: (chunk) => {
-        chatStore.appendStreamChunk({
-          projectId,
-          sessionId: chatSessionId,
-          messageId: streamingMsg.id,
-          chunk,
-          chunkIndex: chunkIndex++,
-        });
+        if (!silent) {
+          chatStore.appendStreamChunk({
+            projectId,
+            sessionId: chatSessionId,
+            messageId: streamingMsg.id,
+            chunk,
+            chunkIndex: chunkIndex++,
+          });
+        }
         // Record output to job (handles timeout tracking, progress parsing)
         jobManager.recordOutput(job.id, chunk);
         // Derive live checklist steps from the streamed output.
-        checklistTracker.ingestChunk(streamingMsg.id, chunk);
+        if (!silent) checklistTracker.ingestChunk(streamingMsg.id, chunk);
       },
     };
 
@@ -1158,42 +1210,20 @@ RULES:
           const activityNarration = report.hasReport && report.activity ? report.activity : null;
           // Finalize the live checklist for this message (merges run steps with
           // the report's verification checks) before we tear the tracker down.
-          const finalChecks = checklistTracker.finalize(streamingMsg.id, report.checks);
+          const finalChecks = silent ? [] : checklistTracker.finalize(streamingMsg.id, report.checks);
 
           // Complete the job
           jobManager.completeJob(job.id, finalContent);
 
-          // Finalize the streaming message with complete content
-          chatStore.finalizeStreamingMessage({
-            projectId,
-            sessionId: chatSessionId,
-            messageId: streamingMsg.id,
-            finalContent: displayContent,
-            metadata: {
-              tool,
-              jobId: job.id,
-              rawOutput: rawForDisplay.slice(-8000),
-              attempts: attempt,
-              ...(changedFiles.length > 0 ? { changedFiles } : {}),
-              ...(reviewMeta ? { review: reviewMeta } : {}),
-              ...(logContext ? { logContext } : {}),
-              ...(diligenceMeta ? { diligence: diligenceMeta } : {}),
-              ...(reportMeta ? { report: reportMeta } : {}),
-              ...(activityNarration ? { activity: activityNarration } : {}),
-              ...(finalChecks?.length ? { checks: finalChecks } : {}),
-            },
-          });
-
-          // Broadcast completion
-          broadcastFn({
-            type: 'chat-message-stream-complete',
-            projectId,
-            sessionId: chatSessionId,
-            messageId: streamingMsg.id,
-            jobId: job.id,
-            message: {
-              ...streamingMsg,
-              content: displayContent,
+          // Post the message — skipped entirely for silent intermediate phases
+          // (Auto's draft/self-review), which only contribute to the final result.
+          if (!silent) {
+            // Finalize the streaming message with complete content
+            chatStore.finalizeStreamingMessage({
+              projectId,
+              sessionId: chatSessionId,
+              messageId: streamingMsg.id,
+              finalContent: displayContent,
               metadata: {
                 tool,
                 jobId: job.id,
@@ -1207,19 +1237,45 @@ RULES:
                 ...(activityNarration ? { activity: activityNarration } : {}),
                 ...(finalChecks?.length ? { checks: finalChecks } : {}),
               },
-            },
-          });
+            });
 
-          // Mark session as unread and broadcast (only for user-initiated tasks)
-          if (!skipUnread) {
-            const changed = chatStore.markSessionUnread(projectId, chatSessionId);
-            if (changed) {
-              broadcastFn({
-                type: 'session-unread',
-                projectId,
-                sessionId: chatSessionId,
-                hasUnread: true,
-              });
+            // Broadcast completion
+            broadcastFn({
+              type: 'chat-message-stream-complete',
+              projectId,
+              sessionId: chatSessionId,
+              messageId: streamingMsg.id,
+              jobId: job.id,
+              message: {
+                ...streamingMsg,
+                content: displayContent,
+                metadata: {
+                  tool,
+                  jobId: job.id,
+                  rawOutput: rawForDisplay.slice(-8000),
+                  attempts: attempt,
+                  ...(changedFiles.length > 0 ? { changedFiles } : {}),
+                  ...(reviewMeta ? { review: reviewMeta } : {}),
+                  ...(logContext ? { logContext } : {}),
+                  ...(diligenceMeta ? { diligence: diligenceMeta } : {}),
+                  ...(reportMeta ? { report: reportMeta } : {}),
+                  ...(activityNarration ? { activity: activityNarration } : {}),
+                  ...(finalChecks?.length ? { checks: finalChecks } : {}),
+                },
+              },
+            });
+
+            // Mark session as unread and broadcast (only for user-initiated tasks)
+            if (!skipUnread) {
+              const changed = chatStore.markSessionUnread(projectId, chatSessionId);
+              if (changed) {
+                broadcastFn({
+                  type: 'session-unread',
+                  projectId,
+                  sessionId: chatSessionId,
+                  hasUnread: true,
+                });
+              }
             }
           }
 
@@ -1290,37 +1346,41 @@ RULES:
         // Fail the job
         jobManager.failJob(job.id, failureContent);
 
-        chatStore.finalizeStreamingMessage({
-          projectId,
-          sessionId: chatSessionId,
-          messageId: streamingMsg.id,
-          finalContent: failureContent,
-          metadata: { tool, jobId: job.id, error: !requiresUserInput, requiresUserInput, attempts: attempt, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
-        });
+        // Silent intermediate phases don't post their failure to chat — the
+        // caller (Auto pipeline) inspects the returned result and decides.
+        if (!silent) {
+          chatStore.finalizeStreamingMessage({
+            projectId,
+            sessionId: chatSessionId,
+            messageId: streamingMsg.id,
+            finalContent: failureContent,
+            metadata: { tool, jobId: job.id, error: !requiresUserInput, requiresUserInput, attempts: attempt, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
+          });
 
-        broadcastFn({
-          type: 'chat-message-stream-complete',
-          projectId,
-          sessionId: chatSessionId,
-          messageId: streamingMsg.id,
-          jobId: job.id,
-          message: {
-            ...streamingMsg,
-            content: failureContent,
-            metadata: { tool, jobId: job.id, error: !requiresUserInput, requiresUserInput, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
-          },
-        });
+          broadcastFn({
+            type: 'chat-message-stream-complete',
+            projectId,
+            sessionId: chatSessionId,
+            messageId: streamingMsg.id,
+            jobId: job.id,
+            message: {
+              ...streamingMsg,
+              content: failureContent,
+              metadata: { tool, jobId: job.id, error: !requiresUserInput, requiresUserInput, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
+            },
+          });
 
-        // Mark session as unread even for failures (user needs to see error)
-        if (!skipUnread) {
-          const changed = chatStore.markSessionUnread(projectId, chatSessionId);
-          if (changed) {
-            broadcastFn({
-              type: 'session-unread',
-              projectId,
-              sessionId: chatSessionId,
-              hasUnread: true,
-            });
+          // Mark session as unread even for failures (user needs to see error)
+          if (!skipUnread) {
+            const changed = chatStore.markSessionUnread(projectId, chatSessionId);
+            if (changed) {
+              broadcastFn({
+                type: 'session-unread',
+                projectId,
+                sessionId: chatSessionId,
+                hasUnread: true,
+              });
+            }
           }
         }
         return {
