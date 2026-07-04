@@ -438,66 +438,97 @@ class AgentGateway extends EventEmitter {
     ].join('\n');
   }
 
+  /** Quick self-review prompt for the free drafter to catch its own dumb errors. */
+  _buildSelfReviewPrompt() {
+    return [
+      'Before another agent reviews this, do a QUICK self-review of the changes you just made in THIS workspace — catch your own mistakes first:',
+      "- Run the project's typecheck / lint / build and FIX any compilation, type, import, or syntax errors you introduced.",
+      '- Verify every symbol, function, variable, and import you referenced actually exists and is imported (catch "X is not defined" before it ships).',
+      '- Run the most relevant tests; fix obvious failures your changes caused.',
+      '- Do NOT add features or refactor — only fix errors in what you just did.',
+      'Report exactly what you found and fixed, and the final build/test result.',
+    ].join('\n');
+  }
+
+  /** Try premium finalizers in priority order, falling back on rate-limit/failure. */
+  async _runFinalizerFallback({ projectId, sessionId, prompt, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase }) {
+    for (let i = 0; i < finalizers.length; i++) {
+      const fin = finalizers[i];
+      this._addProgressMessage(projectId, sessionId, `🔎 Auto · ${phase} — ${LABEL[fin]} reviewing & verifying…`, broadcastFn);
+      const res = await this._sendToCliTool(projectId, sessionId, prompt, fin, {}, broadcastFn, ctx, mode, skipUnread);
+      if (res?.success) return res;
+      if (ctx?.aborted) return null;
+      const reason = `${res?.error || ''} ${res?.retryReason || ''}`;
+      const isRateLimit = /rate.?limit|too many|out of usage|quota|429/i.test(reason);
+      const more = i < finalizers.length - 1;
+      this._addProgressMessage(projectId, sessionId,
+        `Auto: ${LABEL[fin]} ${isRateLimit ? 'is rate-limited' : 'did not complete'} — ${more ? `trying ${LABEL[finalizers[i + 1]]}…` : 'falling back to the free draft.'}`,
+        broadcastFn);
+    }
+    return null;
+  }
+
   /**
-   * Auto pipeline: pick the best available FREE drafter (Cursor > local Ollama)
-   * and PREMIUM finalizer (Claude > OpenCode > Codex) from what's installed, then
-   * draft → finalize. Degrades gracefully when only some tools are present.
+   * Auto pipeline: FREE drafter (Cursor > local Ollama) drafts → self-reviews its
+   * own compile/type errors → a PREMIUM finalizer (Claude > OpenCode > Codex, with
+   * fallback on rate-limit/failure) reviews & verifies. Degrades gracefully.
    */
   async _executeAutoPipeline({ projectId, sessionId, content, mode, broadcastFn, ctx, skipUnread }) {
     const available = await this._probeAvailableTools(projectId);
     const LABEL = { cursor: 'Cursor', ollama: 'local Ollama', claude: 'Claude Code', opencode: 'OpenCode', codex: 'Codex' };
 
     const drafter = ['cursor', 'ollama'].find((t) => available.has(t)) || null;
-    const finalizer = ['claude', 'opencode', 'codex'].find((t) => available.has(t)) || null;
+    const finalizers = ['claude', 'opencode', 'codex'].filter((t) => available.has(t)); // priority order
 
-    // Nothing installed.
-    if (!drafter && !finalizer) {
+    if (!drafter && !finalizers.length) {
       this._addErrorMessage(projectId, sessionId,
         'Auto mode needs at least one coding assistant installed (Cursor, Claude, OpenCode, or Codex). Open the Shell tab and use the quick-commands to install and log in to one, then try again.',
         broadcastFn);
       return { success: false, error: 'No coding assistant available for Auto mode' };
     }
 
-    // No free drafter → Auto degrades to the best premium tool directly (still gets diligence).
+    // No free drafter → run the best premium directly (with fallback).
     if (!drafter) {
-      this._addProgressMessage(projectId, sessionId,
-        `Auto: no free drafter (Cursor/local) found — using ${LABEL[finalizer]} directly.`, broadcastFn);
-      return await this._sendToCliTool(projectId, sessionId, content, finalizer, {}, broadcastFn, ctx, mode, skipUnread);
+      this._addProgressMessage(projectId, sessionId, 'Auto: no free drafter (Cursor/local) found — using a premium agent directly.', broadcastFn);
+      const r = await this._runFinalizerFallback({ projectId, sessionId, prompt: content, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'direct' });
+      return r || { success: false, error: 'All available assistants failed.' };
     }
 
-    // ── Phase 1: DRAFT (free, fast) — full diligence loop via _sendToCliTool ──
-    this._addProgressMessage(projectId, sessionId,
-      `🖊️ Auto · Phase 1 — drafting with ${LABEL[drafter]} (free)…`, broadcastFn);
+    // ── Phase 1: DRAFT (free) ──
+    this._addProgressMessage(projectId, sessionId, `🖊️ Auto · Phase 1 — drafting with ${LABEL[drafter]} (free)…`, broadcastFn);
     const draft = await this._sendToCliTool(projectId, sessionId, content, drafter, {}, broadcastFn, ctx, mode, true);
-
     if (ctx?.aborted) return draft;
 
     if (!draft?.success) {
-      // Draft failed — hand the whole task to the premium tool if we have one.
-      if (finalizer) {
-        this._addProgressMessage(projectId, sessionId,
-          `Auto: ${LABEL[drafter]} draft did not complete — handing the full task to ${LABEL[finalizer]}.`, broadcastFn);
-        return await this._sendToCliTool(projectId, sessionId, content, finalizer, {}, broadcastFn, ctx, mode, skipUnread);
+      if (finalizers.length) {
+        this._addProgressMessage(projectId, sessionId, `Auto: ${LABEL[drafter]} draft did not complete — handing the full task to a premium agent.`, broadcastFn);
+        const r = await this._runFinalizerFallback({ projectId, sessionId, prompt: content, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'recovery' });
+        return r || draft;
       }
       return draft;
     }
 
-    // No premium finalizer, or a non-editing mode → the free draft is the result.
-    if (!finalizer) {
-      this._addProgressMessage(projectId, sessionId,
-        `Auto: no premium finalizer available — returning ${LABEL[drafter]}'s work.`, broadcastFn);
+    if (!finalizers.length) {
+      this._addProgressMessage(projectId, sessionId, `Auto: no premium finalizer available — returning ${LABEL[drafter]}'s work.`, broadcastFn);
       return draft;
     }
     if (mode === 'plan' || mode === 'plan-review') return draft;
 
-    // ── Phase 2: FINALIZE (premium: constrained review + verification) ──
-    this._addProgressMessage(projectId, sessionId,
-      `🔎 Auto · Phase 2 — ${LABEL[finalizer]} reviewing & verifying the draft…`, broadcastFn);
-    const finalized = await this._sendToCliTool(
-      projectId, sessionId, this._buildFinalizerPrompt(content, draft), finalizer, {}, broadcastFn, ctx, mode, skipUnread,
-    );
+    // ── Phase 2: SELF-REVIEW (free) — the drafter fixes its own compile/type/
+    //    import/syntax errors first, so the premium reviewer isn't spent on dumb
+    //    mistakes (and we make fewer/cheaper premium calls). Resumes the session. ──
+    let latest = draft;
+    this._addProgressMessage(projectId, sessionId, `🔧 Auto · Phase 2 — ${LABEL[drafter]} self-reviewing (build / type / lint)…`, broadcastFn);
+    const selfReview = await this._sendToCliTool(projectId, sessionId, this._buildSelfReviewPrompt(), drafter, {}, broadcastFn, ctx, mode, true);
+    if (ctx?.aborted) return selfReview?.success ? selfReview : draft;
+    if (selfReview?.success) latest = selfReview;
 
-    return finalized?.success ? finalized : draft;
+    // ── Phase 3: FINALIZE (premium, with fallback) ──
+    const finalized = await this._runFinalizerFallback({
+      projectId, sessionId, prompt: this._buildFinalizerPrompt(content, latest),
+      finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'Phase 3',
+    });
+    return finalized || latest;
   }
 
   /**
