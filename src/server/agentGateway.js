@@ -1758,24 +1758,31 @@ RULES:
     this._addProgressMessage(projectId, chatSessionId,
       cliState?.cliSessionId ? `↻ Continuing with ${tool}…` : `→ Asking ${tool}…`, broadcastFn, null, { transient: true });
 
+    // Feed the command to bash via STDIN (`bash -s`), NOT as an argv (`-c cmd`).
+    // The base64-encoded prompt can exceed the OS command-line length limit
+    // (ENAMETOOLONG / truncation → "unexpected EOF" quoting errors) for large
+    // finalizer prompts. stdin has no such limit.
     let spawnCmd, spawnArgs, spawnCwd;
     if (isContainer) {
       spawnCmd = 'docker';
-      spawnArgs = ['exec', '-w', workDir || '/workspace', project.containerName, 'bash', '-lc', cmd];
+      spawnArgs = ['exec', '-i', '-w', workDir || '/workspace', project.containerName, 'bash', '-s'];
     } else if (process.platform === 'win32') {
       spawnCmd = findGitBash() || 'bash';
-      spawnArgs = ['-c', cmd];
+      spawnArgs = ['-s'];
       spawnCwd = workDir;
     } else {
       spawnCmd = process.env.SHELL || '/bin/bash';
-      spawnArgs = ['-c', cmd];
+      spawnArgs = ['-s'];
       spawnCwd = workDir;
     }
 
     return await new Promise((resolve) => {
       let child;
       try {
-        child = spawn(spawnCmd, spawnArgs, { cwd: spawnCwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        child = spawn(spawnCmd, spawnArgs, { cwd: spawnCwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+        child.stdin.on('error', () => {}); // ignore EPIPE if the shell exits early
+        child.stdin.write(cmd + '\n');
+        child.stdin.end();
       } catch (err) {
         resolve({ success: false, retry: true, retryReason: `Failed to launch ${tool}: ${err.message}`, error: err.message });
         return;
