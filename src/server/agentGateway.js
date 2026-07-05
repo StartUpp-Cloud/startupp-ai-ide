@@ -22,6 +22,7 @@ import { memoryStore } from './memoryStore.js';
 import { ollamaWorkspaceOrchestrator } from './ollamaWorkspaceOrchestrator.js';
 import { getDB } from './db.js';
 import Project, { findProjectById } from './models/Project.js';
+import { buildLensGuidance, buildLensRubric } from './qualityLenses.js';
 import { indexChangedFiles, retrieveRelevant, formatRelevantFilesBlock } from './codeIndex.js';
 import { supportsSessionEffortSelection, supportsSessionModelSelection } from './sessionSettings.js';
 import {
@@ -418,8 +419,14 @@ class AgentGateway extends EventEmitter {
   }
 
   /** Constrained review+verify prompt handed to the premium finalizer. */
-  _buildFinalizerPrompt(goal, draft) {
+  _buildFinalizerPrompt(goal, draft, projectId = null) {
     const draftSummary = String(draft?.content || '').slice(0, 4000);
+    // Quality-lens RUBRIC — the finalizer runs in lean context (skills skipped),
+    // so we inject the relevant lens as a review checklist directly in the prompt.
+    let lensRubric = null;
+    try { lensRubric = projectId ? buildLensRubric(findProjectById(projectId)) : null; }
+    catch (err) { console.warn('[agentGateway] Quality-lens rubric skipped:', err.message); }
+
     return [
       'You are the FINALIZER in a two-stage pipeline. A fast drafting agent has already implemented an initial version of the request below and left its changes on disk in THIS workspace.',
       '',
@@ -431,6 +438,7 @@ class AgentGateway extends EventEmitter {
       '- If the draft is already correct and verified, make no changes and say so briefly.',
       '- COMPLETE the task per the PROJECT RULES above: once the work is verified and you are confident, follow whatever the rules/environment say about finishing — e.g. committing, pushing, or deploying. If the rules do not call for it, leave the changes staged for the human.',
       '- Write your final message FOR A HUMAN: what changed, why, verification result, and what (if anything) was committed/deployed. Keep it concise — no internal checklists.',
+      ...(lensRubric ? ['', '=== QUALITY RUBRIC (apply to the diff before you finish) ===', lensRubric] : []),
       '',
       '=== ORIGINAL REQUEST ===',
       goal,
@@ -446,12 +454,16 @@ class AgentGateway extends EventEmitter {
    * a proper human-facing response, so the user never receives a raw self-review
    * QA dump. Resumes the drafter's session, so it already has the full context.
    */
-  _buildWrapupPrompt(goal) {
+  _buildWrapupPrompt(goal, projectId = null) {
+    let lensRubric = null;
+    try { lensRubric = projectId ? buildLensRubric(findProjectById(projectId)) : null; }
+    catch { /* non-blocking */ }
     return [
       'The premium review agent is unavailable, so YOU are finishing this task end-to-end. Work from the changes already in this workspace.',
       '- VERIFY: run the project\'s build / typecheck / relevant tests and FIX anything broken. Report the real command output.',
       '- COMPLETE per the PROJECT RULES above: once verified and you are confident, follow whatever the rules/environment say about finishing (committing, pushing, deploying). If the rules do not call for it, leave the changes staged.',
       '- Then write ONE clear, concise summary FOR A HUMAN: what changed and why, the verification result, what (if anything) was committed or deployed, and anything they should check. Do NOT output internal QA/checklist notes.',
+      ...(lensRubric ? ['', '=== QUALITY RUBRIC (apply to the diff before you finish) ===', lensRubric] : []),
       '',
       '=== ORIGINAL REQUEST ===',
       goal,
@@ -588,7 +600,7 @@ class AgentGateway extends EventEmitter {
     }
 
     // ── Phase 3: FINALIZE (premium, visible, with fallback) ──
-    const finalizerPrompt = this._buildFinalizerPrompt(content, latest);
+    const finalizerPrompt = this._buildFinalizerPrompt(content, latest, projectId);
     let finalized = await this._runFinalizerFallback({
       projectId, sessionId, prompt: finalizerPrompt,
       finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'Phase 3',
@@ -614,7 +626,7 @@ class AgentGateway extends EventEmitter {
     // user never gets a raw self-review QA dump. Resumes the drafter's session.
     if (!ctx?.aborted) {
       this._addProgressMessage(projectId, sessionId, `Auto: premium review unavailable — ${LABEL[drafter]} is finishing up and writing the summary…`, broadcastFn);
-      const wrapup = await this._sendToCliTool(projectId, sessionId, this._buildWrapupPrompt(content), drafter, {}, broadcastFn, ctx, mode, skipUnread);
+      const wrapup = await this._sendToCliTool(projectId, sessionId, this._buildWrapupPrompt(content, projectId), drafter, {}, broadcastFn, ctx, mode, skipUnread);
       if (wrapup?.success) return wrapup;
     }
 
@@ -3209,6 +3221,18 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     if (!isOllamaModel && tool !== 'aider' && !assistantSettings?.leanContext) {
       const skillContext = skillManager.buildSkillContext(projectId);
       if (skillContext) parts.push(`\n${skillContext}`);
+    }
+
+    // Quality Lenses — project-type-aware "senior engineer eye" guidance, auto-
+    // selected and grounded in the project's real libraries. Skipped in
+    // leanContext (the finalizer gets the RUBRIC form in its prompt instead).
+    if (tool !== 'aider' && !assistantSettings?.leanContext) {
+      try {
+        const lensGuidance = buildLensGuidance(findProjectById(projectId));
+        if (lensGuidance) parts.push(`\n${lensGuidance}`);
+      } catch (err) {
+        console.warn('[agentGateway] Quality-lens guidance skipped:', err.message);
+      }
     }
 
     return parts.join('\n');
