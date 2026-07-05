@@ -4,7 +4,7 @@ import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from '
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
-import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy, CheckCircle2, Circle, XCircle, MinusCircle } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, ChevronRight, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy, CheckCircle2, Circle, XCircle, MinusCircle } from 'lucide-react';
 import ModeToggle from './ModeToggle';
 import {
   CLI_TOOLS,
@@ -1098,6 +1098,159 @@ function OrchestratorRunIndicator({ run }) {
   );
 }
 
+// ── Grouped run progress: orchestrator "big steps" (phases), each with its own
+//    live checklist. Replaces the loose progress transcript + flat checklist. ──
+
+function phaseStatusFromTask(status) {
+  if (status === 'completed') return 'done';
+  if (status === 'running' || status === 'retrying' || status === 'executing') return 'working';
+  if (status === 'blocked' || status === 'failed' || status === 'cancelled') return 'failed';
+  return 'queued';
+}
+
+// Flatten a phase bucket ({ lines, checks }) into a de-duplicated item list.
+// `stripLabel` removes a redundant "<task title>: " prefix the orchestrator adds.
+function bucketItems(bucket, stripLabel) {
+  if (!bucket) return [];
+  const strip = (t) => {
+    let s = String(t || '').trim();
+    if (stripLabel) {
+      const re = new RegExp('^' + stripLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'i');
+      s = s.replace(re, '');
+    }
+    return s;
+  };
+  const seen = new Set();
+  const out = [];
+  for (const it of [...(bucket.lines || []), ...(bucket.checks || [])]) {
+    const text = strip(it.text);
+    const norm = text.toLowerCase();
+    if (!text || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push({ id: it.id, text, status: it.status });
+  }
+  return out;
+}
+
+function PhaseItemIcon({ status }) {
+  if (status === 'active') return <Loader size={11} className="mt-0.5 flex-shrink-0 animate-spin text-primary-300" />;
+  if (status === 'fail') return <XCircle size={11} className="mt-0.5 flex-shrink-0 text-red-400" />;
+  if (status === 'skip') return <MinusCircle size={11} className="mt-0.5 flex-shrink-0 text-surface-500" />;
+  if (status === 'done') return <Check size={11} className="mt-0.5 flex-shrink-0 text-emerald-400" />;
+  return <Circle size={9} className="mt-1 flex-shrink-0 text-surface-500" />;
+}
+
+function PhaseGroup({ phase, index, defaultOpen }) {
+  const [override, setOverride] = useState(null);
+  const isOpen = override === null ? defaultOpen : override;
+  const items = phase.items;
+  const statusText = phase.status === 'done' ? `${items.length} step${items.length === 1 ? '' : 's'}`
+    : phase.status === 'working' ? 'working'
+    : phase.status === 'failed' ? 'failed'
+    : 'queued';
+  const badgeCls = phase.status === 'done' ? 'text-emerald-400 border-emerald-500/40'
+    : phase.status === 'working' ? 'text-primary-200 border-primary-500/50'
+    : phase.status === 'failed' ? 'text-red-400 border-red-500/40'
+    : 'text-surface-500 border-surface-600/50';
+
+  const HeaderIcon = phase.status === 'working' ? <Loader size={12} className="flex-shrink-0 animate-spin text-primary-300" />
+    : phase.status === 'done' ? <CheckCircle2 size={12} className="flex-shrink-0 text-emerald-400" />
+    : phase.status === 'failed' ? <XCircle size={12} className="flex-shrink-0 text-red-400" />
+    : <Circle size={11} className="flex-shrink-0 text-surface-500" />;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => items.length && setOverride(!isOpen)}
+        className={`flex w-full items-center gap-2 rounded px-1 py-1 text-left ${items.length ? 'hover:bg-surface-800/40' : 'cursor-default'}`}
+      >
+        {HeaderIcon}
+        <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border text-[9px] tabular-nums ${badgeCls}`}>{index}</span>
+        <span className={`min-w-0 flex-1 truncate text-[12px] ${phase.status === 'done' ? 'text-surface-400' : 'text-surface-100'}`}>{phase.label}</span>
+        <span className="flex-shrink-0 text-[10px] text-surface-500">{statusText}</span>
+        {items.length > 0 && (isOpen
+          ? <ChevronDown size={12} className="flex-shrink-0 text-surface-500" />
+          : <ChevronRight size={12} className="flex-shrink-0 text-surface-500" />)}
+      </button>
+      {isOpen && items.length > 0 && (
+        <div className="ml-[26px] space-y-1 border-l border-surface-700/40 pb-1.5 pl-3 pt-0.5">
+          {items.map((it) => (
+            <div key={it.id} className="flex items-start gap-1.5 text-[11px] text-surface-300">
+              <PhaseItemIcon status={it.status} />
+              <span className="min-w-0 flex-1 break-words">{it.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, projectId, sessionId }) {
+  const tasks = run?.tasks || [];
+  const planItems = bucketItems(phaseProgress['_general']);
+  const phases = [];
+
+  if (tasks.length) {
+    if (planItems.length) phases.push({ key: '_plan', label: 'Plan', status: 'done', items: planItems });
+    tasks.forEach((t) => phases.push({ key: t.id, label: t.title, status: phaseStatusFromTask(t.status), items: bucketItems(phaseProgress[t.id], t.title) }));
+  } else if (run) {
+    phases.push({ key: '_plan', label: 'Planning', status: 'working', items: planItems });
+  } else {
+    const items = planItems.concat(bucketItems(phaseProgress['_default']));
+    phases.push({ key: '_run', label: 'Working', status: 'working', items });
+  }
+
+  const hasAny = !!run || phases.some((p) => p.items.length);
+  if (!hasAny) return null;
+
+  const handleStop = () => {
+    if (wsRef?.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'chat-stop', projectId, sessionId }));
+    }
+  };
+
+  // Auto-expand the current (first working/failed) phase; collapse the rest.
+  const currentIdx = phases.findIndex((p) => p.status === 'working' || p.status === 'failed');
+
+  return (
+    <div className="mx-3 mb-3 rounded-lg border border-surface-700/40 bg-surface-900/50 px-3 py-2.5">
+      <div className="mb-1.5 flex items-center gap-2 text-[11px] text-surface-400">
+        <Bot size={13} className="text-primary-300" />
+        <span className="font-medium text-surface-200">Orchestrator</span>
+        {run?.phase && <span className="capitalize text-surface-500">{run.phase}</span>}
+        <button onClick={handleStop} className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-red-400 transition-colors hover:bg-red-500/10">
+          <Square size={9} /> Stop
+        </button>
+      </div>
+      <div className="space-y-0.5">
+        {phases.map((p, i) => (
+          <PhaseGroup
+            key={p.key}
+            phase={p}
+            index={i + 1}
+            defaultOpen={i === currentIdx || (currentIdx === -1 && i === phases.length - 1 && p.status !== 'done')}
+          />
+        ))}
+      </div>
+      {changedFiles.length > 0 && (
+        <div className="mt-2 border-t border-surface-700/35 pt-2">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">Files edited in this session</div>
+          <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+            {changedFiles.slice(0, 16).map((file) => (
+              <span key={`${file.status}:${file.path}`} className="rounded border border-surface-700/60 bg-surface-950/45 px-1.5 py-0.5 font-mono text-[10px] text-surface-300">
+                <span className="mr-1 text-primary-300">{file.status}</span>{file.path}
+              </span>
+            ))}
+            {changedFiles.length > 16 && <span className="px-1.5 py-0.5 text-[10px] text-surface-500">+{changedFiles.length - 16} more</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function dedupeModelOptions(options) {
   const seen = new Set();
   return options.filter((option) => {
@@ -1478,6 +1631,8 @@ function ChatSessionContent({
   const [liveProgressEntries, setLiveProgressEntries] = useState([]);
   const [liveChangedFiles, setLiveChangedFiles] = useState([]);
   const [liveChecks, setLiveChecks] = useState([]);
+  // Progress bucketed by orchestrator phase/task: { [taskId|'_general'|'_default']: { lines, checks } }
+  const [phaseProgress, setPhaseProgress] = useState({});
   const [typingMessageIds, setTypingMessageIds] = useState(() => new Set());
   const [orchestratorRun, setOrchestratorRun] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
@@ -1542,6 +1697,37 @@ function ChatSessionContent({
       );
       if (isDuplicate) return prev;
       return [...prev, { id, content, createdAt }].slice(-80);
+    });
+  }, []);
+
+  // Append a progress line to a phase bucket (agent action / status). Marks the
+  // previous active line done, de-dupes an identical consecutive line.
+  const appendPhaseLine = useCallback((taskKey, text, status = 'active') => {
+    const clean = String(text || '').trim();
+    if (!clean) return;
+    setPhaseProgress(prev => {
+      const key = taskKey || '_general';
+      const bucket = prev[key] || { lines: [], checks: [] };
+      let lines = bucket.lines.slice();
+      const last = lines[lines.length - 1];
+      if (last && last.text === clean) {
+        lines[lines.length - 1] = { ...last, status: status || last.status };
+      } else {
+        if (status === 'active') lines = lines.map(it => (it.status === 'active' ? { ...it, status: 'done' } : it));
+        lines.push({ id: `${key}-l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text: clean, status });
+        lines = lines.slice(-60);
+      }
+      return { ...prev, [key]: { ...bucket, lines } };
+    });
+  }, []);
+
+  // Replace a phase bucket's structured checks (chat-checks snapshot for a task).
+  const setPhaseChecks = useCallback((taskKey, checks) => {
+    setPhaseProgress(prev => {
+      const key = taskKey || '_general';
+      const bucket = prev[key] || { lines: [], checks: [] };
+      const mapped = (checks || []).map(c => ({ id: `${key}-c-${c.id}`, text: c.label, status: c.status, detail: c.detail }));
+      return { ...prev, [key]: { ...bucket, checks: mapped } };
     });
   }, []);
 
@@ -1742,6 +1928,7 @@ function ChatSessionContent({
     setStreamingMessage(null);
     streamingChunksRef.current = '';
     setLiveProgressEntries([]);
+    setPhaseProgress({});
     setLiveChangedFiles([]);
     setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
   }, []);
@@ -1975,6 +2162,7 @@ function ChatSessionContent({
               setLiveProgressEntries([]);
               setLiveChangedFiles([]);
               setLiveChecks([]);
+              setPhaseProgress({});
               markMessageForTyping(msg.message);
               streamingChunksRef.current = '';
               setAgentBusy(false);
@@ -2043,6 +2231,7 @@ function ChatSessionContent({
               setLiveProgressEntries([]);
               setLiveChangedFiles([]);
               setLiveChecks([]);
+              setPhaseProgress({});
               markMessageForTyping(msg.message);
             }
             updateMessages(prev => [
@@ -2091,6 +2280,8 @@ function ChatSessionContent({
             const isTransient = msg.message.metadata?.transient !== false;
             if (isTransient) {
               appendLiveProgressEntry(msg.message);
+              // Bucket under the orchestrator phase/task it belongs to (grouped tree).
+              appendPhaseLine(msg.message.metadata?.orchestratorTaskId || null, msg.message.content, 'active');
             } else if (msg.message.id && !knownIdsRef.current.has(msg.message.id)) {
               knownIdsRef.current.add(msg.message.id);
               updateMessages(prev => [...prev, msg.message]);
@@ -2102,6 +2293,7 @@ function ChatSessionContent({
           // Live checklist derived from the agent's streaming output.
           if ((!msg.sessionId || msg.sessionId === sessionId) && Array.isArray(msg.checks)) {
             setLiveChecks(msg.checks);
+            setPhaseChecks(msg.taskId || null, msg.checks);
           }
           break;
 
@@ -2130,6 +2322,7 @@ function ChatSessionContent({
                 content,
                 createdAt: msg.progress.updatedAt || msg.progress.timestamp || new Date().toISOString(),
               });
+              appendPhaseLine(null, content, 'active');
             }
           }
           break;
@@ -2162,6 +2355,7 @@ function ChatSessionContent({
               setLiveProgressEntries([]);
               setLiveChangedFiles([]);
               setLiveChecks([]);
+              setPhaseProgress({});
               setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
             }
           }
@@ -2171,7 +2365,7 @@ function ChatSessionContent({
 
     wsRef.current.addEventListener('message', handleMessage);
     return () => wsRef.current?.removeEventListener('message', handleMessage);
-  }, [wsRef, wsConnectionVersion, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange, appendLiveProgressEntry, markMessageForTyping, mergeServerMessages, applyPersistedOrchestratorRuns, updateMessages]);
+  }, [wsRef, wsConnectionVersion, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange, appendLiveProgressEntry, appendPhaseLine, setPhaseChecks, markMessageForTyping, mergeServerMessages, applyPersistedOrchestratorRuns, updateMessages]);
 
   // Detect stalled recovery after 30 seconds
   useEffect(() => {
@@ -2348,6 +2542,7 @@ function ChatSessionContent({
     }
 
     setLiveProgressEntries([]);
+    setPhaseProgress({});
     setLiveChangedFiles([]);
 
     // ── /logs command: capture logs from container and share with agent ──
@@ -2502,6 +2697,7 @@ function ChatSessionContent({
     if (idx < 0) return;
 
     setLiveProgressEntries([]);
+    setPhaseProgress({});
     setLiveChangedFiles([]);
 
     if (wsRef?.current?.readyState === WebSocket.OPEN) {
@@ -2582,6 +2778,11 @@ function ChatSessionContent({
     }
     return deduped.slice(-80);
   }, [sortedMessages, liveProgressEntries, searchResults]);
+
+  const hasPhaseProgress = useMemo(
+    () => Object.values(phaseProgress).some(b => (b?.lines?.length || b?.checks?.length)),
+    [phaseProgress],
+  );
 
   const filteredMessages = useMemo(() => {
     return sortedMessages.filter(m => m.role !== 'progress');
@@ -2673,8 +2874,6 @@ function ChatSessionContent({
         <SalesforceInlineWorkspace projectId={projectId} />
       ) : (
         <>
-      <OrchestratorRunIndicator run={orchestratorRun} />
-
       {/* Messages */}
       <div ref={scrollContainerRef} onScroll={handleScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }} className="px-1 py-4">
         {!showOnlySessions && !searchResults && displayMessages.length > 0 && (hasMoreHistory || historyLoadingOlder) && (
@@ -2716,9 +2915,10 @@ function ChatSessionContent({
 
         {showMainThreadSessionBubbles}
 
-        {!showOnlySessions && progressTranscriptEntries.length > 0 && (
-          <ProgressTranscriptBubble
-            entries={progressTranscriptEntries}
+        {!showOnlySessions && (orchestratorRun || hasPhaseProgress) && (
+          <RunProgressTree
+            run={orchestratorRun}
+            phaseProgress={phaseProgress}
             changedFiles={liveChangedFiles}
             wsRef={wsRef}
             projectId={projectId}
@@ -2754,10 +2954,6 @@ function ChatSessionContent({
           </div>
         )}
 
-        {!showOnlySessions && liveChecks.length > 0 && (
-          <LiveChecksPanel checks={liveChecks} />
-        )}
-
         {/* Only show the streaming bubble once it has REAL content. While it's a
             bare placeholder ("Thinking…"/"Processing…"), the live-progress box
             above already conveys activity — a second placeholder box is a
@@ -2775,7 +2971,7 @@ function ChatSessionContent({
         )}
 
         {!showOnlySessions && (agentBusy || recoveryStatus.active || (streamingMessage && !streamingMessage.shell)) && (
-          progressTranscriptEntries.length === 0 && liveChecks.length === 0 && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
+          !orchestratorRun && !hasPhaseProgress && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
         )}
 
         <div ref={messagesEndRef} />
