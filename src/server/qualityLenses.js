@@ -28,6 +28,12 @@ const ORMS = ['@prisma/client', 'prisma', 'drizzle-orm', 'typeorm', 'sequelize',
 const BACKEND_FRAMEWORKS = ['@nestjs/core', 'express', 'fastify', 'hono', 'koa', '@hapi/hapi', 'next'];
 const I18N_LIBS = ['i18next', 'react-i18next', 'next-intl', '@lingui/core', '@formatjs/intl', 'vue-i18n'];
 
+// ── Frontend / UI stack ──
+const UI_FRAMEWORKS = ['next', 'react', 'vue', 'svelte', '@angular/core', 'solid-js', 'preact'];
+const CSS_FRAMEWORKS = ['tailwindcss', 'unocss', 'styled-components', '@emotion/react', '@vanilla-extract/css', '@stitches/react', 'sass', 'less'];
+const COMPONENT_LIBS_EXACT = ['@mui/material', '@chakra-ui/react', 'antd', '@mantine/core', '@headlessui/react', 'react-aria-components'];
+const THEME_LIBS = ['next-themes'];
+
 const PRETTY = {
   '@prisma/client': 'Prisma', 'prisma': 'Prisma', 'drizzle-orm': 'Drizzle', 'typeorm': 'TypeORM',
   'sequelize': 'Sequelize', 'kysely': 'Kysely', 'knex': 'Knex', 'mongoose': 'Mongoose',
@@ -37,6 +43,14 @@ const PRETTY = {
   'react-i18next': 'react-i18next', 'next-intl': 'next-intl', '@lingui/core': 'Lingui',
   '@formatjs/intl': 'FormatJS', 'vue-i18n': 'vue-i18n', '@js-joda/core': 'js-joda',
   'moment-timezone': 'moment-timezone',
+  // UI
+  'react': 'React', 'vue': 'Vue', 'svelte': 'Svelte', '@angular/core': 'Angular',
+  'solid-js': 'Solid', 'preact': 'Preact', 'tailwindcss': 'Tailwind', 'unocss': 'UnoCSS',
+  'styled-components': 'styled-components', '@emotion/react': 'Emotion',
+  '@vanilla-extract/css': 'vanilla-extract', '@stitches/react': 'Stitches', 'sass': 'Sass',
+  '@mui/material': 'MUI', '@chakra-ui/react': 'Chakra UI', 'antd': 'Ant Design',
+  '@mantine/core': 'Mantine', '@headlessui/react': 'Headless UI', 'react-aria-components': 'React Aria',
+  '@radix-ui': 'Radix', 'next-themes': 'next-themes',
 };
 const pretty = (dep) => PRETTY[dep] || dep;
 
@@ -57,6 +71,8 @@ function firstPresent(depSet, list) {
 function collectDeps(folderPath) {
   const deps = new Set();
   let hasTsconfig = false;
+  const tailwindConfigs = [];
+  const cssFiles = [];
   const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'out', 'coverage', '.turbo', 'vendor']);
   let filesRead = 0;
   const MAX_FILES = 60;
@@ -79,12 +95,92 @@ function collectDeps(folderPath) {
         } catch { /* ignore malformed */ }
       } else if (e.name === 'tsconfig.json') {
         hasTsconfig = true;
+      } else if (/^tailwind\.config\.(js|ts|cjs|mjs)$/.test(e.name)) {
+        if (tailwindConfigs.length < 6) tailwindConfigs.push(path.join(dir, e.name));
+      } else if (e.name.endsWith('.css') && cssFiles.length < 12) {
+        cssFiles.push(path.join(dir, e.name));
       }
     }
   };
 
   try { walk(folderPath, 0); } catch { /* ignore */ }
-  return { deps, hasTsconfig };
+  return { deps, hasTsconfig, tailwindConfigs, cssFiles };
+}
+
+/** Detect the component library (handles Radix's many @radix-ui/* packages). */
+function detectComponentLib(depSet) {
+  const exact = firstPresent(depSet, COMPONENT_LIBS_EXACT);
+  if (exact) return exact;
+  for (const d of depSet) if (d.startsWith('@radix-ui/')) return '@radix-ui';
+  return null;
+}
+
+// ── Design-token extraction (best-effort; the agent can also read the config) ──
+
+/** Return the balanced `{…}` block for `key:` in source, or null. */
+function extractObjectBlock(src, key) {
+  const m = src.match(new RegExp(key + '\\s*:\\s*\\{'));
+  if (!m) return null;
+  let i = m.index + m[0].length - 1; // at the opening '{'
+  let depth = 0;
+  const start = i;
+  for (; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+  }
+  return null;
+}
+
+/** Top-level keys of an object block string (ignores nested keys). */
+function topLevelKeys(block) {
+  const inner = block.slice(1, -1);
+  const keys = [];
+  let depth = 0, i = 0;
+  while (i < inner.length) {
+    const ch = inner[i];
+    if (ch === '{' || ch === '[' || ch === '(') { depth++; i++; continue; }
+    if (ch === '}' || ch === ']' || ch === ')') { depth--; i++; continue; }
+    if (depth === 0) {
+      const m = inner.slice(i).match(/^\s*(['"]?)([A-Za-z_$][\w-]*)\1\s*:/);
+      if (m) { keys.push(m[2]); i += m[0].length; continue; }
+    }
+    i++;
+  }
+  return [...new Set(keys)];
+}
+
+function extractDesignTokens({ tailwindConfigs = [], cssFiles = [] }) {
+  const t = { hasTailwind: tailwindConfigs.length > 0, configPath: null, darkMode: null, colors: [], fonts: [], screens: [], cssVars: [] };
+
+  for (const cfg of tailwindConfigs.slice(0, 3)) {
+    let src; try { src = fs.readFileSync(cfg, 'utf8'); } catch { continue; }
+    if (!t.configPath) t.configPath = cfg;
+    if (!t.darkMode) {
+      const dm = src.match(/darkMode\s*:\s*['"](class|media|selector)['"]/);
+      if (dm) t.darkMode = dm[1];
+      else if (/darkMode\s*:\s*\[/.test(src)) t.darkMode = 'class';
+    }
+    const colors = extractObjectBlock(src, 'colors');
+    if (colors) t.colors.push(...topLevelKeys(colors));
+    const fonts = extractObjectBlock(src, 'fontFamily');
+    if (fonts) t.fonts.push(...topLevelKeys(fonts));
+    const screens = extractObjectBlock(src, 'screens');
+    if (screens) t.screens.push(...topLevelKeys(screens));
+  }
+
+  // CSS custom properties — the token vocabulary of CSS-variable / shadcn systems.
+  for (const css of cssFiles.slice(0, 8)) {
+    let src; try { src = fs.readFileSync(css, 'utf8'); } catch { continue; }
+    for (const m of src.matchAll(/--([a-z0-9][\w-]*)\s*:/gi)) t.cssVars.push(m[1]);
+  }
+
+  // Drop tailwind's built-in passthroughs and shade-number keys; dedupe + cap.
+  const skipColors = new Set(['transparent', 'current', 'inherit', 'white', 'black']);
+  t.colors = [...new Set(t.colors)].filter((c) => !/^\d+$/.test(c) && !skipColors.has(c)).slice(0, 14);
+  t.fonts = [...new Set(t.fonts)].slice(0, 6);
+  t.screens = [...new Set(t.screens)].slice(0, 8);
+  t.cssVars = [...new Set(t.cssVars)].slice(0, 20);
+  return t;
 }
 
 export function detectConventions(folderPath) {
@@ -95,7 +191,7 @@ export function detectConventions(folderPath) {
   if (cached && (now - cached.at) < CACHE_TTL_MS) return cached.conventions;
 
   if (!fs.existsSync(folderPath)) return null;
-  const { deps, hasTsconfig } = collectDeps(folderPath);
+  const { deps, hasTsconfig, tailwindConfigs, cssFiles } = collectDeps(folderPath);
 
   const validation = firstPresent(deps, VALIDATION_LIBS);
   const dateLib = firstPresent(deps, DATE_LIBS);
@@ -103,6 +199,14 @@ export function detectConventions(folderPath) {
   const framework = firstPresent(deps, BACKEND_FRAMEWORKS);
   const i18n = firstPresent(deps, I18N_LIBS);
   const isTs = hasTsconfig || deps.has('typescript');
+
+  // Frontend / UI
+  const uiFramework = firstPresent(deps, UI_FRAMEWORKS);
+  const cssFramework = firstPresent(deps, CSS_FRAMEWORKS);
+  const componentLib = detectComponentLib(deps);
+  const themeLib = firstPresent(deps, THEME_LIBS);
+  const hasFrontend = !!(uiFramework || cssFramework || tailwindConfigs.length);
+  const designTokens = hasFrontend ? extractDesignTokens({ tailwindConfigs, cssFiles }) : null;
 
   const conventions = {
     isTs,
@@ -113,6 +217,13 @@ export function detectConventions(folderPath) {
     i18n,
     // Backend if it has a server framework or an ORM/query builder.
     hasBackend: !!(orm || framework),
+    // Frontend / UI
+    uiFramework,
+    cssFramework,
+    componentLib,
+    themeLib,
+    hasFrontend,
+    designTokens,
   };
 
   _cache.set(folderPath, { at: now, conventions });
@@ -164,7 +275,49 @@ function backendRubric(c) {
   ].join('\n');
 }
 
-// Registry — one entry per lens. Future lenses (UI, etc.) slot in here.
+// ── UI / design lens (grounded in the project's real design tokens) ──
+
+function uiGuidance(c) {
+  const d = c.designTokens || {};
+  const colorHint = d.colors?.length ? ` (e.g. ${d.colors.slice(0, 8).join(', ')})` : '';
+  const fontHint = d.fonts?.length ? ` fonts (${d.fonts.join('/')}),` : '';
+  const cfgHint = d.configPath ? ` — read ${path.basename(d.configPath)} for the full set` : '';
+  const cssVarHint = (!d.hasTailwind && d.cssVars?.length)
+    ? ` Use the CSS custom properties defined in the stylesheets (e.g. --${d.cssVars.slice(0, 6).join(', --')}).` : '';
+  const themeNote = (d.darkMode || c.themeLib)
+    ? ` Support BOTH light and dark themes — use tokens that resolve per theme (${c.themeLib ? pretty(c.themeLib) : `Tailwind darkMode: ${d.darkMode}`}); never hardcode a color that only works in one theme, and verify both.` : '';
+  const screenHint = d.screens?.length ? ` at the project's breakpoints (${d.screens.join(', ')})` : '';
+  const libNote = c.componentLib ? ` Prefer ${pretty(c.componentLib)} primitives already in use rather than new bespoke components.` : '';
+
+  return [
+    'UI / DESIGN — when you touch components, styles, or markup, work like a designer who respects the existing system:',
+    `- Use the project's design tokens, never hardcoded values.${d.hasTailwind ? ` Use Tailwind theme utilities for color${colorHint},${fontHint} spacing, and radius — no raw hex or arbitrary \`[13px]\` values${cfgHint}.` : ''}${cssVarHint}`,
+    (themeNote ? `-${themeNote}` : null),
+    '- Keep spacing, sizing, and gaps on the project\'s scale; align elements to a consistent grid — don\'t eyeball one-off pixel values.',
+    '- Every interactive element needs hover, focus-visible, disabled, and (where relevant) active/loading states, and must be keyboard-navigable.',
+    '- Maintain readable contrast (≥ 4.5:1 for body text); label controls; never convey meaning by color alone.',
+    `- Design responsive${screenHint}; no horizontal overflow or layout shift.`,
+    `- Match existing component patterns — variants, sizes, radius, and shadow tokens — instead of inventing new ones.${libNote}`,
+  ].filter(Boolean).join('\n');
+}
+
+function uiRubric(c) {
+  const d = c.designTokens || {};
+  const tokenRef = d.configPath ? ` (allowed tokens in ${path.basename(d.configPath)})` : '';
+  const themeCheck = (d.darkMode || c.themeLib) ? ' Any color that breaks in dark OR light theme?' : '';
+  return [
+    'UI / DESIGN REVIEW — grade the diff against this and FIX every violation. Report each as `file:line — issue → fix`:',
+    `- Hardcoded colors / px / arbitrary values instead of design tokens or Tailwind utilities?${tokenRef}`,
+    (themeCheck ? `-${themeCheck}` : null),
+    '- Off-scale or one-off spacing/sizing; misaligned or inconsistently padded elements?',
+    '- Missing hover / focus-visible / disabled states; not keyboard-navigable?',
+    '- Insufficient contrast; meaning conveyed by color alone; unlabeled controls?',
+    '- Not responsive at the breakpoints; horizontal overflow or layout shift?',
+    `- Inconsistent with existing component variants / radius / shadow${c.componentLib ? ` / ${pretty(c.componentLib)} primitives` : ''}?`,
+  ].filter(Boolean).join('\n');
+}
+
+// Registry — one entry per lens. Future lenses slot in here.
 const LENSES = [
   {
     id: 'backend-robustness',
@@ -172,6 +325,13 @@ const LENSES = [
     applies: (c) => !!c?.hasBackend,
     guidance: backendGuidance,
     rubric: backendRubric,
+  },
+  {
+    id: 'ui-design',
+    name: 'UI Design',
+    applies: (c) => !!c?.hasFrontend,
+    guidance: uiGuidance,
+    rubric: uiRubric,
   },
 ];
 
