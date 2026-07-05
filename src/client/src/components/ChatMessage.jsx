@@ -210,7 +210,11 @@ function renderMarkdown(text) {
       // Code inline: `...`
       const codeMatch = remaining.match(/^(.*?)`([^`]+)`(.*)$/);
       if (codeMatch) {
-        if (codeMatch[1]) parts.push(<span key={key++}>{processInlineSimple(codeMatch[1])}</span>);
+        // Render the text BEFORE the code span with the same bold-aware inline
+        // parser (recursion terminates: codeMatch[1] has no backtick, so it
+        // won't re-enter this branch). Using a string-returning helper here used
+        // to leak literal "<b>…</b>" into the DOM (React escapes the string).
+        if (codeMatch[1]) parts.push(<span key={key++}>{processInline(codeMatch[1])}</span>);
         parts.push(<code key={key++} className="px-1 py-0.5 rounded bg-surface-700/60 text-primary-300 text-[12px] font-mono">{codeMatch[2]}</code>);
         remaining = codeMatch[3];
         continue;
@@ -231,12 +235,6 @@ function renderMarkdown(text) {
     }
 
     return parts;
-  };
-
-  const processInlineSimple = (text) => {
-    return text
-      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-      .replace(/__(.+?)__/g, '<b>$1</b>');
   };
 
   for (let i = 0; i < lines.length; i++) {
