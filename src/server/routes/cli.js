@@ -2,7 +2,6 @@ import express from 'express';
 import { spawn } from 'child_process';
 import os from 'os';
 import { CLI_TOOLS, buildCommand, getShellConfig, sanitizeInput } from '../cliTools.js';
-
 const router = express.Router();
 
 /**
@@ -196,7 +195,7 @@ router.get('/system-info', (req, res) => {
   res.json({
     platform: os.platform(),
     arch: os.arch(),
-    shell: process.env.SHELL || (os.platform() === 'win32' ? 'powershell' : '/bin/sh'),
+    shell: process.env.SHELL || '/bin/bash',
     homeDir: os.homedir(),
     nodeVersion: process.version,
   });

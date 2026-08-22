@@ -16,6 +16,9 @@ import { agentShellPool } from './agentShellPool.js';
 import { slackService } from './slackService.js';
 import { mergeSessionAssistantSettings } from './sessionSettings.js';
 import { shellProxy } from './shellProxy.js';
+import { startProvision, waitForProvision } from './containerProvision.js';
+import { isIdeShellProject } from './ideShell.js';
+import { normalizeYnPromptInput } from './interactivePromptInput.js';
 import {
   ACTIVE_RUN_STALE_MS,
   RELIABILITY_SWEEP_INTERVAL_MS,
@@ -1303,17 +1306,35 @@ class TerminalServer {
       let workingDir = cwd;
       let containerName = null;
 
-      if (projectId && !cwd) {
-        const project = Project.findById(projectId);
-        if (project?.runtime !== 'host' && project?.containerName) {
-          // Container-based project
-          containerName = project.containerName;
+      if (isIdeShellProject(projectId)) {
+        workingDir = cwd || process.cwd() || '/app';
+      } else if (projectId && !cwd) {
+        let project = Project.findById(projectId);
+        if (project?.runtime !== 'host') {
+          // Container projects must use docker exec — never fall back to a host shell.
+          if (!project?.containerName) {
+            this.send(ws, {
+              type: 'output',
+              data: '\r\n\x1b[33mSetting up this project container. The shell will open inside Docker.\x1b[0m\r\n',
+            });
+            startProvision(projectId);
+            await waitForProvision(projectId, {
+              onProgress: (job) => {
+                this.send(ws, { type: 'output', data: `\x1b[90m${job.step}\x1b[0m\r\n` });
+              },
+            });
+            project = Project.findById(projectId);
+          }
 
-          // Ensure container is running before creating a session
+          containerName = project?.containerName || null;
+          if (!containerName) {
+            throw new Error('This project has no Docker container yet. Start Docker Desktop, then click New session.');
+          }
+
           const { containerManager } = await import('./containerManager.js');
           const status = containerManager.getContainerStatus(containerName);
           if (!status) {
-            throw new Error(`Container '${containerName}' does not exist. Please recreate the project.`);
+            throw new Error(`Container '${containerName}' does not exist. Recreate it from System Health.`);
           }
           if (status !== 'running') {
             const started = containerManager.startContainer(containerName);
@@ -1328,36 +1349,51 @@ class TerminalServer {
         }
       }
 
+      const safeCols = Math.max(Number(cols) || 120, 2);
+      const safeRows = Math.max(Number(rows) || 30, 2);
+
       const session = ptyManager.createSession({
         projectId,
         cliTool,
         containerName,
         role: role || 'main',
         forceNew,
-        cols: cols || 120,
-        rows: rows || 30,
+        cols: safeCols,
+        rows: safeRows,
         cwd: workingDir,
+      });
+
+      // Attach + notify the client immediately so early bash prompt output
+      // is not dropped while we do history/context bookkeeping.
+      this.attachClient(ws, session.sessionId);
+      this.send(ws, {
+        type: 'session-created',
+        ...session,
       });
 
       // Initialize history for this session
       await History.createHistory(session.sessionId, projectId);
 
       // Initialize output buffer for conversation parsing
-      const buffer = new OutputBuffer(cliTool || 'generic');
-      buffer.setOnEntries(async (entries) => {
-        // Store parsed conversation entries in history
-        for (const entry of entries) {
-          await History.addHistoryEntry(session.sessionId, {
-            role: entry.role,
-            content: entry.content,
-            projectId,
-          });
-        }
-      });
-      this.outputBuffers.set(session.sessionId, buffer);
+      if (!this.outputBuffers.has(session.sessionId)) {
+        const buffer = new OutputBuffer(cliTool || 'generic');
+        buffer.setOnEntries(async (entries) => {
+          // Store parsed conversation entries in history
+          for (const entry of entries) {
+            await History.addHistoryEntry(session.sessionId, {
+              role: entry.role,
+              content: entry.content,
+              projectId,
+            });
+          }
+        });
+        this.outputBuffers.set(session.sessionId, buffer);
+      }
 
       // Initialize user input buffer
-      this.userInputBuffers.set(session.sessionId, '');
+      if (!this.userInputBuffers.has(session.sessionId)) {
+        this.userInputBuffers.set(session.sessionId, '');
+      }
 
       // Track CLI tool for auto-responder
       this.sessionCliTools.set(session.sessionId, cliTool || 'shell');
@@ -1374,9 +1410,6 @@ class TerminalServer {
         projectPath: workingDir,
         cliTool: cliTool || 'shell',
       });
-
-      // Auto-attach the creating client
-      this.attachClient(ws, session.sessionId);
 
       // Replay saved scrollback from a previous session (if any)
       // This preserves terminal history across PM2 restarts
@@ -1439,7 +1472,7 @@ class TerminalServer {
           }
         }
 
-        // Send saved output as a replay before the session-created message
+        // Send saved output as a replay (session-created already went out above)
         if (replayText) {
           this.send(ws, {
             type: 'output',
@@ -1448,11 +1481,6 @@ class TerminalServer {
           });
         }
       } catch {}
-
-      this.send(ws, {
-        type: 'session-created',
-        ...session,
-      });
 
       // If a CLI tool was specified, start it
       if (cliTool && cliTool !== 'shell') {
@@ -1520,7 +1548,7 @@ class TerminalServer {
       return;
     }
 
-    const inputData = data;
+    const inputData = this.normalizeInputForInteractivePrompt(targetSession, data);
 
     // Write to PTY - returns false if session is terminated (don't error)
     const written = ptyManager.write(targetSession, inputData);
@@ -1553,22 +1581,15 @@ class TerminalServer {
   }
 
   normalizeInputForInteractivePrompt(sessionId, data, promptText = '') {
-    if (data !== 'Y' && data !== 'y' && data !== 'N' && data !== 'n') {
-      return data;
-    }
-
     const tail = [
       this.recentOutput.get(sessionId),
       promptText,
       this.lastInteractivePrompt.get(sessionId),
     ].filter(Boolean).join('\n').slice(-800);
     const cleanTail = stripAnsi(tail).replace(/\x1b[78]/g, '').trimEnd();
-    const defaultYesPrompt = /(?:\(|\[)Y\/n(?:\)|\])\s*$/i.test(cleanTail);
-
-    if (!defaultYesPrompt) return data;
-
-    this.lastInteractivePrompt.delete(sessionId);
-    return data;
+    const normalized = normalizeYnPromptInput(data, cleanTail);
+    if (normalized !== data) this.lastInteractivePrompt.delete(sessionId);
+    return normalized;
   }
 
   rememberInteractivePrompt(sessionId, text) {

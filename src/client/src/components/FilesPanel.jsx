@@ -126,7 +126,7 @@ function FileTreeNode({ node, depth = 0, onFileSelect, onSendToTerminal, expande
   );
 }
 
-export default function FilesPanel({ projectId, project, onFileSelect }) {
+export default function FilesPanel({ projectId, project, onFileSelect, collapsed = false, onToggle }) {
   const [fileTree, setFileTree] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -317,10 +317,17 @@ export default function FilesPanel({ projectId, project, onFileSelect }) {
     <div className="flex flex-col h-full bg-surface-850">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-surface-700">
-        <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex items-center gap-2 text-left"
+          title={collapsed ? 'Expand' : 'Collapse'}
+        >
+          {collapsed ? <ChevronRight className="w-4 h-4 text-surface-500" /> : <ChevronDown className="w-4 h-4 text-surface-500" />}
           <Folder className="w-4 h-4 text-primary-400" />
           <span className="text-sm font-medium text-surface-200">Files</span>
-        </div>
+        </button>
+        {!collapsed && (
         <button
           onClick={loadFileTree}
           disabled={loading}
@@ -329,8 +336,11 @@ export default function FilesPanel({ projectId, project, onFileSelect }) {
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
         </button>
+        )}
       </div>
 
+      {collapsed ? null : (
+      <>
       {/* Folder path */}
       <div className="px-3 py-1.5 border-b border-surface-700 bg-surface-800/50">
         <p className="text-[10px] text-surface-500 truncate" title={project.folderPath}>
@@ -365,6 +375,8 @@ export default function FilesPanel({ projectId, project, onFileSelect }) {
           </div>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

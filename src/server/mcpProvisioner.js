@@ -11,6 +11,7 @@
 
 import { containerManager } from './containerManager.js';
 import { claudeMcpConfig, opencodeMcpConfig, codexMcpToml } from './mcpRegistry.js';
+import { mergeManagedCodexToml } from './codexToml.js';
 
 const b64 = (s) => Buffer.from(String(s), 'utf8').toString('base64');
 
@@ -32,19 +33,22 @@ fs.writeFileSync(p,JSON.stringify(out,null,2));
 
 /** Replace a managed marker block in ~/.codex/config.toml (creates file if absent). */
 async function updateCodexToml(containerName, tomlBlock) {
-  const script = `
-const fs=require('fs'),path=require('path');
-const p=(process.env.HOME||'/home/dev')+'/.codex/config.toml';
-const block=Buffer.from(process.argv[1],'base64').toString('utf8');
-const START='# >>> sai-managed-mcp >>>',END='# <<< sai-managed-mcp <<<';
-let cur='';try{cur=fs.readFileSync(p,'utf8')}catch{}
-const esc=s=>s.replace(/[.*+?^\${}()|[\\]\\\\]/g,'\\\\$&');
-cur=cur.replace(new RegExp(esc(START)+'[\\\\s\\\\S]*?'+esc(END),'g'),'').replace(/\\n{3,}/g,'\\n\\n').trim();
-const out=(cur?cur+'\\n\\n':'')+START+'\\n'+block.trim()+'\\n'+END+'\\n';
-fs.mkdirSync(path.dirname(p),{recursive:true});
-fs.writeFileSync(p,out);
-`;
-  const cmd = `echo ${b64(script)} | base64 -d > /tmp/_sai_codex_mcp.js && node /tmp/_sai_codex_mcp.js ${b64(tomlBlock)}; rm -f /tmp/_sai_codex_mcp.js`;
+  let existing = '';
+  try {
+    existing = String(await containerManager.execInContainerAsync(
+      containerName,
+      'cat /home/dev/.codex/config.toml 2>/dev/null || true',
+      { timeout: 8000 },
+    ) || '');
+  } catch {
+    existing = '';
+  }
+  const out = mergeManagedCodexToml(existing, tomlBlock);
+  const cmd = [
+    'mkdir -p /home/dev/.codex',
+    `echo ${b64(out)} | base64 -d > /home/dev/.codex/config.toml`,
+    'chown -R dev:dev /home/dev/.codex',
+  ].join(' && ');
   return containerManager.execInContainerAsync(containerName, cmd, { timeout: 15000 });
 }
 
@@ -79,7 +83,7 @@ export async function provisionContainerMcp(containerName) {
 
   // Best-effort ownership fix so the dev user can read the project files.
   try {
-    await containerManager.execInContainerAsync(containerName, `chown dev:dev /workspace/.mcp.json /workspace/opencode.json 2>/dev/null || true`);
+    await containerManager.execInContainerAsync(containerName, `chown dev:dev /workspace/.mcp.json /workspace/opencode.json /home/dev/.codex /home/dev/.codex/config.toml 2>/dev/null || true`);
   } catch {}
 
   const ok = Object.values(results).some((v) => v === 'ok');

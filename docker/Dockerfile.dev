@@ -1,31 +1,29 @@
-FROM node:20-bookworm
+# syntax=docker/dockerfile:1
+# Shared project environment. Built in CI and pulled as
+# ghcr.io/startupp-cloud/ide-dev:<version> — see docker/project-image.json.
+# Aider and extra agents are optional (install from the IDE shell).
 
-# Common dev tools
-RUN apt-get update && apt-get install -y \
+FROM node:20-bookworm AS base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl wget jq python3 python3-pip \
     build-essential openssh-client \
     nano vim less htop tmux dtach util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
-
-# Install GitHub CLI
+# GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-    && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install pnpm (yarn comes with node:20)
 RUN npm install -g pnpm
 
-# Install Aider (Python AI coding assistant)
-RUN pip3 install aider-chat --break-system-packages
+RUN useradd -m -s /bin/bash dev \
+    && mkdir -p /workspace \
+    && chown dev:dev /workspace
 
-# Create dev user
-RUN useradd -m -s /bin/bash dev
-
-# tmux config for proper xterm.js compatibility
 RUN echo '\
 set -g default-terminal "tmux-256color"\n\
 set -as terminal-overrides ",xterm*:Tc"\n\
@@ -45,14 +43,17 @@ ENV BROWSER=false
 ENV PATH="/home/dev/.npm-global/bin:${PATH}"
 
 USER dev
-
 WORKDIR /home/dev
 
-# Configure non-root npm global installs for interactive project containers.
 RUN mkdir -p "$NPM_CONFIG_PREFIX" \
     && npm config set prefix "$NPM_CONFIG_PREFIX"
 
 WORKDIR /workspace
 
-# Keep container running
+FROM base AS ai
+USER root
+RUN npm install -g @anthropic-ai/claude-code
+USER dev
+
+FROM ai
 CMD ["sleep", "infinity"]

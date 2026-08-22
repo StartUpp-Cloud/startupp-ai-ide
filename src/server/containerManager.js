@@ -1,19 +1,32 @@
-import { execSync, exec as execCallback } from "child_process";
+import { execSync } from "child_process";
 import crypto from "crypto";
 import { EventEmitter } from "events";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
-import { promisify } from "util";
 import { resolveRuntimeEnvironment } from "./connections/runtimeEnvResolver.js";
+import {
+  execDockerCmd,
+  execDockerCmdAsync,
+  isDockerAvailable as isDockerRouteAvailable,
+  getDockerRouteStatus,
+  buildDockerImageFromDockerfile,
+  pullDockerImage,
+  tagDockerImage,
+  clearDockerRouteCache,
+} from "./dockerRoute.js";
+import { decideProjectImageAction, getProjectDevImageSpec } from "./projectDevImage.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const execAsync = promisify(execCallback);
-
-const DEV_IMAGE = "startupp-ai-ide-dev:latest";
+const DEV_IMAGE = getProjectDevImageSpec().localTag;
 const CONTAINER_PREFIX = "sai-";
+
+/** Named volumes mount as root; project shells run as `dev`. */
+export function workspaceChownCommand(containerName) {
+  return `docker exec -u root ${containerName} chown -R dev:dev /workspace /home/dev`;
+}
 
 // Ensure Docker is in PATH — Docker Desktop on macOS and Homebrew install
 // to locations that might not be in Node's PATH when launched via PM2/launchd
@@ -39,29 +52,14 @@ const EXEC_OPTS_BASE = {
 };
 
 /**
- * Run a shell command with Docker-aware PATH.
- * Wraps execSync with the enhanced PATH so Docker is always found.
+ * Run a docker CLI command against the host engine socket.
  */
 function dockerExec(cmd, opts = {}) {
-  return execSync(cmd, {
-    ...EXEC_OPTS_BASE,
-    ...opts,
-    env: { ...EXEC_OPTS_BASE.env, ...(opts.env || {}) },
-  });
+  return execDockerCmd(cmd, opts);
 }
 
-/**
- * Async variant for dashboard/status polling so Docker work does not block the
- * API event loop while users create/open chat sessions.
- */
 async function dockerExecAsync(cmd, opts = {}) {
-  const { stdout } = await execAsync(cmd, {
-    encoding: "utf-8",
-    maxBuffer: 10 * 1024 * 1024,
-    ...opts,
-    env: { ...EXEC_OPTS_BASE.env, ...(opts.env || {}) },
-  });
-  return stdout;
+  return execDockerCmdAsync(cmd, opts);
 }
 
 class ContainerManager extends EventEmitter {
@@ -73,63 +71,124 @@ class ContainerManager extends EventEmitter {
    * Check if Docker is available
    */
   isDockerAvailable() {
-    try {
-      dockerExec("docker info", { stdio: "pipe" });
-      return true;
-    } catch {
-      return false;
-    }
+    return isDockerRouteAvailable();
   }
 
   /**
-   * Build the dev container image if not built or if the Dockerfile has changed.
-   * Stores a hash of the Dockerfile as a label on the image so we can detect
-   * when it's outdated and auto-rebuild.
+   * The IDE container cannot launch Docker Desktop / dockerd on the host.
+   */
+  findDockerDesktopLauncher() {
+    return null;
+  }
+
+  startDockerDesktop() {
+    throw new Error(
+      "Start Docker on the host (Docker Desktop or `sudo systemctl start docker`). The IDE runs inside a container and cannot launch the engine.",
+    );
+  }
+
+  /**
+   * Poll until `docker info` succeeds or timeout.
+   */
+  async waitForDockerAvailable(maxWaitMs = 120000, intervalMs = 2000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline) {
+      clearDockerRouteCache();
+      if (this.isDockerAvailable()) return true;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return false;
+  }
+
+  isImageReady() {
+    if (!this.isDockerAvailable()) return false;
+    if (this._imageReadyCachedAt && Date.now() - this._imageReadyCachedAt < 30000) {
+      return this._imageReadyCache === true;
+    }
+    try {
+      const images = dockerExec(`docker images -q ${DEV_IMAGE}`, {
+        encoding: "utf-8",
+        stdio: "pipe",
+      }).trim();
+      this._imageReadyCache = images.length > 0;
+    } catch {
+      this._imageReadyCache = false;
+    }
+    this._imageReadyCachedAt = Date.now();
+    return this._imageReadyCache;
+  }
+
+  /**
+   * Docker + dev image status for the UI health panel.
+   */
+  getDockerStatus() {
+    const routeStatus = getDockerRouteStatus();
+    const dockerAvailable = routeStatus.dockerAvailable;
+    return {
+      dockerAvailable,
+      imageReady: dockerAvailable ? this.isImageReady() : false,
+      dockerDesktopInstalled: dockerAvailable,
+      canAutoStart: false,
+      launcherPath: null,
+      ...routeStatus,
+    };
+  }
+
+  /**
+   * Ensure the versioned project image is present. Prefer `docker pull` of the
+   * CI-published tag; fall back to a local build if the registry is unreachable.
    */
   async buildImage() {
     try {
-      const dockerfilePath = path.join(__dirname, "../../docker/Dockerfile.dev");
-      const dockerContext = path.join(__dirname, "../../docker");
-
-      // Hash the Dockerfile content to detect changes
-      const dockerfileContent = fs.readFileSync(dockerfilePath, "utf-8");
-      const currentHash = crypto.createHash("md5").update(dockerfileContent).digest("hex").slice(0, 12);
-
-      // Check if image exists AND has the correct hash
-      const images = dockerExec(`docker images -q ${DEV_IMAGE}`, {
-        encoding: "utf-8",
-      }).trim();
-
+      const spec = getProjectDevImageSpec();
+      const images = String(await dockerExecAsync(`docker images -q ${spec.localTag}`) || "").trim();
+      let localVersion = "";
       if (images) {
-        // Check the stored hash label
         try {
-          const storedHash = dockerExec(
-            `docker inspect --format='{{index .Config.Labels "dockerfile.hash"}}' ${DEV_IMAGE}`,
-            { encoding: "utf-8" },
-          ).trim().replace(/'/g, "");
-
-          if (storedHash === currentHash) {
-            return { exists: true, image: DEV_IMAGE };
-          }
-          console.log(`[containerManager] Dockerfile changed (${storedHash} → ${currentHash}), rebuilding image...`);
+          localVersion = String(await dockerExecAsync(
+            `docker inspect --format='{{index .Config.Labels "${spec.versionLabel}"}}' ${spec.localTag}`,
+          ) || "").trim().replace(/'/g, "");
         } catch {
-          // No hash label = old image, rebuild
-          console.log(`[containerManager] Image exists but has no version label, rebuilding...`);
+          localVersion = "";
         }
       }
 
-      // Build with the hash label baked in
-      console.log(`[containerManager] Building ${DEV_IMAGE} (hash: ${currentHash})...`);
-      dockerExec(
-        `docker build --label "dockerfile.hash=${currentHash}" -t ${DEV_IMAGE} -f "${dockerfilePath}" "${dockerContext}"`,
-        {
-          stdio: "inherit",
-          timeout: 300000, // 5 min
-        },
-      );
-      return { built: true, image: DEV_IMAGE, hash: currentHash };
+      const action = decideProjectImageAction({
+        hasLocal: Boolean(images),
+        localVersion,
+        desiredVersion: spec.version,
+      });
+      if (action === "reuse") {
+        return { exists: true, image: spec.localTag, version: spec.version };
+      }
+
+      try {
+        console.log(`[containerManager] Pulling ${spec.remoteTag}…`);
+        await pullDockerImage(spec.remoteTag);
+        tagDockerImage(spec.remoteTag, spec.localTag);
+        this._imageReadyCache = true;
+        this._imageReadyCachedAt = Date.now();
+        return { pulled: true, image: spec.localTag, ref: spec.remoteTag, version: spec.version };
+      } catch (pullError) {
+        console.warn(`[containerManager] Pull failed (${pullError.message}); building locally…`);
+      }
+
+      const dockerfilePath = path.join(__dirname, "../../docker/Dockerfile.dev");
+      const dockerfileContent = fs.readFileSync(dockerfilePath, "utf-8");
+      const currentHash = crypto.createHash("md5").update(dockerfileContent).digest("hex").slice(0, 12);
+      console.log(`[containerManager] Building ${spec.localTag} locally (${spec.version})…`);
+      await buildDockerImageFromDockerfile(spec.localTag, dockerfileContent, {
+        labels: [
+          `dockerfile.hash=${currentHash}`,
+          `${spec.versionLabel}=${spec.version}`,
+        ],
+        timeout: 300000,
+      });
+      this._imageReadyCache = true;
+      this._imageReadyCachedAt = Date.now();
+      return { built: true, image: spec.localTag, hash: currentHash, version: spec.version };
     } catch (error) {
-      throw new Error(`Failed to build image: ${error.message}`);
+      throw new Error(`Failed to prepare project image: ${error.message}`);
     }
   }
 
@@ -210,6 +269,8 @@ class ContainerManager extends EventEmitter {
         stdio: "pipe",
       });
 
+      this.ensureWorkspaceOwnership(containerName);
+
       // Configure OpenCode for Ollama with high context
       this.configureOpenCodeOllama(containerName);
       // Provision curated MCP servers into the CLI tool configs (best-effort).
@@ -258,6 +319,7 @@ class ContainerManager extends EventEmitter {
         encoding: "utf-8",
         stdio: "pipe",
       });
+      this.ensureWorkspaceOwnership(containerName);
       // Ensure OpenCode is configured for Ollama on each start
       this.configureOpenCodeOllama(containerName);
       // Provision curated MCP servers into the CLI tools (best-effort; keeps
@@ -269,6 +331,22 @@ class ContainerManager extends EventEmitter {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Empty named volumes are root-owned. The image USER is `dev`, so clone/write
+   * fails until /workspace and /home/dev belong to that user.
+   */
+  ensureWorkspaceOwnership(containerName) {
+    try {
+      dockerExec(workspaceChownCommand(containerName), {
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 30000,
+      });
+    } catch (error) {
+      console.warn(`[containerManager] chown workspace failed: ${error.message}`);
     }
   }
 

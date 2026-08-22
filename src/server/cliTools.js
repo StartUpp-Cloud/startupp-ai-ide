@@ -79,17 +79,8 @@ export function buildCommand(toolId, prompt, customCommand = null) {
  * Get shell command for the current OS
  */
 export function getShellConfig() {
-  const isWindows = process.platform === 'win32';
-
-  if (isWindows) {
-    return {
-      shell: 'powershell.exe',
-      shellArgs: ['-NoProfile', '-Command'],
-    };
-  }
-
   return {
-    shell: process.env.SHELL || '/bin/sh',
+    shell: process.env.SHELL || '/bin/bash',
     shellArgs: ['-c'],
   };
 }

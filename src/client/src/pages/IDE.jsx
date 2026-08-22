@@ -4,6 +4,7 @@ import ChatPanel from '../components/ChatPanel';
 import ProjectManagerPanel from '../components/ProjectManagerPanel';
 import TopBar from '../components/TopBar';
 import RightPanel from '../components/RightPanel';
+import { FileEditorProvider } from '../contexts/FileEditorContext';
 import NotificationCenter, { sendDesktopNotification } from '../components/NotificationCenter';
 import { useWebSocket, WS_STATUS } from '../hooks/useWebSocket';
 import {
@@ -587,6 +588,7 @@ export default function IDE() {
   // ── Render ──
 
   return (
+    <FileEditorProvider>
     <div
       className="fixed inset-0 overflow-hidden bg-surface-900"
       style={{
@@ -825,5 +827,6 @@ export default function IDE() {
         )}
       </div>
     </div>
+    </FileEditorProvider>
   );
 }

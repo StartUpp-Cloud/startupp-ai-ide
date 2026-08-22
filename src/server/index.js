@@ -55,9 +55,11 @@ import { bigProjectPlanner } from "./bigProjectPlanner.js";
 import { scheduler } from "./scheduler.js";
 import { skillManager } from "./skillManager.js";
 import { jobManager } from "./jobManager.js";
+import { assertIdeRuntime } from "./ideRuntime.js";
 
 // Load environment variables
 dotenv.config();
+assertIdeRuntime();
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 55590;

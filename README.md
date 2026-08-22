@@ -37,26 +37,53 @@ Each project = its own Docker container with:
 
 ## Quick Start
 
+The IDE itself runs in Ubuntu. Project containers are siblings on the same Docker engine. Use the `pm2:*` host commands — do not run `docker compose` on Windows, and do not run `npm run dev` on host Node.
+
 ```bash
 git clone https://github.com/StartUpp-Cloud/startupp-ai-ide.git
 cd startupp-ai-ide
-npm run install:all
-npm run dev
+npm run pm2:start -- --dev
 ```
 
-Open **http://localhost:5173**
+`pm2:start` and `pm2:restart` always `git pull --ff-only`, then build/install the IDE image if needed and start the container. Cached layers make incremental starts cheap.
 
-The onboarding wizard guides you through 3 steps:
+| Command | What it does |
+| --- | --- |
+| `npm run pm2:start` | Pull latest, install (build/create) and start |
+| `npm run pm2:restart` | Pull latest, rebuild, and restart |
+| `npm run pm2:stop` | Stop the running container. Job, images, and data stay |
+| `npm run pm2:uninstall` | Remove the container job only. Images and volumes stay |
+
+These commands **never** delete images or volumes. No agent path can wipe project data. To remove images yourself later:
+
+```bash
+docker image rm startupp-ai-ide:latest startupp-ai-ide:dev
+```
+
+Named volumes survive every start/restart/stop/uninstall:
+
+- `sai-ide-data` — SQLite, projects, session history
+- `sai-ide-home` — global CLIs and login state (`codex`, `claude`, `gh`, …)
+- `sai-ide-logs` — server logs
+
+Open **http://localhost:5173** in dev (`--dev`), or **http://localhost:55590** for production:
+
+```bash
+npm run pm2:start
+```
+
+Onboarding shows the **IDE container shell** next to the welcome form. Install and authenticate the orchestrator there (Codex, Claude, …), then test the connection. That shell is the IDE container, not a project container.
 
 ```
-[1. Connect AI Model] → [2. Install Docker] → [3. Create First Project]
+[1. Connect AI Model] → [2. Confirm Docker engine] → [3. Create First Project]
 ```
 
 ### Prerequisites
 
-- **Node.js 18+**
-- **Docker** — each project runs in a container
+- **Docker** (Docker Desktop or a Linux engine) — required for the IDE and for every project container
 - **Ollama** (recommended) — or OpenAI/DeepSeek API key for the LLM
+
+Project containers use the versioned image in `docker/project-image.json` (`ghcr.io/startupp-cloud/ide-dev`). The IDE pulls it when you create a project, and only builds `docker/Dockerfile.dev` locally if the pull fails. CI publishes that image on changes to the Dockerfile. Aider is optional — install it from the IDE shell if you need it.
 
 ## IDE Layout
 
@@ -264,25 +291,25 @@ Connect to your running Chrome instance to capture screenshots, console errors, 
 
 ## Scripts
 
-| Command               | Purpose                                                |
-| --------------------- | ------------------------------------------------------ |
-| `npm run dev`         | Start both client (port 5173) and server (port 55590)  |
-| `npm run build`       | Build React app for production                         |
-| `npm start`           | Run server only (serves built frontend)                |
-| `npm run install:all` | Install dependencies for root and client               |
+| Command | Purpose |
+| --- | --- |
+| `npm run pm2:start` | Pull latest, build/install the IDE container, and start it (production). Add `-- --dev` for Vite |
+| `npm run pm2:restart` | Pull latest, rebuild, and restart. Images and volumes stay |
+| `npm run pm2:stop` | Stop the container process. Does not remove the job, images, or data |
+| `npm run pm2:uninstall` | Remove the container job only. Does **not** delete images or volumes |
+| `npm run pm2:status` | Show whether `sai-ide` is running |
+| `npm run pm2:logs` | Follow container logs |
+| `npm run compose:dev` | Foreground launcher (same pull/build as start, stays attached) |
+| `npm run compose` | Foreground production launcher |
+| `npm run compose:down` | Same as uninstall: remove the container, keep images and volumes |
+| `npm run build` | Build React app (used inside the production image) |
+| `npm run install:all` | Install dependencies for root and client (inside the container) |
 
-## Production (PM2)
-
-```bash
-npm run build
-npm run pm2:start:prod
-```
-
-See [PM2-DEPLOYMENT.md](PM2-DEPLOYMENT.md) for full production setup.
+See [PM2-DEPLOYMENT.md](PM2-DEPLOYMENT.md) for the lifecycle details.
 
 ## Data
 
-All data lives in `data/db.json` (gitignored). No credentials are stored — only project metadata, rules, and settings.
+App state lives in the `sai-ide-data` volume (`/app/data/app.sqlite` inside the IDE container). Orchestrator installs and auth live in `sai-ide-home` (`/root`). Rebuilds replace the container, not these volumes.
 
 ## License
 

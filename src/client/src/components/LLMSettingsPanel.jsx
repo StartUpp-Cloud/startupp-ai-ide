@@ -22,6 +22,7 @@ import {
   RotateCcw,
   Sparkles,
   CheckCircle,
+  Bot,
 } from 'lucide-react';
 
 const API_BASE = '/api';
@@ -55,6 +56,7 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
   const [health, setHealth] = useState(null);
   const [models, setModels] = useState([]);
   const [opencodeModels, setOpencodeModels] = useState([]);
+  const [codexModels, setCodexModels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -71,6 +73,7 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
       loadHealth();
       loadOllamaModels();
       loadOpenCodeModels();
+      loadCodexModels();
       loadDiligence();
     }
   }, [isOpen, effectiveProjectId]);
@@ -239,6 +242,39 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
     }
   };
 
+  const loadCodexModels = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/llm/codex/models?refresh=true`);
+      const data = await res.json();
+      setCodexModels(uniqueModels((data.models || []).map((model) => ({
+        ...model,
+        id: model.id || model.name,
+        name: model.id || model.name,
+      }))));
+    } catch (error) {
+      console.error('Failed to load Codex models:', error);
+      setCodexModels([]);
+    }
+  };
+
+  const saveCodexConfig = async (updates) => {
+    try {
+      setSaving(true);
+      const res = await fetch(`${API_BASE}/llm/codex/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      await res.json();
+      await loadSettings();
+      loadHealth();
+    } catch (error) {
+      console.error('Failed to save Codex config:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const saveOpenCodeConfig = async (updates) => {
     try {
       setSaving(true);
@@ -316,6 +352,7 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
             { id: 'ollama', label: 'Ollama', icon: Server },
             { id: 'openai', label: 'OpenAI', icon: Key },
             { id: 'opencode', label: 'OpenCode', icon: Sparkles },
+            { id: 'codex', label: 'Codex', icon: Bot },
             { id: 'deepseek', label: 'DeepSeek', icon: Brain },
             { id: 'github', label: 'GitHub', icon: Sparkles },
             { id: 'advanced', label: 'Advanced', icon: Sliders },
@@ -378,7 +415,7 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
                     <label className="block text-sm font-medium text-surface-300 mb-2">
                       LLM Provider
                     </label>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       <button
                         onClick={() => saveSettings({ provider: 'ollama' })}
                         className={`p-4 rounded-lg border text-left transition-all ${
@@ -490,6 +527,32 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
                         </div>
                         <p className="text-xs text-surface-500">
                           Headless CLI - Reuse OpenCode subscriptions and auth
+                        </p>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          saveSettings({ provider: 'codex' });
+                          setActiveTab('codex');
+                          loadCodexModels();
+                        }}
+                        className={`p-4 rounded-lg border text-left transition-all ${
+                          settings.provider === 'codex'
+                            ? 'border-emerald-500 bg-emerald-500/10'
+                            : 'border-surface-700 bg-surface-800 hover:border-surface-600'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-2">
+                          <Bot className={`w-5 h-5 ${settings.provider === 'codex' ? 'text-emerald-400' : 'text-surface-400'}`} />
+                          <span className={`font-medium ${settings.provider === 'codex' ? 'text-emerald-300' : 'text-surface-300'}`}>
+                            Codex
+                          </span>
+                          {settings.provider === 'codex' && (
+                            <Check className="w-4 h-4 text-emerald-400 ml-auto" />
+                          )}
+                        </div>
+                        <p className="text-xs text-surface-500">
+                          Same Codex CLI as the coding agent — ChatGPT auth, headless exec
                         </p>
                       </button>
                     </div>
@@ -1067,6 +1130,96 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
                       type="number"
                       value={settings.opencode?.timeout || 60000}
                       onChange={(e) => saveOpenCodeConfig({ timeout: parseInt(e.target.value) })}
+                      className="w-full px-3 py-2 text-sm bg-surface-800 border border-surface-700 rounded-lg text-surface-200 focus:ring-1 focus:ring-primary-500"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Codex Tab */}
+              {activeTab === 'codex' && settings && (
+                <div className="space-y-6">
+                  <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
+                    <h3 className="text-sm font-semibold text-emerald-300 mb-1">Use Codex as orchestrator</h3>
+                    <p className="text-[12px] text-surface-400">
+                      The IDE calls your authenticated Codex CLI headlessly (`codex exec --json`), the same harness used as a coding agent.
+                      Pick it here for prompt optimization and planning; pick Codex in the chat tool menu to implement.
+                      Run and authenticate <code className="text-surface-400">codex</code> in a project terminal.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-surface-300 mb-2">
+                      Model
+                    </label>
+                    <div className="flex gap-2">
+                      <select
+                        value={settings.codex?.model || ''}
+                        onChange={(e) => saveCodexConfig({ model: e.target.value })}
+                        className="flex-1 px-3 py-2 text-sm bg-surface-800 border border-surface-700 rounded-lg text-surface-200 focus:ring-1 focus:ring-primary-500"
+                      >
+                        <option value="">Codex default</option>
+                        {codexModels.map((model) => (
+                          <option key={model.id || model.name} value={model.id || model.name}>
+                            {model.id || model.name}
+                          </option>
+                        ))}
+                        {settings.codex?.model && !codexModels.some(m => (m.id || m.name) === settings.codex.model) && (
+                          <option value={settings.codex.model} disabled>
+                            {settings.codex.model} (not available)
+                          </option>
+                        )}
+                      </select>
+                      <button
+                        onClick={loadCodexModels}
+                        className="px-3 py-2 bg-surface-700 hover:bg-surface-600 rounded-lg transition-colors"
+                      >
+                        <RefreshCw className="w-4 h-4 text-surface-400" />
+                      </button>
+                    </div>
+                    <p className="text-xs text-surface-500 mt-1">
+                      Authenticate with <code className="text-surface-400">codex</code> in a project terminal (ChatGPT login).
+                    </p>
+                  </div>
+
+                  <div className="bg-surface-800 border border-surface-700 rounded-lg divide-y divide-surface-700 max-h-56 overflow-y-auto">
+                    {codexModels.length > 0 ? (
+                      codexModels.map((model) => {
+                        const id = model.id || model.name;
+                        return (
+                          <div
+                            key={id}
+                            className={`flex items-center justify-between px-3 py-2 ${
+                              id === settings.codex?.model ? 'bg-emerald-500/10' : ''
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Bot className="w-4 h-4 text-emerald-400 shrink-0" />
+                              <span className="text-sm text-surface-300 truncate">{id}</span>
+                              {id === settings.codex?.model && (
+                                <span className="text-xs px-1.5 py-0.5 bg-emerald-500/20 text-emerald-300 rounded">
+                                  Active
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="px-3 py-4 text-center text-surface-500 text-sm">
+                        No Codex models listed. Make sure the Codex CLI is installed and authenticated.
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-surface-300 mb-2">
+                      Timeout (ms)
+                    </label>
+                    <input
+                      type="number"
+                      value={settings.codex?.timeout || 60000}
+                      onChange={(e) => saveCodexConfig({ timeout: parseInt(e.target.value) })}
                       className="w-full px-3 py-2 text-sm bg-surface-800 border border-surface-700 rounded-lg text-surface-200 focus:ring-1 focus:ring-primary-500"
                     />
                   </div>

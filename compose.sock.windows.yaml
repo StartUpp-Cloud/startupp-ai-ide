@@ -1,0 +1,7 @@
+# Host CLI still uses the named pipe (see scripts/compose-host.cjs).
+# The Linux engine cannot mount type=npipe. It exposes a Unix socket
+# inside the Desktop VM; bind that, do not use a Windows host path.
+services:
+  ide:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

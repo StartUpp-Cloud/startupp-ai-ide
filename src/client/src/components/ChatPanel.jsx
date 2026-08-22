@@ -3,6 +3,8 @@ import ChatMessage from './ChatMessage';
 import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from './ChatInput';
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
+import ContainerFileEditor from './ContainerFileEditor';
+import { useFileEditor } from '../contexts/FileEditorContext';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
 import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, ChevronRight, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy, CheckCircle2, Circle, XCircle, MinusCircle } from 'lucide-react';
 import ModeToggle from './ModeToggle';
@@ -1620,6 +1622,7 @@ function ChatSessionContent({
   onContractMainThread,
   mobileLayout = false,
 }) {
+  const fileEditor = useFileEditor();
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
@@ -2845,7 +2848,7 @@ function ChatSessionContent({
         <ChildThreadHeader project={project} session={session} mainSession={mainSession} onOpenMain={onOpenMain} onCloseSession={onCloseSession} />
       )}
 
-      {!contracted && (
+      {!contracted && !(fileEditor?.editor && isVisible) && (
         <SessionAssistantControls
           session={session}
           defaultTool={tool}
@@ -2860,6 +2863,10 @@ function ChatSessionContent({
         />
       )}
 
+      {fileEditor?.editor && isVisible ? (
+        <ContainerFileEditor />
+      ) : (
+        <>
       {renderedChatChannel === 'shell' ? (
         <InternalConsole
           projectId={projectId}
@@ -2998,6 +3005,8 @@ function ChatSessionContent({
           </button>
         )}
       </div>}
+        </>
+      )}
 
       {isVisible && containerName && !contracted && (
         <BranchBar

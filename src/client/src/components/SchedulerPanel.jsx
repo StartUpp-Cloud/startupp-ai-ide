@@ -80,7 +80,7 @@ function getNextRunAt(schedule) {
   return new Date(new Date(base).getTime() + schedule.intervalMs).toISOString();
 }
 
-export default function SchedulerPanel({ projectId, projectPath, selectedTool }) {
+export default function SchedulerPanel({ projectId, projectPath, selectedTool, collapsed = false, onToggle }) {
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateForm, setShowCreateForm] = useState(false);
@@ -247,11 +247,18 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
     <div className="flex flex-col h-full bg-surface-850">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-surface-700">
-        <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex items-center gap-2 text-left"
+          title={collapsed ? 'Expand' : 'Collapse'}
+        >
+          {collapsed ? <ChevronRight className="w-4 h-4 text-surface-500" /> : <ChevronDown className="w-4 h-4 text-surface-500" />}
           <Clock className="w-4 h-4 text-primary-400" />
           <span className="text-sm font-medium text-surface-200">Schedules</span>
           <span className="text-xs text-surface-500">({schedules.length})</span>
-        </div>
+        </button>
+        {!collapsed && (
         <div className="flex items-center gap-1">
           <button
             onClick={fetchSchedules}
@@ -268,8 +275,11 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
             <Plus className="w-3.5 h-3.5" />
           </button>
         </div>
+        )}
       </div>
 
+      {!collapsed && (
+      <>
       {/* Create Form */}
       {/* AI Schedule Assistant */}
       {showCreateForm && (
@@ -779,6 +789,8 @@ export default function SchedulerPanel({ projectId, projectPath, selectedTool })
           </div>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

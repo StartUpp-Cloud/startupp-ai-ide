@@ -284,6 +284,18 @@ export const ProjectProvider = ({ children }) => {
     fetchProjects();
   }, []);
 
+  const watchingProvision = projects.some((project) =>
+    ['queued', 'building', 'creating'].includes(project.provision?.status)
+  );
+
+  useEffect(() => {
+    if (!watchingProvision) return undefined;
+    const timer = setInterval(() => {
+      fetchProjects();
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [watchingProvision]);
+
   const value = {
     projects,
     loading,

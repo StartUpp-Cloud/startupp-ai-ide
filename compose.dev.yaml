@@ -1,0 +1,19 @@
+services:
+  ide:
+    build:
+      target: development
+    image: startupp-ai-ide:dev
+    environment:
+      NODE_ENV: development
+      SAI_IN_CONTAINER: "1"
+    ports:
+      - "55590:55590"
+      - "5173:5173"
+    volumes:
+      - ide-node-modules:/app/node_modules
+      - ide-client-modules:/app/src/client/node_modules
+    command: ["npm", "run", "dev"]
+
+volumes:
+  ide-node-modules:
+  ide-client-modules:

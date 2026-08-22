@@ -18,32 +18,50 @@ const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
 const DEFAULT_HEIGHT = 180;
 
+/** Put user-global npm bins on PATH. Login bash often misses ~/.npm-global/bin. */
+const ENSURE_NPM_GLOBAL_PATH = [
+  'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"',
+  'mkdir -p "$NPM_CONFIG_PREFIX/bin"',
+  'npm config set prefix "$NPM_CONFIG_PREFIX"',
+  'export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"',
+  'grep -qF "$NPM_CONFIG_PREFIX/bin" ~/.bashrc 2>/dev/null || echo \'export PATH="$HOME/.npm-global/bin:$PATH"\' >> ~/.bashrc',
+].join(' && ');
+
+const npmGlobalInstall = (pkg, bin) =>
+  `${ENSURE_NPM_GLOBAL_PATH} && npm install -g ${pkg} && hash -r && command -v ${bin} && ${bin} --version`;
+
+const withNpmGlobalPath = (cmd) =>
+  `export PATH="\${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/bin:$PATH"; hash -r; ${cmd}`;
+
+/** Codex dies on a binary/corrupt ~/.codex/config.toml (often leftover from MCP merge). */
+const SANITIZE_CODEX_TOML = `node -e "const fs=require('fs');const f=require('os').homedir()+'/.codex/config.toml';try{const s=fs.readFileSync(f,'utf8');if(/[\\x00-\\x08\\x0e-\\x1f]/.test(s)||s.includes('\\uFFFD')){fs.renameSync(f,f+'.corrupt');console.log('Moved corrupt ~/.codex/config.toml aside');}}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\\\\n');}"`;
+
 const QUICK_COMMANDS = [
   { label: 'Quick commands...', command: '' },
   // ── GitHub ──
-  { label: 'Login to GitHub', command: "BROWSER=false gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git" },
+  { label: 'Login to GitHub', command: "GH_PROMPT_DISABLED=1 BROWSER=false gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git" },
   { label: 'GitHub auth status', command: 'gh auth status' },
   // ── AI coding assistants: install ──
-  { label: 'Install Claude Code', command: 'npm install -g @anthropic-ai/claude-code' },
-  { label: 'Install OpenCode', command: 'npm install -g opencode-ai' },
-  { label: 'Install GitHub Copilot CLI', command: 'npm install -g @github/copilot' },
+  { label: 'Install Claude Code', command: npmGlobalInstall('@anthropic-ai/claude-code', 'claude') },
+  { label: 'Install OpenCode', command: npmGlobalInstall('opencode-ai', 'opencode') },
+  { label: 'Install GitHub Copilot CLI', command: npmGlobalInstall('@github/copilot', 'copilot') },
   { label: 'Install GitHub Copilot (gh extension)', command: 'gh extension install github/gh-copilot' },
-  { label: 'Install Codex CLI', command: 'npm install -g @openai/codex' },
-  { label: 'Install Gemini CLI', command: 'npm install -g @google/gemini-cli' },
+  { label: 'Install Codex CLI', command: `${npmGlobalInstall('@openai/codex', 'codex')} && ${SANITIZE_CODEX_TOML}` },
+  { label: 'Install Gemini CLI', command: npmGlobalInstall('@google/gemini-cli', 'gemini') },
   { label: 'Install Aider', command: 'pip3 install --user aider-chat' },
   { label: 'Install Cursor CLI', command: 'curl https://cursor.com/install -fsS | bash' },
   { label: 'Install Ollama', command: 'curl -fsSL https://ollama.com/install.sh | sh' },
   // ── AI coding assistants: login / auth ──
-  { label: 'Login to Claude Code', command: 'claude' },
-  { label: 'Login to Codex', command: 'codex login' },
-  { label: 'Login to Gemini', command: 'gemini' },
+  { label: 'Login to Claude Code', command: withNpmGlobalPath('claude') },
+  { label: 'Login to Codex', command: withNpmGlobalPath(`${SANITIZE_CODEX_TOML}; codex login`) },
+  { label: 'Login to Gemini', command: withNpmGlobalPath('gemini') },
   { label: 'Login to Cursor', command: 'cursor-agent login' },
   // ── Salesforce ──
-  { label: 'Install Salesforce CLI', command: 'npm install -g @salesforce/cli' },
-  { label: 'Login to Salesforce', command: 'sf org login web' },
+  { label: 'Install Salesforce CLI', command: npmGlobalInstall('@salesforce/cli', 'sf') },
+  { label: 'Login to Salesforce', command: withNpmGlobalPath('sf org login web') },
   // ── Utilities ──
-  { label: 'Install pnpm', command: 'npm install -g pnpm' },
-  { label: 'Check tool versions', command: 'node -v; npm -v; gh --version 2>/dev/null; claude --version 2>/dev/null; opencode --version 2>/dev/null; copilot --version 2>/dev/null; codex --version 2>/dev/null; gemini --version 2>/dev/null; aider --version 2>/dev/null; sf --version 2>/dev/null; true' },
+  { label: 'Install pnpm', command: npmGlobalInstall('pnpm', 'pnpm') },
+  { label: 'Check tool versions', command: `${withNpmGlobalPath('node -v; npm -v; gh --version 2>/dev/null; claude --version 2>/dev/null; opencode --version 2>/dev/null; copilot --version 2>/dev/null; codex --version 2>/dev/null; gemini --version 2>/dev/null; aider --version 2>/dev/null; sf --version 2>/dev/null; true')}` },
 ];
 
 function getStoredHeight() {
@@ -64,6 +82,7 @@ export default function InternalConsole({
   chatWsRef,
   activeChatSessionId,
   embedded = false,
+  hostShell = false,
   queuedCommand,
   onQueuedCommandHandled,
 }) {
@@ -129,7 +148,7 @@ export default function InternalConsole({
 
   const handleRestartConsole = useCallback((e) => {
     e?.stopPropagation();
-    if (!projectId || restarting) return;
+    if ((!hostShell && !projectId) || restarting) return;
 
     forceNewSessionRef.current = true;
     setRestarting(true);
@@ -146,7 +165,7 @@ export default function InternalConsole({
     prevProjectIdRef.current = null;
     sessionIdRef.current = null;
     setSessionResetKey((key) => key + 1);
-  }, [projectId, restarting]);
+  }, [projectId, hostShell, restarting]);
 
   // Drag-to-resize state
   const dragRef = useRef({ active: false, startY: 0, startHeight: 0 });
@@ -183,16 +202,21 @@ export default function InternalConsole({
 
   // Create xterm + WS + session when opened
   useEffect(() => {
-    if (!isOpen || !projectId || !termRef.current) return;
+    if (!isOpen || (!hostShell && !projectId) || !termRef.current) return;
 
-    // Avoid re-init if same project and already connected
-    if (xtermRef.current && prevProjectIdRef.current === projectId && wsRef.current?.readyState === WebSocket.OPEN) {
-      return;
-    }
+    // Only skip re-init when this effect's live terminal is still usable.
+    // (A disposed xterm or a closing WS must not block a fresh session.)
+    const existingAlive = xtermRef.current
+      && xtermRef.current.element
+      && termRef.current?.contains(xtermRef.current.element)
+      && prevProjectIdRef.current === projectId
+      && wsRef.current?.readyState === WebSocket.OPEN
+      && sessionIdRef.current;
+    if (existingAlive) return;
 
     // Clean up previous
-    if (xtermRef.current) { xtermRef.current.dispose(); xtermRef.current = null; }
-    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+    if (xtermRef.current) { try { xtermRef.current.dispose(); } catch {} xtermRef.current = null; }
+    if (wsRef.current) { try { wsRef.current.close(); } catch {} wsRef.current = null; }
     sessionIdRef.current = null;
     prevProjectIdRef.current = projectId;
     mountedRef.current = true;
@@ -208,19 +232,49 @@ export default function InternalConsole({
     const fit = new FitAddon();
     xterm.loadAddon(fit);
     xterm.open(termRef.current);
-    fit.fit();
     xtermRef.current = xterm;
     fitRef.current = fit;
+
+    const safeFit = () => {
+      try {
+        fit.fit();
+      } catch {}
+      return xterm.cols >= 2 && xterm.rows >= 2;
+    };
+
+    const focusTerminal = () => {
+      requestAnimationFrame(() => {
+        try {
+          safeFit();
+          xterm.focus();
+          const textarea = termRef.current?.querySelector('.xterm-helper-textarea');
+          if (textarea) textarea.focus();
+        } catch {}
+      });
+    };
 
     // WebSocket connection state
     let reconnectTimer = null;
     let heartbeatInterval = null;
+    let sizeWaitTimer = null;
     let lastPong = Date.now();
     let reconnectDelay = WS_CONFIG.reconnectMinDelay;
     let wasConnected = false;
+    let outputBuffer = []; // hold PTY output until session-created arrives
+    let connectGeneration = 0;
 
     // Connect WebSocket
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/terminal`;
+
+    const flushOutputBuffer = (sessionId) => {
+      if (!outputBuffer.length) return;
+      for (const chunk of outputBuffer) {
+        if (!chunk.sessionId || chunk.sessionId === sessionId) {
+          try { xterm.write(chunk.data || ''); } catch {}
+        }
+      }
+      outputBuffer = [];
+    };
 
     const connect = () => {
       if (!mountedRef.current) return;
@@ -229,25 +283,27 @@ export default function InternalConsole({
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
       if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) return;
 
+      const generation = ++connectGeneration;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (!mountedRef.current) { ws.close(); return; }
+        if (!mountedRef.current || generation !== connectGeneration) { ws.close(); return; }
 
         setConnected(true);
         wasConnected = true;
         lastPong = Date.now();
         reconnectDelay = WS_CONFIG.reconnectMinDelay;
+        safeFit();
 
         // Create a session for this project
         ws.send(JSON.stringify({
           type: 'create-session',
-          projectId,
+          projectId: hostShell ? 'ide' : projectId,
           role: 'utility',
           cliTool: null,
-          cols: xterm.cols || 120,
-          rows: xterm.rows || 12,
+          cols: Math.max(xterm.cols || 0, 80),
+          rows: Math.max(xterm.rows || 0, 24),
           forceNew: forceNewSessionRef.current,
         }));
         forceNewSessionRef.current = false;
@@ -268,30 +324,56 @@ export default function InternalConsole({
       };
 
       ws.onmessage = (event) => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || generation !== connectGeneration) return;
         lastPong = Date.now();
-        const msg = JSON.parse(event.data);
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
 
-        if (msg.type === 'session-created' && !sessionIdRef.current) {
+        if (msg.type === 'session-created') {
           sessionIdRef.current = msg.sessionId;
           setRestarting(false);
-          // Attach
-          ws.send(JSON.stringify({ type: 'attach', sessionId: msg.sessionId }));
+          flushOutputBuffer(msg.sessionId);
+          // Re-attach to pull scrollback (server also auto-attaches on create)
+          try {
+            ws.send(JSON.stringify({ type: 'attach', sessionId: msg.sessionId }));
+          } catch {}
+          focusTerminal();
+        }
+
+        if (msg.type === 'attached' && msg.session?.id) {
+          sessionIdRef.current = msg.session.id;
+          setRestarting(false);
+          focusTerminal();
         }
 
         if (msg.type === 'error') {
           setRestarting(false);
+          const errText = msg.error || 'Terminal session error';
+          try {
+            xterm.writeln(`\r\n\x1b[31m${errText}\x1b[0m`);
+          } catch {}
         }
 
-        if (msg.type === 'output' && msg.sessionId === sessionIdRef.current) {
-          xterm.write(msg.data);
+        if (msg.type === 'output') {
+          const forThisSession = !msg.sessionId || !sessionIdRef.current || msg.sessionId === sessionIdRef.current;
+          if (forThisSession) {
+            try { xterm.write(msg.data || ''); } catch {}
+          } else if (!sessionIdRef.current) {
+            outputBuffer.push(msg);
+            if (outputBuffer.length > 200) outputBuffer.shift();
+          }
         }
       };
 
       ws.onclose = (event) => {
+        if (generation !== connectGeneration) return;
         if (!mountedRef.current) return;
         setConnected(false);
-        wsRef.current = null;
+        if (wsRef.current === ws) wsRef.current = null;
         if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
 
         // Auto-reconnect if we were previously connected
@@ -300,12 +382,15 @@ export default function InternalConsole({
           reconnectTimer = setTimeout(() => {
             reconnectTimer = null;
             reconnectDelay = Math.min(reconnectDelay * WS_CONFIG.reconnectBackoffMultiplier, WS_CONFIG.reconnectMaxDelay);
+            sessionIdRef.current = null;
+            outputBuffer = [];
             connect();
           }, reconnectDelay);
         }
       };
 
       ws.onerror = () => {
+        if (generation !== connectGeneration) return;
         setConnected(false);
         setRestarting(false);
       };
@@ -349,60 +434,74 @@ export default function InternalConsole({
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('focus', handleFocus);
 
-    connect();
+    // Wait until the shell pane has a real size before opening the PTY.
+    // Opening at 0×0 (common on first Shell-tab mount) drops early prompt
+    // writes and leaves a blank blinking cursor.
+    const startWhenSized = () => {
+      if (!mountedRef.current) return;
+      if (safeFit()) {
+        connect();
+        return;
+      }
+      let attempts = 0;
+      const poll = () => {
+        if (!mountedRef.current) return;
+        attempts += 1;
+        if (safeFit() || attempts >= 40) {
+          connect();
+          return;
+        }
+        sizeWaitTimer = setTimeout(poll, 50);
+      };
+      sizeWaitTimer = setTimeout(poll, 50);
+    };
+    startWhenSized();
 
-    // Forward keyboard input, filtering terminal query responses emitted by xterm itself.
-    let inputBuf = '';
-    let inputTimer = null;
-
+    // Forward keystrokes immediately. Batching + stripping CPR replies
+    // leaves `gh` / huh confirm prompts waiting forever for (Y/n).
     xterm.onData((data) => {
-      if (!sessionIdRef.current) return;
-      inputBuf += data;
-
-      if (inputTimer) clearTimeout(inputTimer);
-      inputTimer = setTimeout(() => {
-        const cleaned = stripTerminalQueryResponses(inputBuf);
-        inputBuf = '';
-
-        if (!cleaned || wsRef.current?.readyState !== WebSocket.OPEN) return;
-        wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: cleaned }));
-      }, 3);
+      if (!sessionIdRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
+      const cleaned = stripTerminalQueryResponses(data);
+      if (!cleaned) return;
+      wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: cleaned }));
     });
 
-    // Forward resize
+    // Forward resize — never push 0×0 (hangs / blanks the shell).
     xterm.onResize(({ cols, rows }) => {
+      if (cols < 2 || rows < 2) return;
       if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'resize', sessionId: sessionIdRef.current, cols, rows }));
       }
     });
 
     // Refit on window resize
-    const resizeHandler = () => fit.fit();
+    const resizeHandler = () => safeFit();
     window.addEventListener('resize', resizeHandler);
 
     const resizeObserver = typeof ResizeObserver !== 'undefined'
-      ? new ResizeObserver(() => {
-          try { fit.fit(); } catch {}
-        })
+      ? new ResizeObserver(() => { safeFit(); })
       : null;
     if (resizeObserver && termRef.current) resizeObserver.observe(termRef.current);
 
     return () => {
       mountedRef.current = false;
+      connectGeneration += 1;
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
       window.removeEventListener('resize', resizeHandler);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatInterval) clearInterval(heartbeatInterval);
-      if (inputTimer) clearTimeout(inputTimer);
+      if (sizeWaitTimer) clearTimeout(sizeWaitTimer);
       resizeObserver?.disconnect();
-      xterm.dispose();
+      try { xterm.dispose(); } catch {}
       xtermRef.current = null;
-      if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.close();
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch {}
+      }
       wsRef.current = null;
       sessionIdRef.current = null;
     };
-  }, [isOpen, projectId, sessionResetKey]);
+  }, [isOpen, projectId, hostShell, sessionResetKey]);
 
   useEffect(() => {
     if (!queuedCommand) return undefined;
@@ -451,7 +550,11 @@ export default function InternalConsole({
             className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}
             title={connected ? 'Connected' : restarting ? 'Restarting...' : 'Connecting...'}
           />
-          <span className="hidden text-[10px] text-surface-500 truncate sm:inline">Full terminal PTY inside this project container</span>
+          <span className="hidden text-[10px] text-surface-500 truncate sm:inline">
+            {hostShell
+              ? 'IDE container shell — install and log in to your orchestrator here'
+              : 'Full terminal PTY inside this project container'}
+          </span>
           <span className="flex-1" />
           {connected && activeChatSessionId && (
             <button

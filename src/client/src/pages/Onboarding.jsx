@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useProjects } from "../contexts/ProjectContext";
 import useProjectForm from "../hooks/useProjectForm";
 import ProjectFormFields from "../components/ProjectFormFields";
+import InternalConsole from "../components/InternalConsole";
 import {
   Cpu,
   Check,
@@ -26,8 +27,6 @@ export default function Onboarding({ onSetupComplete }) {
   // Docker state
   const [dockerAvailable, setDockerAvailable] = useState(null); // null=checking, true, false
   const [dockerChecking, setDockerChecking] = useState(false);
-  const [serverOS, setServerOS] = useState(null); // 'linux', 'darwin', 'win32'
-
   // LLM state
   const [llmProvider, setLlmProvider] = useState("ollama");
   const [ollamaModels, setOllamaModels] = useState([]);
@@ -43,6 +42,7 @@ export default function Onboarding({ onSetupComplete }) {
   // GitHub Models (Copilot) + OpenCode CLI
   const [githubModel, setGithubModel] = useState("openai/gpt-4o-mini");
   const [opencodeModel, setOpencodeModel] = useState("");
+  const [codexModel, setCodexModel] = useState("");
 
   // Project form
   const form = useProjectForm();
@@ -58,7 +58,6 @@ export default function Onboarding({ onSetupComplete }) {
         const res = await fetch('/api/containers/status');
         const data = await res.json();
         setDockerAvailable(data.dockerAvailable === true);
-        if (data.serverOS) setServerOS(data.serverOS);
       } catch {
         setDockerAvailable(false);
       } finally {
@@ -138,6 +137,12 @@ export default function Onboarding({ onSetupComplete }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model: opencodeModel }),
         });
+      } else if (llmProvider === "codex") {
+        await fetch("/api/llm/codex/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: codexModel }),
+        });
       }
 
       // Step 3: Test the connection
@@ -177,32 +182,6 @@ export default function Onboarding({ onSetupComplete }) {
 
       const newProject = await createProject(projectData);
 
-      // Container-runtime projects get an isolated container; host-runtime
-      // projects run on the host machine using folderPath — no container.
-      if (!isHost) {
-        try {
-          await fetch('/api/containers/build-image', { method: 'POST' });
-          const containerRes = await fetch('/api/containers', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              projectId: newProject.id,
-              name: projectData.name,
-              repos: projectData.repos,
-              ports: projectData.containerPorts,
-            }),
-          });
-          const containerData = await containerRes.json();
-          if (containerData.containerName) {
-            await fetch(`/api/projects/${newProject.id}`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ containerName: containerData.containerName }),
-            });
-          }
-        } catch { /* container creation is best-effort */ }
-      }
-
       // Unlock the setup gate, then navigate to IDE
       onSetupComplete?.();
       navigate("/");
@@ -215,9 +194,9 @@ export default function Onboarding({ onSetupComplete }) {
 
   return (
     <div className="min-h-screen bg-surface-900 flex items-center justify-center p-4">
-      <div className="w-full max-w-lg">
+      <div className="w-full max-w-6xl">
         {/* Header */}
-        <div className="text-center mb-8">
+        <div className="text-center mb-6">
           <div className="w-14 h-14 rounded-2xl bg-primary-500 flex items-center justify-center mx-auto mb-4 shadow-glow">
             <span className="text-surface-950 font-display font-bold text-xl">P</span>
           </div>
@@ -225,10 +204,12 @@ export default function Onboarding({ onSetupComplete }) {
             Welcome to StartUpp AI IDE
           </h1>
           <p className="text-surface-400 text-sm mt-2">
-            Let's get you set up in two quick steps
+            Connect a model, then install and authenticate it in the IDE container shell
           </p>
         </div>
 
+        <div className="grid gap-4 lg:grid-cols-2 items-stretch">
+        <div>
         {/* Progress */}
         <div className="flex items-center justify-center gap-2 mb-8">
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
@@ -286,6 +267,7 @@ export default function Onboarding({ onSetupComplete }) {
                   { id: "deepseek", name: "DeepSeek", desc: "Cloud" },
                   { id: "github", name: "GitHub Models", desc: "Copilot" },
                   { id: "opencode", name: "OpenCode", desc: "CLI" },
+                  { id: "codex", name: "Codex", desc: "CLI" },
                 ].map((p) => (
                   <button
                     key={p.id}
@@ -402,7 +384,24 @@ export default function Onboarding({ onSetupComplete }) {
                 />
                 <p className="text-[11px] text-surface-500 mt-1">
                   Uses the local <code className="text-primary-300">opencode</code> CLI as the orchestrator model.
-                  Install it from the Shell tab quick commands if it isn't available yet.
+                  Install it from the terminal quick commands on the right if it isn't available yet.
+                </p>
+              </div>
+            )}
+
+            {llmProvider === "codex" && (
+              <div>
+                <label className="label">Model <span className="text-surface-600 text-xs font-normal">— optional</span></label>
+                <input
+                  type="text"
+                  value={codexModel}
+                  onChange={(e) => { setCodexModel(e.target.value); setTestResult(null); setLlmReady(false); }}
+                  className="input"
+                  placeholder="leave blank to use Codex's default"
+                />
+                <p className="text-[11px] text-surface-500 mt-1">
+                  Uses the <code className="text-primary-300">codex</code> CLI as the orchestrator. The same CLI can be selected as the coding agent in chat.
+                  Authenticate with <code className="text-primary-300">codex</code> in the terminal on the right.
                 </p>
               </div>
             )}
@@ -470,79 +469,25 @@ export default function Onboarding({ onSetupComplete }) {
             ) : dockerAvailable ? (
               <div className="flex items-center gap-2 p-3 bg-green-500/10 border border-green-500/20 rounded-lg text-xs text-green-400">
                 <Check className="w-4 h-4" />
-                Docker is installed and running!
+                Docker engine is reachable. Project containers will be created as siblings of this IDE.
               </div>
             ) : (
               <div className="space-y-3">
                 <div className="flex items-center gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-xs text-yellow-300">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                  Docker is not installed or not running
+                  Docker engine is not reachable from the IDE container
                 </div>
-
-                {(() => {
-                  // Use SERVER OS (not browser) — the browser might be on a different machine
-                  const isMac = serverOS === 'darwin';
-                  const isWindows = serverOS === 'win32';
-                  // Default to Linux
-
-                  if (isMac) return (
-                    <div>
-                      <p className="text-xs text-surface-400 mb-2">
-                        Install Docker Desktop for macOS:
-                      </p>
-                      <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
-                        <p className="text-surface-500"># Install via Homebrew</p>
-                        <p className="text-green-300">brew install --cask docker</p>
-                        <p className="text-surface-500 mt-2"># Then open Docker Desktop from Applications</p>
-                        <p className="text-green-300">open /Applications/Docker.app</p>
-                        <p className="text-surface-500 mt-2"># Verify it works</p>
-                        <p className="text-green-300">docker info</p>
-                      </div>
-                    </div>
-                  );
-
-                  if (isWindows) return (
-                    <div>
-                      <p className="text-xs text-surface-400 mb-2">
-                        Install Docker Desktop for Windows:
-                      </p>
-                      <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
-                        <p className="text-surface-500"># Download Docker Desktop from:</p>
-                        <p className="text-blue-300">
-                          <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener noreferrer" className="underline">
-                            docker.com/products/docker-desktop
-                          </a>
-                        </p>
-                        <p className="text-surface-500 mt-2"># Or install via winget</p>
-                        <p className="text-green-300">winget install Docker.DockerDesktop</p>
-                        <p className="text-surface-500 mt-2"># Restart your terminal, then verify</p>
-                        <p className="text-green-300">docker info</p>
-                      </div>
-                    </div>
-                  );
-
-                  // Linux
-                  return (
-                    <div>
-                      <p className="text-xs text-surface-400 mb-2">
-                        Run these commands in a separate terminal:
-                      </p>
-                      <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
-                        <p className="text-surface-500"># Install Docker</p>
-                        <p className="text-green-300">sudo apt install docker.io -y</p>
-                        <p className="text-surface-500 mt-2"># Add your user to the docker group</p>
-                        <p className="text-green-300">sudo usermod -aG docker $USER</p>
-                        <p className="text-surface-500 mt-2"># Apply group changes (or log out and back in)</p>
-                        <p className="text-green-300">newgrp docker</p>
-                        <p className="text-surface-500 mt-2"># Verify it works</p>
-                        <p className="text-green-300">docker info</p>
-                      </div>
-                    </div>
-                  );
-                })()}
-
+                <p className="text-xs text-surface-400">
+                  The IDE already runs in Docker. Start the engine on the host (Docker Desktop or dockerd), then this check will pass.
+                </p>
+                <div className="bg-surface-900 rounded-lg p-3 font-mono text-[11px] space-y-1">
+                  <p className="text-surface-500"># Host machine</p>
+                  <p className="text-green-300">docker info</p>
+                  <p className="text-surface-500 mt-2"># If that fails, start Docker Desktop or:</p>
+                  <p className="text-green-300">sudo systemctl start docker</p>
+                </div>
                 <p className="text-[10px] text-surface-500 mt-2">
-                  This page auto-checks every 5 seconds. Once Docker is running, the green check will appear.
+                  This page auto-checks every 5 seconds.
                 </p>
               </div>
             )}
@@ -565,7 +510,7 @@ export default function Onboarding({ onSetupComplete }) {
 
             {!dockerAvailable && (
               <p className="text-[10px] text-surface-500 text-center">
-                You can still use the IDE without Docker — projects will use local folders instead of containers.
+                Container projects need a running Docker engine. You can continue and provision them once it is up.
               </p>
             )}
           </div>
@@ -616,6 +561,17 @@ export default function Onboarding({ onSetupComplete }) {
             </form>
           </div>
         )}
+        </div>
+        <div className="card p-0 overflow-hidden min-h-[28rem] flex flex-col">
+          <div className="px-3 pt-3 pb-1">
+            <p className="text-xs font-medium text-surface-200">IDE container shell</p>
+            <p className="text-[11px] text-surface-500 mt-0.5">
+              Install and log in to Codex, Claude, or another CLI here, then test the connection. This is the orchestrator environment — not a project container.
+            </p>
+          </div>
+          <InternalConsole embedded hostShell />
+        </div>
+        </div>
       </div>
     </div>
   );

@@ -1,222 +1,93 @@
-# PM2 Deployment Guide for StartUpp AI IDE
+# PM2 / IDE lifecycle
 
-This guide covers PM2-based deployment for StartUpp AI IDE.
+The IDE process runs **inside** the Ubuntu container `sai-ide`. Production uses `pm2-runtime` from `ecosystem.config.cjs`. On the host, use the `npm run pm2:*` commands — they manage the container job, not a host Node process.
 
-The recommended production mode runs only the backend process. In production, the Express server serves the built frontend from `src/client/dist`.
+Do not run `docker compose` on Windows. Do not run `npm run dev` / `npm start` on the host.
 
-## Quick Start
+## Commands
 
-### 1. Install PM2 Globally
+| Command | Behavior |
+| --- | --- |
+| `npm run pm2:start` | `git pull --ff-only`, build/install the image if needed, create or replace the `sai-ide` container, start it detached |
+| `npm run pm2:restart` | `git pull --ff-only`, rebuild, restart the container |
+| `npm run pm2:stop` | `docker stop sai-ide` only. The job definition, images, and volumes stay |
+| `npm run pm2:uninstall` | Remove the `sai-ide` container (the job). **Images and volumes are not deleted** |
+| `npm run pm2:status` | Show container name, status, image, and ports |
+| `npm run pm2:logs` | Follow `sai-ide` logs |
+
+Development (Vite on port 5173):
 
 ```bash
-npm install -g pm2
+npm run pm2:start -- --dev
+npm run pm2:restart -- --dev
 ```
 
-### 2. Run the Startup Script
+Production (Express serves `src/client/dist` on port 55590):
 
 ```bash
-./start-pm2.sh
-```
-
-This script will:
-
-- Check if PM2 is installed
-- Install dependencies
-- Build the frontend
-- Start the application with PM2
-
-## Manual PM2 Commands
-
-### Start the Application
-
-```bash
-# Development mode: PM2 manages both backend and Vite dev server
 npm run pm2:start
-
-# Production mode: PM2 manages only the backend server
-npm run pm2:start:prod
 ```
 
-### Manage the Application
+`start` and `restart` both pull the latest git history before building. `start` is also the first-time install.
+
+## What these commands never do
+
+They never run `docker image rm`, `docker rmi`, `docker volume rm`, or `compose down -v`.
+
+Images must be removed by a person on purpose:
 
 ```bash
-# View status
+docker image rm startupp-ai-ide:latest
+docker image rm startupp-ai-ide:dev
+```
+
+Volumes that hold your data (never deleted by `pm2:*`):
+
+- `sai-ide-data` — SQLite, projects, session history
+- `sai-ide-home` — global CLIs and login state
+- `sai-ide-logs` — server logs
+
+## Check that it is running
+
+```bash
 npm run pm2:status
-
-# View logs
-npm run pm2:logs
-
-# Monitor processes
-npm run pm2:monit
-
-# Restart application
-npm run pm2:restart
-
-# Reload application
-npm run pm2:reload
-
-# Stop application
-npm run pm2:stop
-
-# Remove from PM2
-npm run pm2:delete
-```
-
-## PM2 Configuration
-
-The application uses `ecosystem.config.cjs` for PM2 configuration.
-
-## Environment Configuration
-
-### Development
-
-- Uses `.env` file
-- CORS allows all origins for LAN access
-- Detailed error messages
-
-### Production
-
-- Uses `.env` file
-- Serves the built frontend from `src/client/dist`
-- Hides detailed internal errors
-- Does not require a separate frontend process
-
-## File Structure
-
-```text
-startupp-ai-ide/
-├── ecosystem.config.cjs        # PM2 configuration
-├── start-pm2.sh                # Startup script
-├── .env.example                # Environment template
-├── logs/                       # PM2 log files
-├── data/                       # Local database (gitignored)
-├── src/
-│   ├── client/
-│   │   └── dist/               # Built frontend after build
-│   └── server/
-│       └── index.js            # Server entry point
-└── package.json                # NPM scripts
-```
-
-## Production Deployment Steps
-
-### 1. Prepare the Environment
-
-```bash
-cp .env.example .env
-npm run install:all
-npm run build
-```
-
-### 2. Start with PM2
-
-```bash
-npm run pm2:start:prod
-```
-
-### 3. Verify Deployment
-
-```bash
-pm2 status
-pm2 logs
 curl http://localhost:55590/api/health
 ```
 
-## Monitoring and Logs
+Dev UI: http://localhost:5173  
+Production UI: http://localhost:55590
 
-### View Logs
+## Inside the container
 
-```bash
-pm2 logs
-pm2 logs ai-ide-api
-pm2 logs --follow
+`ecosystem.config.cjs` defines `ai-ide-api`. The production image starts it with:
+
+```text
+pm2-runtime ecosystem.config.cjs --only ai-ide-api --env production
 ```
 
-### Monitor Processes
-
-```bash
-pm2 monit
-pm2 show ai-ide-api
-```
-
-### Log Files
-
-- Error logs: `./logs/err.log`
-- Output logs: `./logs/out.log`
-- Combined logs: `./logs/combined.log`
-
-## Zero-Downtime Updates
-
-### Reload Application
-
-```bash
-npm run pm2:reload
-pm2 reload ecosystem.config.cjs
-```
-
-### Update and Deploy
-
-```bash
-git pull origin main
-npm install
-npm run build
-npm run pm2:reload:prod
-```
+Host-side `pm2 start ecosystem.config.cjs` is not supported. If an old host job named `ai-ide-api` is still registered, `npm run pm2:uninstall` deletes that job as well — still without touching images.
 
 ## Troubleshooting
 
-### Common Issues
+### Docker is not running
 
-#### 1. PM2 Not Found
+Start Docker Desktop (Windows/macOS) or the engine, then `npm run pm2:start`.
 
-```bash
-npm install -g pm2
-```
-
-#### 2. Port Already in Use
+### Port already in use
 
 ```bash
-lsof -i :55590
+npm run pm2:stop
 ```
 
-#### 3. Frontend Build Failed
+### Want a clean container but keep data
 
 ```bash
-cd src/client && npm run build
+npm run pm2:uninstall
+npm run pm2:start
 ```
 
-### Debug Commands
+That recreates `sai-ide` from the existing image/build. Named volumes stay.
 
-```bash
-pm2 status
-pm2 show ai-ide-api
-pm2 logs --err
-pm2 restart ai-ide-api
-```
+### Want to delete images
 
-## Security Considerations
-
-- Environment variables for local configuration
-- Rate limiting enabled
-- Helmet security headers enabled
-- CORS configured by environment
-- Reduced error detail in production
-- AI auto-responder has risk-based guardrails (blocks critical operations without confirmation)
-- Intended for local/private self-hosting unless you add auth in front of it
-
-### Environment Variables
-
-```bash
-NODE_ENV=production
-PORT=55590
-FRONTEND_URL=https://yourdomain.com
-RATE_LIMIT_MAX_REQUESTS=100
-```
-
-## Network Access
-
-In development mode, the Vite dev server binds to all interfaces (`host: true`), making the IDE accessible from other machines on your LAN at `http://<server-ip>:5173`. The terminal sessions run on the server machine.
-
----
-
-**Happy Deploying!**
+Do it manually after uninstall. The lifecycle scripts will not do it.

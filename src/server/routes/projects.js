@@ -1,11 +1,12 @@
 import express from "express";
-import { execFileSync } from "child_process";
 import Project from "../models/Project.js";
 import { normalizePromptSettings } from "../models/Project.js";
 import { containerManager } from "../containerManager.js";
 import { ptyManager } from "../ptyManager.js";
 import { normalizeEnvironments, maskEnvironmentsForClient } from "../projectEnvironments.js";
 import { skillManager } from "../skillManager.js";
+import { runHostShell } from "../hostShell.js";
+import { startProvision, getProvisionJob, withProvision } from "../containerProvision.js";
 
 const router = express.Router();
 
@@ -27,11 +28,7 @@ function parseOpenCodeModels(raw, source) {
 
 function getHostOpenCodeModels() {
   try {
-    const raw = execFileSync("opencode", ["models"], {
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 8000,
-    });
+    const raw = runHostShell("opencode models", { timeout: 8000 });
     return parseOpenCodeModels(raw, "host");
   } catch {
     return [];
@@ -101,7 +98,7 @@ router.get("/", async (req, res) => {
       projects = Project.getAll();
     }
 
-    res.json(projects.map(safeProject));
+    res.json(projects.map((p) => withProvision(safeProject(p))));
   } catch (error) {
     res
       .status(500)
@@ -123,11 +120,60 @@ router.get("/:id", async (req, res) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    res.json(safeProject(project));
+    res.json(withProvision(safeProject(project)));
   } catch (error) {
     res
       .status(500)
       .json({ error: "Failed to fetch project", message: error.message });
+  }
+});
+
+// GET /api/projects/:id/provision — live container-setup status
+router.get("/:id/provision", (req, res) => {
+  const project = Project.findById(req.params.id);
+  if (!project) return res.status(404).json({ error: "Project not found" });
+  res.json({
+    projectId: project.id,
+    containerName: project.containerName || null,
+    provision: getProvisionJob(project.id),
+  });
+});
+
+// POST /api/projects/:id/provision-container
+// Start (or reuse) background container setup. Returns immediately.
+router.post("/:id/provision-container", (req, res) => {
+  try {
+    const { id } = req.params;
+    const project = Project.findById(id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    if (project.runtime === "host") {
+      return res.status(400).json({ error: "Host-runtime projects do not use containers. Set a folder path instead." });
+    }
+
+    if (project.containerName) {
+      const status = containerManager.getContainerStatus(project.containerName);
+      if (status) {
+        return res.json({
+          status: "exists",
+          containerName: project.containerName,
+          containerStatus: status,
+          project: withProvision(safeProject(project)),
+          provision: getProvisionJob(id),
+        });
+      }
+    }
+
+    const provision = startProvision(id);
+    res.status(202).json({
+      status: provision.status,
+      provision,
+      project: withProvision(safeProject(project)),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -211,8 +257,11 @@ router.post("/", async (req, res) => {
     // Enable the bundled default-on skills on the new project.
     await skillManager.ensureDefaultSkillsActive(project.id);
     const created = Project.findById(project.id) || project;
+    if (created.runtime !== "host") {
+      startProvision(created.id);
+    }
 
-    res.status(201).json(safeProject(created));
+    res.status(201).json(withProvision(safeProject(created)));
   } catch (error) {
     res
       .status(500)

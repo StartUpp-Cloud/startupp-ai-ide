@@ -1,0 +1,6 @@
+# Linux/macOS only. On Windows this bind requires Docker Desktop File Sharing
+# and is opted in with `npm run compose:dev -- --bind`.
+services:
+  ide:
+    volumes:
+      - .:/app

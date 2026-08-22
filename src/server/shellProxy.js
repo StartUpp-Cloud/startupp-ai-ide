@@ -1,45 +1,13 @@
 import { EventEmitter } from 'events';
-import { execSync } from 'child_process';
 import os from 'os';
 import * as pty from 'node-pty';
 import Project from './models/Project.js';
 import { containerManager } from './containerManager.js';
 import { stripAnsi } from './conversationParser.js';
-import { dockerEnvFlags, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
+import { dockerEnvArgs, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
+import { dockerCliEnv, getDockerExecPtySpec, interactiveDockerExecArgs } from './dockerRoute.js';
 
 const SHELL_PROMPT = '__STARTUPP_SHELL_PROMPT__';
-
-let cachedDockerBinary = null;
-
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
-
-function dockerPath() {
-  if (cachedDockerBinary) return cachedDockerBinary;
-
-  const extraPath = [
-    process.env.PATH || '',
-    '/usr/local/bin',
-    '/opt/homebrew/bin',
-    '/usr/bin',
-    '/snap/bin',
-    `${os.homedir()}/.docker/bin`,
-    `${os.homedir()}/.local/bin`,
-  ].join(':');
-
-  try {
-    cachedDockerBinary = execSync('command -v docker', {
-      encoding: 'utf8',
-      env: { ...process.env, PATH: extraPath },
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || 'docker';
-  } catch {
-    cachedDockerBinary = 'docker';
-  }
-
-  return cachedDockerBinary;
-}
 
 function stripTerminalControls(data = '') {
   return stripAnsi(String(data || '')
@@ -121,25 +89,32 @@ class ShellProxy extends EventEmitter {
       }
 
       const workDir = containerManager.getWorkDir(project.containerName) || '/workspace';
-      const docker = dockerPath();
-      shell = '/bin/bash';
-      args = [
-        '-lc',
-        `exec ${shellQuote(docker)} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e NO_COLOR=1 -e BROWSER=false -e PS1=${shellQuote(`${SHELL_PROMPT} `)} ${dockerEnvFlags(runtimeEnv, shellQuote)} -w ${shellQuote(workDir)} ${shellQuote(project.containerName)} bash --noprofile --norc -i`,
-      ];
+      const dockerArgs = interactiveDockerExecArgs({
+        extraEnv: [
+          '-e', 'NO_COLOR=1',
+          '-e', `PS1=${SHELL_PROMPT} `,
+          ...dockerEnvArgs(runtimeEnv),
+        ],
+        workDir,
+        containerName: project.containerName,
+        command: ['bash', '--noprofile', '--norc', '-i'],
+      });
+      const spec = getDockerExecPtySpec(dockerArgs);
+      shell = spec.shell;
+      args = spec.args;
       cwd = undefined;
     }
 
     const ptyProcess = pty.spawn(shell, args, {
       name: 'xterm-256color',
-      useConpty: false, // avoid ConPTY console-list-agent crash under PM2 on Windows
       cols: 120,
       rows: 30,
       cwd,
       env: {
         ...process.env,
+        ...dockerCliEnv(),
         ...runtimeEnv,
-        PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin:${os.homedir()}/.docker/bin:${os.homedir()}/.local/bin`,
+        PATH: `${process.env.PATH || ''}:/usr/local/bin:/usr/bin`,
         TERM: 'xterm-256color',
         COLORTERM: 'truecolor',
         NO_COLOR: '1',

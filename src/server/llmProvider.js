@@ -64,6 +64,74 @@ function fallbackOpenCodeModels() {
   return OPENCODE_FALLBACK_MODELS.map(normalizeOpenCodeModelId).filter(Boolean);
 }
 
+const CODEX_MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
+const CODEX_FALLBACK_MODELS = [
+  'gpt-5.4',
+  'gpt-5.3-codex',
+  'gpt-5.2-codex',
+  'gpt-5.2',
+  'gpt-5-mini',
+  'o3',
+  'o4-mini',
+];
+
+function fallbackCodexModels() {
+  return CODEX_FALLBACK_MODELS.map((id) => ({ id, name: id, provider: 'codex' }));
+}
+
+function parseCodexModels(raw) {
+  const seen = new Set();
+  const models = [];
+  for (const line of String(raw || '').split(/\r?\n/)) {
+    const token = line.trim().split(/\s+/)[0];
+    if (!token || token.startsWith('-') || token.toLowerCase() === 'model') continue;
+    if (seen.has(token)) continue;
+    seen.add(token);
+    models.push({ id: token, name: token, provider: 'codex' });
+  }
+  return models;
+}
+
+/**
+ * Extract the assistant text from `codex exec --json` event stream.
+ */
+export function parseCodexExecOutput(raw) {
+  const textParts = [];
+  const errorParts = [];
+  let tokensUsed = null;
+
+  for (const line of String(raw || '').split(/\r?\n/)) {
+    const jsonStart = line.indexOf('{');
+    const trimmed = jsonStart >= 0 ? line.slice(jsonStart).trim() : line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
+        textParts.push(event.item.text);
+      } else if (event.type === 'agent_message' && typeof event.text === 'string') {
+        textParts.push(event.text);
+      } else if (event.type === 'message' && typeof event.content === 'string') {
+        textParts.push(event.content);
+      }
+      if (event.type === 'turn.completed' && event.usage?.total_tokens) {
+        tokensUsed = event.usage.total_tokens;
+      }
+      if (event.type === 'error' || event.error) {
+        const message = event.error?.message || event.message || (typeof event.error === 'string' ? event.error : '');
+        if (message) errorParts.push(message);
+      }
+    } catch {
+      // Ignore non-JSON progress lines.
+    }
+  }
+
+  return { response: textParts.join('').trim(), tokensUsed, error: errorParts.join('\n').trim() };
+}
+
+function linuxCliSpec(bin, args, { cwd } = {}) {
+  return { cmd: bin, args, cwd };
+}
+
 function parseOpenCodeRunOutput(raw) {
   const textParts = [];
   const errorParts = [];
@@ -100,21 +168,16 @@ function parseOpenCodeRunOutput(raw) {
   return { response: textParts.join('').trim(), tokensUsed, error: errorParts.join('\n').trim() };
 }
 
-function runOpenCodePty(args, { timeout, cwd } = {}) {
+function runLinuxCliPty(bin, args, { timeout, cwd, timeoutLabel = 'CLI' } = {}) {
   return new Promise((resolve, reject) => {
     let output = '';
     let settled = false;
-    // On Windows, `opencode` is a `.cmd` shim node-pty can't launch directly —
-    // run it through cmd.exe. On POSIX, spawn it directly.
-    const isWin = process.platform === 'win32';
-    const spawnCmd = isWin ? (process.env.COMSPEC || 'cmd.exe') : 'opencode';
-    const spawnArgs = isWin ? ['/c', 'opencode', ...args] : args;
-    const ptyProcess = pty.spawn(spawnCmd, spawnArgs, {
+    const spec = linuxCliSpec(bin, args, { cwd });
+    const ptyProcess = pty.spawn(spec.cmd, spec.args, {
       name: 'xterm-256color',
-      useConpty: false, // avoid ConPTY console-list-agent crash under PM2 on Windows
       cols: 120,
       rows: 40,
-      cwd: cwd || process.cwd(),
+      cwd: spec.cwd || cwd || process.cwd(),
       env: {
         ...process.env,
         TERM: 'xterm-256color',
@@ -125,7 +188,7 @@ function runOpenCodePty(args, { timeout, cwd } = {}) {
       if (settled) return;
       settled = true;
       try { ptyProcess.kill(); } catch { /* already exited */ }
-      reject(new Error('OpenCode request timed out'));
+      reject(new Error(`${timeoutLabel} request timed out`));
     }, timeout || 60000);
 
     ptyProcess.onData((data) => {
@@ -137,12 +200,20 @@ function runOpenCodePty(args, { timeout, cwd } = {}) {
       settled = true;
       clearTimeout(timeoutId);
       if (exitCode !== 0) {
-        reject(new Error(`OpenCode exited with code ${exitCode}`));
+        reject(new Error(`${timeoutLabel} exited with code ${exitCode}`));
         return;
       }
       resolve(output);
     });
   });
+}
+
+function runOpenCodePty(args, opts = {}) {
+  return runLinuxCliPty('opencode', args, { ...opts, timeoutLabel: 'OpenCode' });
+}
+
+function runCodexPty(args, opts = {}) {
+  return runLinuxCliPty('codex', args, { ...opts, timeoutLabel: 'Codex' });
 }
 
 // Default LLM settings
@@ -178,6 +249,10 @@ const DEFAULT_LLM_SETTINGS = {
     model: '',
     timeout: 60000,
   },
+  codex: {
+    model: '',
+    timeout: 60000,
+  },
   // When to use LLM
   useForLowConfidence: true,
   confidenceThreshold: 0.5, // Use LLM when smart engine confidence is below this
@@ -198,7 +273,7 @@ const DEFAULT_LLM_SETTINGS = {
 /**
  * Pure routing helper — picks the embedding provider based on active settings.
  * Returns { provider: 'ollama'|'openai', model: string }.
- * Non-embedding providers (deepseek, github, opencode) fall back to local Ollama.
+ * Non-embedding providers (deepseek, github, opencode, codex) fall back to local Ollama.
  */
 export function pickEmbeddingProvider(settings = {}) {
   const provider = settings.provider;
@@ -208,7 +283,7 @@ export function pickEmbeddingProvider(settings = {}) {
   if (provider === 'ollama') {
     return { provider: 'ollama', model: settings.ollama?.embedModel || 'nomic-embed-text' };
   }
-  // deepseek / github / opencode have no embeddings → local Ollama fallback
+  // deepseek / github / opencode / codex have no embeddings → local Ollama fallback
   return { provider: 'ollama', model: settings.ollama?.embedModel || 'nomic-embed-text' };
 }
 
@@ -351,6 +426,7 @@ class LLMProvider extends EventEmitter {
     this.settings.deepseek = { ...DEFAULT_LLM_SETTINGS.deepseek, ...(this.settings.deepseek || {}) };
     this.settings.github = { ...DEFAULT_LLM_SETTINGS.github, ...(this.settings.github || {}) };
     this.settings.opencode = { ...DEFAULT_LLM_SETTINGS.opencode, ...(this.settings.opencode || {}) };
+    this.settings.codex = { ...DEFAULT_LLM_SETTINGS.codex, ...(this.settings.codex || {}) };
 
     // Decrypt API keys loaded from disk
     if (this.settings.openai?.apiKey) this.settings.openai.apiKey = decrypt(this.settings.openai.apiKey);
@@ -391,6 +467,7 @@ class LLMProvider extends EventEmitter {
       deepseek: { ...this.settings.deepseek, ...updates.deepseek },
       github: { ...this.settings.github, ...updates.github },
       opencode: { ...this.settings.opencode, ...updates.opencode },
+      codex: { ...this.settings.codex, ...updates.codex },
     };
 
     // Write encrypted copy to disk — never store plaintext API keys in db.json
@@ -474,6 +551,8 @@ class LLMProvider extends EventEmitter {
         return this.generateGitHubResponse(prompt, context);
       case 'opencode':
         return this.generateOpenCodeResponse(prompt, context);
+      case 'codex':
+        return this.generateCodexResponse(prompt, context);
       default:
         throw new Error(`Unknown LLM provider: ${provider}`);
     }
@@ -941,6 +1020,44 @@ class LLMProvider extends EventEmitter {
   }
 
   /**
+   * Generate a response using the authenticated Codex CLI.
+   * Same harness as the coding agent (`codex exec`), but sandboxed read-only
+   * so the orchestrator answers without mutating the workspace.
+   */
+  async generateCodexResponse(prompt, context) {
+    const { model, timeout } = this.settings.codex || {};
+
+    const systemPrompt = context.systemPrompt || this.buildSystemPrompt(context);
+    const userPrompt = context.systemPrompt ? prompt : this.buildUserPrompt(prompt, context);
+    const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
+    const args = [
+      'exec',
+      '--json',
+      '--skip-git-repo-check',
+      '-s', 'never',
+      '--sandbox', 'read-only',
+    ];
+    if (model) args.push('-m', model);
+    args.push(fullPrompt);
+
+    try {
+      const stdout = await runCodexPty(args, { timeout: timeout || 60000 });
+      const { response, tokensUsed, error } = parseCodexExecOutput(stdout);
+      if (error) throw new Error(error);
+      if (!response) throw new Error('Codex returned no text response');
+
+      return {
+        response: context.systemPrompt ? this.cleanModelText(response) : this.cleanResponse(response),
+        provider: 'codex',
+        model: model || 'default',
+        tokensUsed,
+      };
+    } catch (error) {
+      throw new Error(`Codex error: ${error.message}`);
+    }
+  }
+
+  /**
    * Build system prompt with context
    */
   buildSystemPrompt(context) {
@@ -1184,6 +1301,8 @@ class LLMProvider extends EventEmitter {
         return this.checkGitHubHealth();
       case 'opencode':
         return this.checkOpenCodeHealth();
+      case 'codex':
+        return this.checkCodexHealth();
       default:
         this.available = false;
         return { available: false, error: `Unknown provider: ${provider}` };
@@ -1227,8 +1346,48 @@ class LLMProvider extends EventEmitter {
   }
 
   /**
-   * Check if GitHub Models API is available
+   * Check if the Codex CLI is installed and authenticated.
    */
+  async checkCodexHealth() {
+    try {
+      const spec = linuxCliSpec('codex', ['--version']);
+      await execFileAsync(spec.cmd, spec.args, {
+        encoding: 'utf-8',
+        timeout: 8000,
+        windowsHide: true,
+      });
+    } catch (error) {
+      this.available = false;
+      this.lastHealthCheck = {
+        available: false,
+        error: `Codex CLI unavailable (${error.message}). Install Codex in the project container, then run \`codex\` to authenticate.`,
+      };
+      return this.lastHealthCheck;
+    }
+
+    const models = await this.getCodexModels({ allowFallback: true });
+    const selectedModel = this.settings.codex?.model;
+    if (selectedModel && models.length > 0 && !models.some((m) => (m.id || m.name) === selectedModel)) {
+      this.available = false;
+      this.lastHealthCheck = {
+        available: false,
+        error: `Selected Codex model "${selectedModel}" is not in the known model list. Choose one from the Codex model list or use the tool default.`,
+        provider: 'codex',
+        model: selectedModel,
+        models: models.map((m) => m.name),
+      };
+      return this.lastHealthCheck;
+    }
+
+    this.available = true;
+    this.lastHealthCheck = {
+      available: true,
+      provider: 'codex',
+      model: selectedModel || 'default',
+      models: models.map((m) => m.name),
+    };
+    return this.lastHealthCheck;
+  }
   async checkGitHubHealth() {
     const { endpoint, apiKey } = this.settings.github;
 
@@ -1401,16 +1560,15 @@ class LLMProvider extends EventEmitter {
     }
 
     try {
-      // On Windows the `opencode` binary is an npm `.cmd`/`.ps1` shim, which
-      // CreateProcess can't launch directly — Node needs a shell to resolve it
-      // via PATHEXT. On POSIX, run it directly.
-      const { stdout } = await execFileAsync('opencode', ['models'], {
+      const spec = linuxCliSpec('opencode', ['models']);
+      const result = await execFileAsync(spec.cmd, spec.args, {
         encoding: 'utf-8',
-        timeout: 8000,
+        timeout: 20000,
         maxBuffer: OPENCODE_MODELS_MAX_BUFFER,
         windowsHide: true,
-        shell: process.platform === 'win32',
       });
+      // Defensive: a broken util.promisify(execFile) can resolve to a bare string.
+      const stdout = typeof result === 'string' ? result : result?.stdout;
 
       const models = parseOpenCodeModels(stdout);
       if (models.length > 0) {
@@ -1422,6 +1580,36 @@ class LLMProvider extends EventEmitter {
     }
 
     return this.openCodeModelsCache?.models || (allowFallback ? fallbackOpenCodeModels() : []);
+  }
+
+  /**
+   * Models advertised by the Codex CLI, falling back to a known list.
+   */
+  async getCodexModels({ refresh = false, allowFallback = true } = {}) {
+    const now = Date.now();
+    if (!refresh && this.codexModelsCache && now - this.codexModelsCache.fetchedAt < CODEX_MODELS_CACHE_TTL_MS) {
+      return this.codexModelsCache.models;
+    }
+
+    try {
+      const spec = linuxCliSpec('codex', ['models']);
+      const result = await execFileAsync(spec.cmd, spec.args, {
+        encoding: 'utf-8',
+        timeout: 20000,
+        maxBuffer: OPENCODE_MODELS_MAX_BUFFER,
+        windowsHide: true,
+      });
+      const stdout = typeof result === 'string' ? result : result?.stdout;
+      const models = parseCodexModels(stdout);
+      if (models.length > 0) {
+        this.codexModelsCache = { models, fetchedAt: now };
+        return models;
+      }
+    } catch (error) {
+      console.warn('[llmProvider] Codex model discovery failed:', error.message);
+    }
+
+    return this.codexModelsCache?.models || (allowFallback ? fallbackCodexModels() : []);
   }
 
   /**
@@ -1458,6 +1646,20 @@ class LLMProvider extends EventEmitter {
         success: true,
         response: 'OpenCode CLI available',
         provider: 'opencode',
+        model: health.model,
+      };
+    }
+
+    if (this.settings.provider === 'codex') {
+      const health = await this.checkCodexHealth();
+      if (!health.available) {
+        throw new Error(health.error || 'Codex CLI unavailable');
+      }
+
+      return {
+        success: true,
+        response: 'Codex CLI available',
+        provider: 'codex',
         model: health.model,
       };
     }

@@ -6,12 +6,19 @@ import { execSync } from "child_process";
 import { v4 as uuidv4 } from "uuid";
 import db, { getDB } from "./db.js";
 import { findProjectById, updateProject } from "./models/Project.js";
+import { runHostShell } from "./hostShell.js";
+import { execDockerCmd } from "./dockerRoute.js";
+import { copyIntoContainer } from "./dockerCopy.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /** Path to folder-based skills data directory */
 const SKILLS_DATA_DIR = path.join(__dirname, "../../data/skills");
+
+function dockerHost(cmd, opts = {}) {
+  return execDockerCmd(cmd, { timeout: opts.timeout || 30000 });
+}
 
 /**
  * Convert a GitHub blob/tree URL to raw.githubusercontent.com URL
@@ -818,21 +825,18 @@ class SkillManager {
 
     try {
       // Ensure .skills directory exists in the container
-      execSync(
+      dockerHost(
         `docker exec ${containerName} mkdir -p /workspace/.skills`,
-        { stdio: "pipe", timeout: 15000 },
+        { timeout: 15000 },
       );
 
       // Copy skill folder to container
-      execSync(
-        `docker cp ${skillDir} ${containerName}:/workspace/.skills/${skillId}`,
-        { stdio: "pipe", timeout: 30000 },
-      );
+      copyIntoContainer(skillDir, containerName, `/workspace/.skills/${skillId}`, { timeout: 30000 });
 
       // Fix permissions
-      execSync(
+      dockerHost(
         `docker exec ${containerName} chown -R dev:dev /workspace/.skills/${skillId}`,
-        { stdio: "pipe", timeout: 15000 },
+        { timeout: 15000 },
       );
     } catch (e) {
       throw new Error(
@@ -879,9 +883,9 @@ class SkillManager {
    */
   async undeployFromContainer(skillId, containerName) {
     try {
-      execSync(
+      dockerHost(
         `docker exec ${containerName} rm -rf /workspace/.skills/${skillId}`,
-        { stdio: "pipe", timeout: 15000 },
+        { timeout: 15000 },
       );
     } catch (e) {
       throw new Error(
@@ -919,9 +923,9 @@ class SkillManager {
    */
   getDeploymentStatus(skillId, containerName) {
     try {
-      execSync(
+      dockerHost(
         `docker exec ${containerName} test -d /workspace/.skills/${skillId}`,
-        { stdio: "pipe", timeout: 10000 },
+        { timeout: 10000 },
       );
       return true;
     } catch {

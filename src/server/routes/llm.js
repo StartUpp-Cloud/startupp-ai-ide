@@ -172,6 +172,21 @@ router.get('/opencode/models', async (req, res) => {
 });
 
 /**
+ * GET /api/llm/codex/models - List models available through Codex
+ */
+router.get('/codex/models', async (req, res) => {
+  try {
+    const models = await llmProvider.getCodexModels({
+      refresh: req.query.refresh === 'true',
+      allowFallback: req.query.fallback !== 'false',
+    });
+    res.json({ models });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to list Codex models', message: error.message });
+  }
+});
+
+/**
  * POST /api/llm/ollama/pull - Pull a model in Ollama
  */
 router.post('/ollama/pull', async (req, res) => {
@@ -214,8 +229,8 @@ router.put('/provider', async (req, res) => {
   try {
     const { provider } = req.body;
 
-    if (!['ollama', 'openai', 'deepseek', 'github', 'opencode'].includes(provider)) {
-      return res.status(400).json({ error: 'provider must be "ollama", "openai", "deepseek", "github", or "opencode"' });
+    if (!['ollama', 'openai', 'deepseek', 'github', 'opencode', 'codex'].includes(provider)) {
+      return res.status(400).json({ error: 'provider must be "ollama", "openai", "deepseek", "github", "opencode", or "codex"' });
     }
 
     const settings = await llmProvider.updateSettings({ provider });
@@ -343,6 +358,27 @@ router.put('/opencode/config', async (req, res) => {
     });
 
     res.json(settings.opencode);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update', message: error.message });
+  }
+});
+
+/**
+ * PUT /api/llm/codex/config - Configure Codex CLI settings
+ */
+router.put('/codex/config', async (req, res) => {
+  try {
+    const { model, timeout } = req.body;
+
+    const updates = {};
+    if (model !== undefined) updates.model = model;
+    if (timeout !== undefined) updates.timeout = timeout;
+
+    const settings = await llmProvider.updateSettings({
+      codex: { ...llmProvider.getSettings().codex, ...updates },
+    });
+
+    res.json(settings.codex);
   } catch (error) {
     res.status(500).json({ error: 'Failed to update', message: error.message });
   }

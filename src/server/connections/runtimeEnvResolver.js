@@ -89,3 +89,10 @@ export function dockerEnvFlags(env, quote = (value) => `'${String(value).replace
     .map(([key, value]) => `-e ${quote(`${key}=${value}`)}`)
     .join(' ');
 }
+
+/** Argv form of dockerEnvFlags for spawning docker.exe without a shell. */
+export function dockerEnvArgs(env) {
+  return Object.entries(env || {})
+    .filter(([key, value]) => key && value !== undefined && value !== null && value !== '')
+    .flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+}

@@ -12,11 +12,16 @@ assert.deepEqual(
   { provider: 'ollama', model: 'nomic-embed-text' },
   'ollama active → ollama embeddings',
 );
-// non-embedding provider (deepseek/github/opencode) → fall back to local ollama
+// non-embedding provider (deepseek/github/opencode/codex) → fall back to local ollama
 assert.deepEqual(
   pickEmbeddingProvider({ provider: 'deepseek', ollama: {} }),
   { provider: 'ollama', model: 'nomic-embed-text' },
   'deepseek active → ollama fallback',
+);
+assert.deepEqual(
+  pickEmbeddingProvider({ provider: 'codex', ollama: {} }),
+  { provider: 'ollama', model: 'nomic-embed-text' },
+  'codex active → ollama fallback',
 );
 // explicit per-provider embed model override is honored
 assert.deepEqual(

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { RefreshCw, Server, Box, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Server, Box, AlertTriangle, Ship } from 'lucide-react';
 import { useProjects } from '../contexts/ProjectContext';
 
 const POLL_INTERVAL = 5000; // 5 seconds
@@ -16,9 +16,15 @@ function getLevel(percent) {
   return { color: 'text-green-400', bg: 'bg-green-500', ring: 'ring-green-500/30', label: 'Normal' };
 }
 
-export default function SystemHealth({ containerName }) {
-  const { notify } = useProjects();
+export default function SystemHealth({
+  containerName,
+  projectId,
+  projectRuntime = 'container',
+  onProjectUpdated,
+}) {
+  const { notify, fetchProjects } = useProjects();
   const [health, setHealth] = useState(null);
+  const [dockerStatus, setDockerStatus] = useState(null);
   const [showDetail, setShowDetail] = useState(false);
   const detailRef = useRef(null);
 
@@ -26,6 +32,8 @@ export default function SystemHealth({ containerName }) {
   const [restartingServer, setRestartingServer] = useState(false);
   const [restartingContainer, setRestartingContainer] = useState(false);
   const [recreatingContainer, setRecreatingContainer] = useState(false);
+  const [startingDocker, setStartingDocker] = useState(false);
+  const [provisioningContainer, setProvisioningContainer] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(null); // 'server' | 'container' | 'recreate' | null
 
   useEffect(() => {
@@ -34,6 +42,11 @@ export default function SystemHealth({ containerName }) {
       fetch('/api/system-health')
         .then(r => r.ok ? r.json() : null)
         .then(data => { if (mounted && data) setHealth(data); })
+        .catch(() => {});
+
+      fetch('/api/containers/status')
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (mounted && data) setDockerStatus(data); })
         .catch(() => {});
     };
     poll();
@@ -51,7 +64,6 @@ export default function SystemHealth({ containerName }) {
     return () => document.removeEventListener('mousedown', handler);
   }, [showDetail]);
 
-  // Handle IDE server restart
   const handleRestartServer = async () => {
     setConfirmRestart(null);
     setRestartingServer(true);
@@ -62,7 +74,6 @@ export default function SystemHealth({ containerName }) {
 
       notify?.('IDE Server restarting...', 'info');
 
-      // Poll for server to come back online
       const checkServer = async (attempts = 0) => {
         if (attempts > 30) {
           notify?.('Server restart timed out. Please refresh manually.', 'error');
@@ -84,16 +95,13 @@ export default function SystemHealth({ containerName }) {
         setTimeout(() => checkServer(attempts + 1), 1000);
       };
 
-      // Wait for server to shut down, then start polling
       setTimeout(() => checkServer(), 2000);
-
     } catch (error) {
       notify?.(error.message, 'error');
       setRestartingServer(false);
     }
   };
 
-  // Handle container restart
   const handleRestartContainer = async () => {
     if (!containerName) {
       notify?.('No container associated with this project', 'error');
@@ -107,7 +115,7 @@ export default function SystemHealth({ containerName }) {
       const res = await fetch(`/api/containers/${containerName}/restart`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ timeout: 10 })
+        body: JSON.stringify({ timeout: 10 }),
       });
 
       if (!res.ok) {
@@ -123,7 +131,6 @@ export default function SystemHealth({ containerName }) {
     }
   };
 
-  // Handle container recreate (volumes preserved)
   const handleRecreateContainer = async () => {
     if (!containerName) {
       notify?.('No container associated with this project', 'error');
@@ -147,24 +154,77 @@ export default function SystemHealth({ containerName }) {
     }
   };
 
+  const handleStartDocker = async () => {
+    setStartingDocker(true);
+    try {
+      const res = await fetch('/api/containers/start-docker', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeoutMs: 120000 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to start Docker');
+
+      if (data.dockerAvailable) {
+        notify?.('Docker is running', 'success');
+        setDockerStatus((prev) => ({ ...prev, ...data }));
+      } else {
+        notify?.('Docker Desktop is starting — it may take a minute. This panel will update automatically.', 'info');
+      }
+    } catch (error) {
+      notify?.(error.message, 'error');
+    } finally {
+      setStartingDocker(false);
+    }
+  };
+
+  const handleProvisionContainer = async () => {
+    if (!projectId) {
+      notify?.('Select a project first', 'error');
+      return;
+    }
+
+    setProvisioningContainer(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/provision-container`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to provision container');
+
+      notify?.(
+        data.status === 'exists' ? 'Project container is ready' : 'Setting up the project container…',
+        data.status === 'exists' ? 'success' : 'info',
+      );
+      if (data.project) {
+        onProjectUpdated?.(data.project);
+      }
+      await fetchProjects?.();
+    } catch (error) {
+      notify?.(error.message, 'error');
+    } finally {
+      setProvisioningContainer(false);
+    }
+  };
+
   if (!health) return null;
 
   const mem = getLevel(health.memory.percent);
   const cpu = getLevel(health.cpu.percent);
-  // Overall level = whichever is worse
   const overall = health.memory.percent >= health.cpu.percent ? mem : cpu;
+
+  const dockerRunning = dockerStatus?.dockerAvailable === true;
+  const dockerDotColor = dockerRunning ? 'bg-green-500' : dockerStatus ? 'bg-red-500' : 'bg-surface-600';
+  const needsContainer = projectRuntime !== 'host' && projectId && !containerName;
+  const dockerBusy = startingDocker || provisioningContainer;
 
   return (
     <div className="relative" ref={detailRef}>
-      {/* Compact indicator */}
       <button
         onClick={() => setShowDetail(!showDetail)}
         className={`flex items-center gap-1.5 px-2 py-1 rounded hover:bg-surface-750 transition-colors ${
           overall.label === 'Critical' ? 'animate-pulse' : ''
         }`}
-        title={`Memory: ${health.memory.percent}% | CPU: ${health.cpu.percent}%`}
+        title={`Memory: ${health.memory.percent}% | CPU: ${health.cpu.percent}% | Docker: ${dockerRunning ? 'running' : 'stopped'}`}
       >
-        {/* Tiny bar graph */}
         <div className="flex items-end gap-[2px] h-3.5">
           <div className="w-[3px] rounded-sm bg-surface-700 relative overflow-hidden" style={{ height: '14px' }}>
             <div className={`absolute bottom-0 w-full rounded-sm ${mem.bg}`} style={{ height: `${health.memory.percent}%` }} />
@@ -173,17 +233,74 @@ export default function SystemHealth({ containerName }) {
             <div className={`absolute bottom-0 w-full rounded-sm ${cpu.bg}`} style={{ height: `${health.cpu.percent}%` }} />
           </div>
         </div>
+        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dockerDotColor}`} />
         <span className={`text-[10px] font-mono font-medium ${overall.color}`}>
           {health.memory.percent}%
         </span>
       </button>
 
-      {/* Detail popover */}
       {showDetail && (
-        <div className="absolute right-0 top-full mt-1 w-56 bg-surface-850 border border-surface-700 rounded-lg shadow-xl z-50 p-3 space-y-3">
+        <div className="absolute right-0 top-full mt-1 w-64 bg-surface-850 border border-surface-700 rounded-lg shadow-xl z-50 p-3 space-y-3">
           <div className="text-[11px] font-medium text-surface-300 uppercase tracking-wider">System Health</div>
 
-          {/* Memory */}
+          {/* Docker */}
+          <div className="rounded-md border border-surface-700/60 bg-surface-900/40 p-2 space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="flex items-center gap-1.5 text-surface-400">
+                <Ship className="w-3.5 h-3.5" />
+                Docker
+              </span>
+              <span className={`font-medium ${dockerRunning ? 'text-green-400' : 'text-red-400'}`}>
+                {dockerRunning ? 'Running' : 'Not running'}
+              </span>
+            </div>
+            {dockerRunning && dockerStatus?.dockerRoute && (
+              <div className="text-[10px] text-surface-500">
+                {dockerStatus.dockerRoute === 'socket'
+                  ? 'Host engine via Docker socket'
+                  : 'Host docker'}
+              </div>
+            )}
+            {dockerRunning && (
+              <div className="text-[10px] text-surface-500">
+                Dev image: {dockerStatus?.imageReady ? 'ready' : 'not pulled'}
+              </div>
+            )}
+            {!dockerRunning && dockerStatus?.bootHint && (
+              <p className="text-[10px] text-surface-500 leading-snug">
+                Auto-start: {dockerStatus.bootHint}
+              </p>
+            )}
+            {!dockerRunning && dockerStatus?.canAutoStart && (
+              <button
+                onClick={handleStartDocker}
+                disabled={dockerBusy}
+                className="w-full mt-1 flex items-center justify-center gap-1.5 px-2 py-1 rounded text-[10px] text-primary-200 bg-primary-500/15 hover:bg-primary-500/25 transition-colors disabled:opacity-50"
+              >
+                {startingDocker ? (
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Ship className="w-3 h-3" />
+                )}
+                {startingDocker ? 'Starting Docker…' : 'Start Docker Desktop'}
+              </button>
+            )}
+            {needsContainer && dockerRunning && (
+              <button
+                onClick={handleProvisionContainer}
+                disabled={dockerBusy}
+                className="w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded text-[10px] text-amber-200 bg-amber-500/10 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+              >
+                {provisioningContainer ? (
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Box className="w-3 h-3" />
+                )}
+                {provisioningContainer ? 'Creating container…' : 'Create project container'}
+              </button>
+            )}
+          </div>
+
           <div>
             <div className="flex items-center justify-between text-xs mb-1">
               <span className="text-surface-400">Memory</span>
@@ -196,7 +313,6 @@ export default function SystemHealth({ containerName }) {
             </div>
           </div>
 
-          {/* CPU */}
           <div>
             <div className="flex items-center justify-between text-xs mb-1">
               <span className="text-surface-400">CPU</span>
@@ -212,7 +328,6 @@ export default function SystemHealth({ containerName }) {
             </div>
           </div>
 
-          {/* Node process */}
           <div className="pt-2 border-t border-surface-700/60">
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-surface-500">IDE Server</span>
@@ -224,11 +339,9 @@ export default function SystemHealth({ containerName }) {
             </div>
           </div>
 
-          {/* Restart Actions */}
           <div className="pt-2 border-t border-surface-700/60 space-y-1.5">
             <div className="text-[11px] font-medium text-surface-400 mb-2">Actions</div>
 
-            {/* Restart IDE Server */}
             <button
               onClick={() => setConfirmRestart('server')}
               disabled={restartingServer}
@@ -242,7 +355,6 @@ export default function SystemHealth({ containerName }) {
               <span>{restartingServer ? 'Restarting...' : 'Restart IDE Server'}</span>
             </button>
 
-            {/* Restart Container (only show if container exists) */}
             {containerName && (
               <button
                 onClick={() => setConfirmRestart('container')}
@@ -258,7 +370,6 @@ export default function SystemHealth({ containerName }) {
               </button>
             )}
 
-            {/* Recreate Container (only show if container exists) */}
             {containerName && (
               <button
                 onClick={() => setConfirmRestart('recreate')}
@@ -277,7 +388,6 @@ export default function SystemHealth({ containerName }) {
         </div>
       )}
 
-      {/* Confirmation Modal */}
       {confirmRestart && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div

@@ -15,6 +15,7 @@
 
 if (process.platform === 'win32') {
   const cp = require('child_process');
+  const { promisify } = require('util');
 
   // Ensure the options object (which varies in position across the child_process
   // API) carries windowsHide:true, without disturbing positional args.
@@ -34,8 +35,18 @@ if (process.platform === 'win32') {
   for (const name of ['execSync', 'exec', 'execFile', 'execFileSync', 'spawn', 'spawnSync']) {
     const original = cp[name];
     if (typeof original !== 'function') continue;
-    cp[name] = function (...args) {
+    const wrapped = function (...args) {
       return original.apply(this, injectWindowsHide(args));
     };
+    // Preserve Node's custom promisify for exec/execFile — without it,
+    // util.promisify(execFile) resolves to a bare stdout string instead of
+    // { stdout, stderr }, which breaks `const { stdout } = await …`.
+    const custom = original[promisify.custom];
+    if (typeof custom === 'function') {
+      wrapped[promisify.custom] = function (...args) {
+        return custom.apply(this, injectWindowsHide(args));
+      };
+    }
+    cp[name] = wrapped;
   }
 }

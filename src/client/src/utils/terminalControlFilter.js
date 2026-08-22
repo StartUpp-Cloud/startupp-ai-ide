@@ -26,7 +26,9 @@ export function stripTerminalQueryResponses(value = '') {
       const end = consumeCsiSequence(value, index);
       if (end > index) {
         const sequence = value.slice(index, end);
-        if (/^\x1b\[(?:\?|>|)[0-9;]*[cRn]$/.test(sequence)) {
+        // Strip only device-attribute answers (xterm startup noise).
+        // Forward cursor-position reports (`R`) — huh/survey/gh wait on them.
+        if (/^\x1b\[(?:\?|>|)[0-9;]*c$/.test(sequence)) {
           index = end;
           continue;
         }

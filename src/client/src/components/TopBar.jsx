@@ -223,7 +223,12 @@ export default function TopBar({
             <Settings className="w-3.5 h-3.5" />
           </button>
 
-          <SystemHealth containerName={selectedProject?.containerName} />
+          <SystemHealth
+            containerName={selectedProject?.containerName}
+            projectId={selectedProject?.id}
+            projectRuntime={selectedProject?.runtime}
+            onProjectUpdated={onProjectUpdated}
+          />
 
           {layoutControls}
 
@@ -233,7 +238,13 @@ export default function TopBar({
 
       {/* Modals */}
       <LLMSettingsPanel isOpen={showLLMSettings} onClose={() => setShowLLMSettings(false)} project={selectedProject} />
-      <WelcomeGuide isOpen={showGuide} onClose={() => setShowGuide(false)} />
+      <WelcomeGuide
+        isOpen={showGuide}
+        onClose={() => {
+          try { localStorage.setItem('hideWelcomeGuide', 'true'); } catch {}
+          setShowGuide(false);
+        }}
+      />
       <SlackSetupPanel isOpen={showSlack} onClose={() => setShowSlack(false)} projects={projects || []} />
     </div>
   );

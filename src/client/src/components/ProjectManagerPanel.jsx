@@ -428,7 +428,15 @@ export default function ProjectManagerPanel({
                 )}
               </button>
               <FolderOpen className="w-4 h-4 text-surface-400 flex-shrink-0" />
-              <span className="text-sm truncate flex-1">{project.name}</span>
+              <span className="min-w-0 flex-1">
+                <span className="text-sm truncate block">{project.name}</span>
+                {project.provision?.status && ['queued', 'building', 'creating'].includes(project.provision.status) && (
+                  <span className="block text-[10px] text-amber-400 truncate">{project.provision.step}</span>
+                )}
+                {project.provision?.status === 'error' && (
+                  <span className="block text-[10px] text-red-400 truncate">{project.provision.error || project.provision.step}</span>
+                )}
+              </span>
 
               {/* Unread badge */}
               {unreadCount > 0 && (
@@ -594,7 +602,7 @@ export default function ProjectManagerPanel({
 // ── Create Modal (uses hook internally) ──
 
 function CreateModal({ onClose, onCreated }) {
-  const { createProject, projects } = useProjects();
+  const { createProject, projects, notify } = useProjects();
   const form = useProjectForm();
   const [saving, setSaving] = useState(false);
   const [showPresets, setShowPresets] = useState(false);
@@ -628,35 +636,9 @@ function CreateModal({ onClose, onCreated }) {
       };
 
       const newProject = await createProject(projectData);
-
-      // Container-runtime projects get an isolated Docker container. Host-runtime
-      // projects run directly on the host machine using folderPath — no container.
       if (!isHost) {
-        try {
-          await fetch('/api/containers/build-image', { method: 'POST' });
-          const containerRes = await fetch('/api/containers', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              projectId: newProject.id,
-              name: projectData.name,
-              repos: projectData.repos,
-              ports: projectData.containerPorts,
-            }),
-          });
-          const containerData = await containerRes.json();
-          if (containerData.containerName) {
-            await fetch(`/api/projects/${newProject.id}`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ containerName: containerData.containerName }),
-            });
-          }
-        } catch {
-          // Container creation is best-effort
-        }
+        notify?.('Setting up the Docker container in the background…', 'info');
       }
-
       onCreated(newProject.id);
     } catch {
       // context handles notification

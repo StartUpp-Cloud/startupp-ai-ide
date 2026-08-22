@@ -1,11 +1,24 @@
 import { Router } from "express";
-import { execSync as rawExecSync } from "child_process";
 import path from "path";
 import os from "os";
 import fs from "fs";
 import multer from "multer";
 import { containerManager } from "../containerManager.js";
 import { getDB } from "../db.js";
+import { clearDockerRouteCache } from "../dockerRoute.js";
+import { copyIntoContainer, posixQuote } from "../dockerCopy.js";
+import {
+  assertContainerPath,
+  CONTAINER_FILE_MAX_BYTES,
+  chmodCommand,
+  createDirectoryCommand,
+  createFileCommand,
+  deletePathCommand,
+  isLikelyText,
+  listDirectoryCommand,
+  readFileCommand,
+  writeFileCommand,
+} from "../containerFs.js";
 
 const router = Router();
 
@@ -152,33 +165,46 @@ async function describeWorkspaceRepo(containerName, dir) {
  */
 router.get("/status", (req, res) => {
   try {
-    const dockerAvailable = containerManager.isDockerAvailable();
-    let imageReady = false;
-
-    if (dockerAvailable) {
-      try {
-        // Use enhanced PATH so Docker is found on macOS (Docker Desktop, Homebrew)
-        const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].join(path.delimiter);
-        const envWithDocker = { ...process.env, PATH: `${process.env.PATH || ""}${path.delimiter}${extraPaths}` };
-        const images = rawExecSync("docker images -q startupp-ai-ide-dev:latest", {
-          encoding: "utf-8",
-          env: envWithDocker,
-        }).trim();
-        imageReady = images.length > 0;
-      } catch {
-        imageReady = false;
-      }
-    }
-
-    // Detect server OS for install instructions
-    const platform = os.platform(); // 'linux', 'darwin', 'win32'
-    const arch = os.arch(); // 'x64', 'arm64'
+    const platform = os.platform();
+    const docker = containerManager.getDockerStatus();
 
     res.json({
-      dockerAvailable,
-      imageReady,
+      ...docker,
       serverOS: platform,
-      serverArch: arch,
+      serverArch: os.arch(),
+      bootHint: "Start Docker Desktop or the Docker service on the host machine, then retry.",
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/containers/start-docker
+ * Launch Docker Desktop (Windows/macOS) and wait for the daemon.
+ */
+router.post("/start-docker", async (req, res) => {
+  try {
+    const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs) || 120000, 10000), 300000);
+
+    if (containerManager.isDockerAvailable()) {
+      return res.json({
+        status: "already_running",
+        dockerAvailable: true,
+        imageReady: containerManager.isImageReady(),
+      });
+    }
+
+    const startResult = containerManager.startDockerDesktop();
+    const ready = await containerManager.waitForDockerAvailable(timeoutMs);
+    clearDockerRouteCache();
+
+    res.json({
+      status: ready ? "running" : "starting",
+      dockerAvailable: ready,
+      imageReady: ready ? containerManager.isImageReady() : false,
+      ...startResult,
+      timedOut: !ready,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1018,15 +1044,13 @@ router.get("/:name/files", (req, res) => {
     const err = requireRunning(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
-    const dirPath = req.query.path || findGitRoot(name);
+    const dirPath = req.query.path ? assertContainerPath(req.query.path) : findGitRoot(name);
     const depth = Math.min(parseInt(req.query.depth) || 1, 3);
 
     const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
 
     // List files/dirs at path (with type and size)
-    const lsOutput = exec(
-      `find '${dirPath}' -maxdepth ${depth} -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/.git' -not -name '.git' -printf '%y|%s|%P\\n' 2>/dev/null | head -500`,
-    );
+    const lsOutput = exec(listDirectoryCommand(dirPath, depth));
 
     const entries = [];
     if (lsOutput) {
@@ -1042,7 +1066,7 @@ router.get("/:name/files", (req, res) => {
     }
 
     // Get git status for the directory
-    const gitStatusRaw = exec(`cd '${dirPath}' && git status --porcelain --untracked-files=normal 2>/dev/null`);
+    const gitStatusRaw = exec(`cd ${posixQuote(dirPath)} && git status --porcelain --untracked-files=normal 2>/dev/null`);
     const gitMap = {};
     if (gitStatusRaw) {
       for (const line of gitStatusRaw.split("\n").filter(Boolean)) {
@@ -1075,7 +1099,113 @@ router.get("/:name/files", (req, res) => {
 
     res.json({ path: dirPath, files: filesWithStatus, gitStatusCount: Object.keys(gitMap).length });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const clientError = /path/i.test(error.message || '');
+    res.status(clientError ? 400 : 500).json({ error: error.message });
+  }
+});
+
+function runContainerFs(name, command, timeout = 15000) {
+  const output = containerManager.execInContainer(name, command, { timeout });
+  if (output === null) throw new Error('Container command failed');
+  return output;
+}
+
+/**
+ * GET /api/containers/:name/file?path=
+ * Read a text file (base64 over docker exec).
+ */
+router.get("/:name/file", (req, res) => {
+  try {
+    const err = requireRunning(req.params.name);
+    if (err) return res.status(err.code).json({ error: err.error });
+    const dest = assertContainerPath(req.query.path);
+    const raw = runContainerFs(req.params.name, readFileCommand(dest), 20000);
+    if (raw.startsWith('MISSING')) return res.status(404).json({ error: 'File not found' });
+    const sep = raw.indexOf('\n---\n');
+    const header = sep === -1 ? raw : raw.slice(0, sep);
+    const encoded = sep === -1 ? '' : raw.slice(sep + 5);
+    const [sizeText, mode] = header.trim().split(/\s+/);
+    const size = Number(sizeText) || 0;
+    if (size > CONTAINER_FILE_MAX_BYTES) {
+      return res.status(413).json({ error: `File is larger than ${CONTAINER_FILE_MAX_BYTES} bytes`, path: dest, size, mode });
+    }
+    const buffer = Buffer.from(encoded.replace(/\s/g, ''), 'base64');
+    if (!isLikelyText(buffer)) {
+      return res.json({ path: dest, binary: true, size, mode });
+    }
+    res.json({ path: dest, content: buffer.toString('utf8'), size, mode, binary: false });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/containers/:name/file
+ * Create an empty file or directory. Body: { path, type: 'file'|'directory' }
+ */
+router.post("/:name/file", (req, res) => {
+  try {
+    const err = requireRunning(req.params.name);
+    if (err) return res.status(err.code).json({ error: err.error });
+    const dest = assertContainerPath(req.body?.path);
+    const isDir = req.body?.type === 'directory';
+    runContainerFs(req.params.name, isDir ? createDirectoryCommand(dest) : createFileCommand(dest));
+    res.json({ ok: true, path: dest, type: isDir ? 'directory' : 'file' });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+/**
+ * PUT /api/containers/:name/file
+ * Write UTF-8 file content. Body: { path, content }
+ */
+router.put("/:name/file", (req, res) => {
+  try {
+    const err = requireRunning(req.params.name);
+    if (err) return res.status(err.code).json({ error: err.error });
+    const dest = assertContainerPath(req.body?.path);
+    const content = String(req.body?.content ?? '');
+    const buffer = Buffer.from(content, 'utf8');
+    if (buffer.length > CONTAINER_FILE_MAX_BYTES) {
+      return res.status(413).json({ error: `File is larger than ${CONTAINER_FILE_MAX_BYTES} bytes` });
+    }
+    runContainerFs(req.params.name, writeFileCommand(dest, buffer.toString('base64')), 20000);
+    res.json({ ok: true, path: dest, size: buffer.length });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+/**
+ * DELETE /api/containers/:name/file?path=&type=file|directory
+ */
+router.delete("/:name/file", (req, res) => {
+  try {
+    const err = requireRunning(req.params.name);
+    if (err) return res.status(err.code).json({ error: err.error });
+    const dest = assertContainerPath(req.query.path);
+    const isDir = req.query.type === 'directory';
+    runContainerFs(req.params.name, deletePathCommand(dest, isDir));
+    res.json({ ok: true, path: dest });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/containers/:name/file/chmod
+ * Body: { path, mode }
+ */
+router.patch("/:name/file/chmod", (req, res) => {
+  try {
+    const err = requireRunning(req.params.name);
+    if (err) return res.status(err.code).json({ error: err.error });
+    const dest = assertContainerPath(req.body?.path);
+    runContainerFs(req.params.name, chmodCommand(dest, req.body?.mode));
+    res.json({ ok: true, path: dest, mode: String(req.body?.mode).trim() });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
   }
 });
 
@@ -1103,18 +1233,11 @@ router.post("/:name/ssh-keys", tmpUpload.array("files", 10), (req, res) => {
     // Ensure ~/.ssh directory exists with correct permissions
     exec(`mkdir -p /home/dev/.ssh && chmod 700 /home/dev/.ssh && chown dev:dev /home/dev/.ssh`);
 
-    const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].join(path.delimiter);
-    const envWithDocker = { ...process.env, PATH: `${process.env.PATH || ""}${path.delimiter}${extraPaths}` };
-
     const uploaded = [];
     for (const file of req.files) {
       const destPath = `/home/dev/.ssh/${file.originalname}`;
       try {
-        rawExecSync(`docker cp '${file.path}' '${name}:${destPath}'`, {
-          encoding: "utf-8",
-          env: envWithDocker,
-          timeout: 10000,
-        });
+        copyIntoContainer(file.path, name, destPath, { timeout: 10000 });
 
         // Set correct permissions based on file type
         const isPublicKey = file.originalname.endsWith('.pub');
@@ -1256,17 +1379,11 @@ router.post("/:name/upload", tmpUpload.array("files", 20), (req, res) => {
     containerManager.execInContainer(name, `mkdir -p '${resolved}'`, { timeout: 5000 });
 
     const uploaded = [];
-    const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].join(path.delimiter);
-    const envWithDocker = { ...process.env, PATH: `${process.env.PATH || ""}${path.delimiter}${extraPaths}` };
 
     for (const file of req.files) {
       const containerDest = `${resolved}/${file.originalname}`;
       try {
-        rawExecSync(`docker cp '${file.path}' '${name}:${containerDest}'`, {
-          encoding: "utf-8",
-          env: envWithDocker,
-          timeout: 30000,
-        });
+        copyIntoContainer(file.path, name, containerDest, { timeout: 30000 });
         // Fix ownership so the dev user can access the file
         containerManager.execInContainer(name, `chown dev:dev '${containerDest}' 2>/dev/null`, { timeout: 5000 });
         uploaded.push({ name: file.originalname, path: containerDest, size: file.size });

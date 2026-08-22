@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1
+# StartUpp AI IDE — Ubuntu runtime (Node 22 for node:sqlite).
+# Dependency install happens BEFORE COPY . . so source edits stay cacheable.
+
+FROM ubuntu:24.04 AS os
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    SAI_IN_CONTAINER=1 \
+    PORT=55590 \
+    NPM_CONFIG_PREFIX=/root/.npm-global \
+    PATH="/root/.npm-global/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    python3 \
+    make \
+    g++ \
+    bash \
+    tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 (node:sqlite)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI only — daemon is the host engine via the mounted socket
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
+      > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g pm2
+
+WORKDIR /app
+
+# Shared lockfile copy — only package changes invalidate npm ci.
+COPY package.json package-lock.json ./
+COPY scripts/postinstall-pty.cjs scripts/postinstall-pty.cjs
+COPY src/client/package.json src/client/package-lock.json ./src/client/
+
+FROM os AS prod-deps
+ENV NODE_ENV=production
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev \
+    && cd src/client && npm ci
+
+FROM os AS dev-deps
+# NODE_ENV=production would make npm ci skip concurrently/nodemon.
+ENV NODE_ENV=development
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --include=dev \
+    && cd src/client && npm ci --include=dev
+
+FROM dev-deps AS development
+COPY . .
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/docker/ide-entrypoint.js"]
+EXPOSE 55590 5173
+CMD ["npm", "run", "dev"]
+
+FROM prod-deps AS production
+COPY . .
+RUN cd src/client && npm run build
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/docker/ide-entrypoint.js"]
+EXPOSE 55590
+CMD ["pm2-runtime", "ecosystem.config.cjs", "--only", "ai-ide-api", "--env", "production"]

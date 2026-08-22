@@ -266,6 +266,15 @@ export default function WelcomeGuide({ isOpen, onClose }) {
 
   if (!isOpen) return null;
 
+  const persistDismissed = () => {
+    try { localStorage.setItem('hideWelcomeGuide', 'true'); } catch {}
+  };
+
+  const handleClose = () => {
+    persistDismissed();
+    onClose?.();
+  };
+
   const ActiveContent = SECTION_COMPONENTS[activeSection];
 
   return (
@@ -278,7 +287,7 @@ export default function WelcomeGuide({ isOpen, onClose }) {
             <h2 className="text-lg font-semibold text-surface-100">Welcome Guide</h2>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1.5 hover:bg-surface-700 rounded-lg transition-colors text-surface-400 hover:text-surface-200"
           >
             <X className="w-5 h-5" />
@@ -332,7 +341,7 @@ export default function WelcomeGuide({ isOpen, onClose }) {
             Don't show on startup
           </label>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="px-4 py-1.5 text-sm font-medium text-surface-200 bg-primary-500/20 hover:bg-primary-500/30 border border-primary-500/30 rounded-lg transition-colors"
           >
             Get Started

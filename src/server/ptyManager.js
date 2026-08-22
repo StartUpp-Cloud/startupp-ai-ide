@@ -11,8 +11,9 @@ import { execSync, exec } from 'child_process';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { sessionHistory } from './sessionHistory.js';
-import { findGitBash } from './hostShell.js';
-import { dockerEnvFlags, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
+import { getHostPtyConfig, runHostShell } from './hostShell.js';
+import { dockerEnvArgs, resolveRuntimeEnvironment } from './connections/runtimeEnvResolver.js';
+import { dockerCliEnv, execDockerCmd, getDockerExecPtySpec, interactiveDockerExecArgs } from './dockerRoute.js';
 import { resolveEnvironmentSecrets } from './projectEnvironments.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,9 +43,9 @@ function findDockerBinary() {
     `${home}/.local/bin`,
   ];
   const expandedPath = [...new Set([
-    ...(process.env.PATH || '').split(':'),
+    ...(process.env.PATH || '').split(path.delimiter),
     ...extraDirs,
-  ])].join(':');
+  ])].join(path.delimiter);
 
   console.log(`[ptyManager] Searching for docker binary...`);
   console.log(`[ptyManager] Platform: ${os.platform()}, HOME: ${home}`);
@@ -149,23 +150,25 @@ function fixPtyPermissions() {
 // Ensure dtach is installed inside a container. Runs once per container name.
 const _dtachChecked = new Set();
 
+function dockerHostExec(cmd, opts = {}) {
+  return execDockerCmd(cmd, opts);
+}
+
 function ensureDtach(containerName) {
   if (_dtachChecked.has(containerName)) return;
 
   const dockerBin = findDockerBinary();
   try {
-    execSync(`${dockerBin} exec ${containerName} which dtach`, {
-      encoding: 'utf8', timeout: 5000, stdio: 'pipe',
-    });
+    dockerHostExec(`${dockerBin} exec ${containerName} which dtach`, { timeout: 5000 });
     // dtach exists
     _dtachChecked.add(containerName);
   } catch {
     // dtach not found — install it
     console.log(`[ptyManager] Installing dtach in container ${containerName}...`);
     try {
-      execSync(
+      dockerHostExec(
         `${dockerBin} exec -u root ${containerName} sh -c "apt-get update -qq && apt-get install -y -qq dtach"`,
-        { encoding: 'utf8', timeout: 60000, stdio: 'pipe' },
+        { timeout: 60000 },
       );
       console.log(`[ptyManager] ✓ dtach installed in ${containerName}`);
       _dtachChecked.add(containerName);
@@ -186,25 +189,8 @@ class PTYManager extends EventEmitter {
    * Get shell configuration for current OS
    */
   getShellConfig() {
-    const isWindows = os.platform() === 'win32';
-
-    if (isWindows) {
-      // Prefer Git Bash so host/local terminals behave like Linux (bash + GNU
-      // coreutils, and the POSIX quick-commands work). `--login` sources the
-      // MSYS profile that puts /usr/bin on PATH; `-i` makes it interactive.
-      // Opt out with IDE_HOST_SHELL=powershell.
-      const forced = (process.env.IDE_HOST_SHELL || '').toLowerCase();
-      if (forced !== 'powershell' && forced !== 'pwsh') {
-        const bash = findGitBash();
-        if (bash) return { shell: bash, args: ['--login', '-i'] };
-      }
-      return { shell: 'powershell.exe', args: [] };
-    }
-
-    return {
-      shell: process.env.SHELL || '/bin/bash',
-      args: [],
-    };
+    const config = getHostPtyConfig();
+    return { shell: config.shell, args: config.args };
   }
 
   /**
@@ -235,16 +221,12 @@ class PTYManager extends EventEmitter {
     }
 
     if (containerName) {
-      // We spawn /bin/bash and exec into docker from there, because node-pty's
-      // posix_spawnp can fail on macOS when spawning docker directly (code signing).
-      const dockerBin = findDockerBinary();
+      findDockerBinary();
       const workDir = cwd || '/workspace';
 
       if (role === 'main' || role === 'utility') {
-        // User-facing terminals use plain docker exec (no dtach). docker exec -it
-        // handles PTY raw mode directly, which allows interactive prompts such as
-        // `gh auth login` Y/n confirmations to receive keystrokes reliably. dtach
-        // adds another PTY layer that can swallow single-key prompt input.
+        // User-facing terminals use `docker exec -it` (no dtach). dtach adds
+        // another PTY layer that can swallow single-key prompt input.
         if (role === 'utility') {
           const existingSessions = Array.from(this.sessions.values()).filter(
             s => s.containerName === containerName && s.role === role && s.status === 'active'
@@ -272,12 +254,16 @@ class PTYManager extends EventEmitter {
         // user-facing terminals, otherwise a stuck prompt can be reattached.
         this._cleanDtachSocket(containerName, role, sessionId);
 
-        shell = '/bin/bash';
-        args = [
-          '-c',
-          `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false ${dockerEnvFlags(runtimeEnv)} -w '${workDir}' '${containerName}' bash -l`,
-        ];
-        console.log(`[ptyManager] spawning ${role} session — cmd: ${args[1]}`);
+        const dockerArgs = interactiveDockerExecArgs({
+          extraEnv: dockerEnvArgs(runtimeEnv),
+          workDir,
+          containerName,
+          command: ['bash', '-l'],
+        });
+        const spec = getDockerExecPtySpec(dockerArgs);
+        shell = spec.shell;
+        args = spec.args;
+        console.log(`[ptyManager] spawning ${role} session — docker ${dockerArgs.join(' ')}`);
         spawnCwd = undefined;
       } else {
         // Hidden agent sessions use dtach so background agent processes remain
@@ -288,38 +274,62 @@ class PTYManager extends EventEmitter {
         // Clean any orphaned dtach socket before creating new session
         this._cleanDtachSocket(containerName, role, sessionId);
 
-        shell = '/bin/bash';
-        args = [
-          '-c',
-          `exec ${dockerBin} exec -it -e TERM=xterm-256color -e COLORTERM=truecolor -e BROWSER=false ${dockerEnvFlags(runtimeEnv)} -w '${workDir}' '${containerName}' dtach -A '${socketPath}' -Ez bash -l`,
-        ];
-        console.log(`[ptyManager] spawning ${role} session — cmd: ${args[1]}`);
+        const dockerArgs = interactiveDockerExecArgs({
+          extraEnv: dockerEnvArgs(runtimeEnv),
+          workDir,
+          containerName,
+          command: ['dtach', '-A', socketPath, '-Ez', 'bash', '-l'],
+        });
+        const spec = getDockerExecPtySpec(dockerArgs);
+        shell = spec.shell;
+        args = spec.args;
+        console.log(`[ptyManager] spawning ${role} session — docker ${dockerArgs.join(' ')}`);
         spawnCwd = undefined;
       }
     } else {
-      // Local session
-      const config = this.getShellConfig();
+      // Local / host session — bash inside the IDE container.
+      // Reuse a single utility shell per project (same as container utility sessions)
+      // so StrictMode remounts and Shell-tab toggles do not spawn orphan bashes.
+      if (role === 'utility' && projectId) {
+        const existingSessions = Array.from(this.sessions.values()).filter(
+          s => !s.containerName && s.projectId === projectId && s.role === role && s.status === 'active'
+        );
+
+        if (forceNew) {
+          for (const existingSession of existingSessions) {
+            this.killSession(existingSession.id);
+            this.sessions.delete(existingSession.id);
+          }
+        } else if (existingSessions.length > 0) {
+          const existingSession = existingSessions[0];
+          console.log(`[ptyManager] Reusing existing host ${role} session for project ${projectId}: ${existingSession.id}`);
+          return {
+            sessionId: existingSession.id,
+            projectId: existingSession.projectId,
+            containerName: null,
+            role,
+            reused: true,
+          };
+        }
+      }
+
+      const config = getHostPtyConfig({ cwd });
       shell = config.shell;
       args = config.args;
-      spawnCwd = cwd;
+      spawnCwd = config.cwd;
     }
 
     try {
       const ptyProcess = pty.spawn(shell, args, {
         name: 'xterm-256color',
-        // Force winpty over ConPTY: node-pty's ConPTY console-list-agent throws
-        // "AttachConsole failed" under a PM2 (console-less) service on Node 24 +
-        // Windows, which CRASHES the whole server on PTY create/kill. winpty is
-        // stable here. (Ignored on non-Windows.)
-        useConpty: false,
         cols,
         rows,
         cwd: spawnCwd,
         env: {
           ...process.env,
+          ...dockerCliEnv(),
           ...runtimeEnv,
-          // Ensure Docker is in PATH on macOS (Docker Desktop, Homebrew)
-          PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin`,
+          PATH: `${process.env.PATH || ''}:/usr/local/bin:/usr/bin`,
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',
           BROWSER: 'false',
@@ -423,14 +433,14 @@ class PTYManager extends EventEmitter {
         try {
           const ptyProcess = pty.spawn(shell, args, {
             name: 'xterm-256color',
-            useConpty: false, // see note above — avoid ConPTY crash under PM2 on Windows
             cols,
             rows,
             cwd: spawnCwd,
             env: {
               ...process.env,
+              ...dockerCliEnv(),
               ...runtimeEnv,
-              PATH: `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/snap/bin`,
+              PATH: `${process.env.PATH || ''}:/usr/local/bin:/usr/bin`,
               TERM: 'xterm-256color',
               COLORTERM: 'truecolor',
               BROWSER: 'false',
@@ -570,9 +580,16 @@ class PTYManager extends EventEmitter {
       return false;
     }
 
-    session.ptyProcess.resize(cols, rows);
-    session.cols = cols;
-    session.rows = rows;
+    // PTY hang or blank when resized to 0×0 during layout thrash.
+    const nextCols = Number(cols);
+    const nextRows = Number(rows);
+    if (!Number.isFinite(nextCols) || !Number.isFinite(nextRows) || nextCols < 2 || nextRows < 2) {
+      return false;
+    }
+
+    session.ptyProcess.resize(nextCols, nextRows);
+    session.cols = nextCols;
+    session.rows = nextRows;
     return true;
   }
 
@@ -698,7 +715,7 @@ class PTYManager extends EventEmitter {
     // cleanup before spawn is safe (nothing to collide with).
     exec(
       `${dockerBin} exec ${containerName} sh -c "pkill -f 'dtach -A ${socketPath}' 2>/dev/null; rm -f '${socketPath}'"`,
-      { timeout: 5000 },
+      { timeout: 5000, windowsHide: true, env: process.env },
       () => { /* best-effort — container may be stopped or dtach already gone */ },
     );
   }

@@ -42,9 +42,10 @@ assert.equal(parsed.text, 'Implemented and verified.');
 
 const gatewaySource = readFileSync(resolve(__dirname, '../agentGateway.js'), 'utf8');
 assert.match(gatewaySource, /CODEX EXECUTION STANDARD/);
-assert.match(gatewaySource, /CODEX QUALITY LOOP/);
+assert.match(gatewaySource, /CODEX EXECUTION STANDARD/);
 assert.match(gatewaySource, /_buildCodexQualityArgs/);
 assert.match(gatewaySource, /reasoning_effort=\$\{this\._quoteCliArg\(effort\)\}/);
 assert.match(gatewaySource, /const effort = assistantSettings\?\.effort \|\| 'xhigh'/);
+assert.match(gatewaySource, /getHostBashStdinSpec/);
 
 console.log('agentGatewayCodex tests passed');

@@ -229,12 +229,15 @@ export default function Terminal({ projectId, projects = [], onSessionChange, on
     const doResize = () => {
       if (!fitAddonRef.current) return;
       fitAddonRef.current.fit();
+      const cols = xterm.cols;
+      const rows = xterm.rows;
+      if (cols < 2 || rows < 2) return;
       if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
         wsRef.current.send(JSON.stringify({
           type: 'resize',
           sessionId: sessionIdRef.current,
-          cols: xterm.cols,
-          rows: xterm.rows,
+          cols,
+          rows,
         }));
       }
     };

@@ -50,7 +50,9 @@ import {
 import { checklistTracker } from './checklistTracker.js';
 import { drainSteers, buildSteerPrompt } from './steeringInbox.js';
 import { buildEnvironmentsSummary } from './projectEnvironments.js';
-import { runHostShell, findGitBash } from './hostShell.js';
+import { runHostShell, findGitBash, getHostBashStdinSpec } from './hostShell.js';
+import { getDockerSpawnSpec, execDockerCmd } from './dockerRoute.js';
+import { copyIntoContainer } from './dockerCopy.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -382,8 +384,8 @@ class AgentGateway extends EventEmitter {
 
   /**
    * Probe which coding-assistant CLIs are actually available in the environment
-   * the agents run in — inside the container for container projects, on the host
-   * (via Git Bash on Windows) for host projects. Cached briefly per project.
+   * the agents run in — inside the project container, or the IDE container
+   * for host projects. Cached briefly per project.
    * Returns a Set of tool ids (e.g. {'cursor','opencode'}).
    */
   async _probeAvailableTools(projectId) {
@@ -734,7 +736,7 @@ class AgentGateway extends EventEmitter {
     // Ensure upload staging dir exists inside the container
     const uploadDir = `${workDir}/.uploads`;
     try {
-      execSync(`docker exec ${containerName} mkdir -p ${uploadDir}`, { stdio: 'pipe' });
+      execDockerCmd(`docker exec ${containerName} mkdir -p ${uploadDir}`, { stdio: 'pipe' });
     } catch (err) {
       console.warn(`[agentGateway] Could not create container upload dir: ${err.message}`);
     }
@@ -744,7 +746,7 @@ class AgentGateway extends EventEmitter {
       const filename = path.basename(att.path);
       const containerPath = `${uploadDir}/${filename}`;
       try {
-        execSync(`docker cp '${att.path}' '${containerName}:${containerPath}'`, { stdio: 'pipe' });
+        copyIntoContainer(att.path, containerName, containerPath, { timeout: 30000 });
         result.set(att.path, containerPath);
         console.log(`[agentGateway] Copied attachment into container: ${containerPath}`);
       } catch (err) {
@@ -1708,21 +1710,10 @@ RULES:
     // Spawn config — never allocate a PTY (stdio: pipe).
     let spawnCmd, spawnArgs, spawnCwd;
     if (isContainer) {
-      // docker exec WITHOUT -t → no TTY inside the container either.
-      spawnCmd = 'docker';
-      spawnArgs = ['exec', '-w', workDir || '/workspace', project.containerName, 'cursor-agent', ...cursorArgs];
-    } else if (process.platform === 'win32') {
-      // Resolve cursor-agent WITHOUT relying on Git Bash being spawnable or on
-      // cursor-agent being on the shell PATH (both ENOENT'd under console-less
-      // PM2). Prefers the bundled node.exe + index.js — a plain node spawn.
-      const resolved = this._resolveCursorAgentWin();
-      if (!resolved) {
-        return { success: false, retry: false, requiresUserInput: false,
-          error: 'Could not find the Cursor CLI (cursor-agent) to launch. Install it (open the Shell tab and run the Cursor install quick-command), then try again.' };
-      }
-      spawnCmd = resolved.cmd;
-      spawnArgs = [...resolved.prefixArgs, ...cursorArgs];
-      spawnCwd = workDir;
+      const spec = getDockerSpawnSpec(['exec', '-w', workDir || '/workspace', project.containerName, 'cursor-agent', ...cursorArgs]);
+      spawnCmd = spec.cmd;
+      spawnArgs = spec.args;
+      spawnCwd = spec.cwd;
     } else {
       spawnCmd = 'cursor-agent';
       spawnArgs = cursorArgs;
@@ -1971,9 +1962,10 @@ RULES:
   }
 
   /**
-   * Run any agent CLI tool via a NON-PTY child process (`bash -c <cmd>` on host,
-   * `docker exec … bash -lc <cmd>` in a container). node-pty is unreliable under
-   * a console-less service on Windows; headless CLIs don't need a terminal.
+   * Run any agent CLI tool via a NON-PTY child process (`bash -s` on the host
+   * or `docker exec … bash -s` in a project container). node-pty
+   * is unreliable under a console-less service on Windows; headless CLIs don't
+   * need a terminal.
    * Streams progress + heartbeat, then parses via _finalizeToolOutput.
    */
   async _attemptToolPiped(projectId, chatSessionId, message, tool, assistantSettings, broadcastFn, ctx, attempt, mode = 'agent', streamOpts = {}) {
@@ -2006,16 +1998,16 @@ RULES:
     // finalizer prompts. stdin has no such limit.
     let spawnCmd, spawnArgs, spawnCwd;
     if (isContainer) {
-      spawnCmd = 'docker';
-      spawnArgs = ['exec', '-i', '-w', workDir || '/workspace', project.containerName, 'bash', '-s'];
-    } else if (process.platform === 'win32') {
-      spawnCmd = findGitBash() || 'bash';
-      spawnArgs = ['-s'];
-      spawnCwd = workDir;
+      const dockerArgs = ['exec', '-i', '-w', workDir || '/workspace', project.containerName, 'bash', '-s'];
+      const spec = getDockerSpawnSpec(dockerArgs);
+      spawnCmd = spec.cmd;
+      spawnArgs = spec.args;
+      spawnCwd = spec.cwd;
     } else {
-      spawnCmd = process.env.SHELL || '/bin/bash';
-      spawnArgs = ['-s'];
-      spawnCwd = workDir;
+      const spec = getHostBashStdinSpec({ cwd: workDir });
+      spawnCmd = spec.cmd;
+      spawnArgs = spec.args;
+      spawnCwd = spec.cwd;
     }
 
     return await new Promise((resolve) => {

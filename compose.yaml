@@ -1,0 +1,29 @@
+name: startupp-ai-ide
+
+services:
+  ide:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ide
+      target: production
+    image: startupp-ai-ide:latest
+    container_name: sai-ide
+    restart: unless-stopped
+    environment:
+      SAI_IN_CONTAINER: "1"
+      NODE_ENV: production
+      PORT: "55590"
+    ports:
+      - "55590:55590"
+    volumes:
+      # Named volumes survive rebuild/restart. Never compose down -v.
+      - sai-ide-data:/app/data
+      - sai-ide-logs:/app/logs
+      - sai-ide-home:/root
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  sai-ide-data:
+  sai-ide-logs:
+  sai-ide-home:

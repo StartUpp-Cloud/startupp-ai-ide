@@ -7,7 +7,6 @@
  */
 
 import express from 'express';
-import { execSync } from 'child_process';
 import { llmProvider } from '../llmProvider.js';
 import { findProjectById } from '../models/Project.js';
 import { containerManager } from '../containerManager.js';
@@ -32,14 +31,9 @@ function run(cmd, ctx) {
   if (ctx.containerName) {
     const dir = ctx.workDir || '/workspace';
     const escaped = cmd.replace(/"/g, '\\"');
-    const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin'].join(':');
-    return execSync(`docker exec -w "${dir}" ${ctx.containerName} bash -c "${escaped}"`, {
-      encoding: 'utf-8', stdio: 'pipe', timeout: 30000,
-      env: { ...process.env, PATH: `${process.env.PATH || ''}:${extraPaths}` },
-    }).trim();
+    return runHostShell(`docker exec -w "${dir}" ${ctx.containerName} bash -c "${escaped}"`, { timeout: 30000 }).trim();
   }
-  // Host project — run on the host, through Git Bash on Windows so POSIX bits
-  // (git pipelines, `head`, quoting) behave like they do inside a Linux container.
+  // Host project — run in the IDE container so POSIX pipelines match Linux.
   return runHostShell(cmd, { cwd: ctx.projectPath }).trim();
 }
 
