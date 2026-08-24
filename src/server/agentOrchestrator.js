@@ -16,6 +16,7 @@ import {
   buildThinFinalResponse,
   buildStoppedRunResponse,
 } from './orchestratorMessages.js';
+import { FINAL_REPORT_GUIDANCE } from './diligence.js';
 import {
   INTERRUPTED_RUN_ERROR,
   buildLivenessHeartbeatMessage,
@@ -1055,9 +1056,8 @@ ${run.goal}`;
       'Speak as the IDE assistant working with the user, not as a separate hidden session.',
       'If this is a new CLI session, continue naturally and do not mention that the session is new.',
       'Use the user name naturally when it helps, but do not force it into every sentence.',
-      'Speak as a teammate reporting back. Match length to the work: a quick fix stays short; a large change gets a brief report with the important decisions.',
-      'Write the final response as a compact past-tense report with ## Outcome and ## Details. Do not leave in-progress narration ("I\'ll check", "I\'m deploying") in the closing message.',
-      'Keep Outcome to 1–2 sentences and Details to tight bullets (decisions, versions, URLs, commands, blockers). Do not retell the journey or re-list every file.',
+      'Speak as a teammate reporting back. Match length to the work: a quick fix stays short; a large change gets a real report with the important decisions.',
+      FINAL_REPORT_GUIDANCE,
       'If blocked by authentication, credentials, login, or a required user decision, stop immediately and ask the user — do not keep retrying.',
     ];
     if (tone === 'concise') lines.push('Keep the final response concise and direct.');

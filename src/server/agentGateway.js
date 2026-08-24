@@ -47,6 +47,7 @@ import {
   evaluateCompletion,
   buildNudgeMessage,
   parseAgentReport,
+  FINAL_REPORT_GUIDANCE,
 } from './diligence.js';
 import { checklistTracker } from './checklistTracker.js';
 import { drainSteers, buildSteerPrompt } from './steeringInbox.js';
@@ -3466,7 +3467,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       } else if (mode === 'plan-review') {
         parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
       } else {
-        parts.push('\nMODE: AGENT — Execute the user\'s goal at full effort. Make the changes, verify them, and talk back like a teammate.\n- Auto-approve safe operations.\n- Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.\n- If blocked by missing authentication, login, API keys, permissions, or a required human decision, STOP immediately and tell the user what they need to do. Do not retry or burn tokens on the same blocker.\n- Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops).\n- Mid-run status may say what you are about to do. The FINAL message is a compact past-tense report, not a narrative.\n- Use ## Outcome (1–2 sentences) then ## Details (tight bullets for decisions, versions, URLs, commands, blockers). Do not retell the journey or re-list every file.');
+        parts.push(`\nMODE: AGENT — Execute the user's goal at full effort. Make the changes, verify them, and talk back like a teammate.\n- Auto-approve safe operations.\n- Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.\n- If blocked by missing authentication, login, API keys, permissions, or a required human decision, STOP immediately and tell the user what they need to do. Do not retry or burn tokens on the same blocker.\n- Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops).\n- Mid-run status may say what you are about to do.\n${FINAL_REPORT_GUIDANCE}`);
 
         // Engineering Diligence Contract — tool-agnostic doctrine that raises
         // effort/persistence and mandates the verify+report structure. Returns

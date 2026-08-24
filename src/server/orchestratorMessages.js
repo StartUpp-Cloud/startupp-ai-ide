@@ -237,16 +237,64 @@ export function stripInProgressNarration(content) {
   return paragraphs.join('\n\n').trim();
 }
 
-/** Prefer the last completed handoff over earlier "I'm about to…" updates. */
+function countReportBullets(text) {
+  return (String(text || '').match(/^\s*[-*•]/gm) || []).length;
+}
+
+function extractDetailsBlock(text) {
+  const match = String(text || '').match(/(?:^|\n)#{1,3}\s*Details\s*\n+([\s\S]*?)(?=\n#{1,3}\s|\s*$)/i);
+  return match?.[1]?.trim() || '';
+}
+
+function isThinReport(text) {
+  const src = String(text || '').trim();
+  if (!src) return true;
+  const details = extractDetailsBlock(src);
+  if (details.length >= 180 || countReportBullets(details) >= 3) return false;
+  if (countReportBullets(src) >= 3 && src.length >= 280) return false;
+  return src.length < 700 && countReportBullets(src) < 3;
+}
+
+function substanceScore(text) {
+  const src = String(text || '').trim();
+  if (!src) return 0;
+  let score = Math.min(src.length, 6000);
+  if (extractDetailsBlock(src)) score += 2000;
+  if (/(?:^|\n)#{1,3}\s*(?:Outcome|Summary)\b/i.test(src)) score += 300;
+  score += countReportBullets(src) * 90;
+  score += Math.min(src.split('\n').filter((line) => line.trim()).length, 50) * 15;
+  return score;
+}
+
+/**
+ * Prefer the last completed handoff over earlier "I'm about to…" updates.
+ * If Codex then emits a two-sentence closer, keep the richer report instead.
+ */
 export function selectFinalAgentMessage(parts = []) {
   const cleaned = parts.map((part) => String(part || '').trim()).filter(Boolean);
   if (cleaned.length === 0) return '';
-  if (cleaned.length === 1) return stripInProgressNarration(cleaned[0]) || cleaned[0];
-  for (let i = cleaned.length - 1; i >= 0; i -= 1) {
-    const stripped = stripInProgressNarration(cleaned[i]);
-    if (stripped) return stripped;
+
+  const usable = cleaned
+    .map((part) => stripInProgressNarration(part))
+    .filter(Boolean);
+  if (usable.length === 0) return cleaned[cleaned.length - 1];
+  if (usable.length === 1) return usable[0];
+
+  const last = usable[usable.length - 1];
+  if (!isThinReport(last)) return last;
+
+  let richest = last;
+  let richestScore = substanceScore(last);
+  for (const candidate of usable.slice(0, -1)) {
+    const score = substanceScore(candidate);
+    if (score > richestScore + 250) {
+      richest = candidate;
+      richestScore = score;
+    }
   }
-  return cleaned[cleaned.length - 1];
+  if (richest === last) return last;
+  if (/(?:^|\n)#{1,3}\s*(?:Outcome|Summary|Details)\b/i.test(richest)) return richest;
+  return `## Outcome\n\n${last}\n\n## Details\n\n${richest}`.trim();
 }
 
 function extractAgentSummary(content) {
@@ -314,7 +362,7 @@ export function buildStoppedRunResponse({
   return parts.join('\n').trim();
 }
 
-const COMPACT_REPORT_MAX = 1200;
+const COMPACT_REPORT_MAX = 1800;
 
 function heuristicCompact(text, maxLength = COMPACT_REPORT_MAX) {
   const lines = String(text || '').split('\n');
@@ -331,10 +379,25 @@ function heuristicCompact(text, maxLength = COMPACT_REPORT_MAX) {
   return kept.join('\n').trim();
 }
 
+function promoteFindingsIntoDetails(body, activity) {
+  const strippedActivity = stripInProgressNarration(activity);
+  if (!strippedActivity || strippedActivity.length < 120) {
+    return { body, promoted: false };
+  }
+  if (!isThinReport(body)) return { body, promoted: false };
+  if (countReportBullets(strippedActivity) < 2 && strippedActivity.length < 180) {
+    return { body, promoted: false };
+  }
+  const next = /#{1,3}\s*Details\b/i.test(body)
+    ? `${body.trim()}\n\n${strippedActivity}`
+    : `${body.trim()}\n\n## Details\n\n${strippedActivity}`;
+  return { body: next, promoted: true };
+}
+
 /**
- * Prefer a titled Outcome/Details report for the chat bubble. Stash the rest
- * as `detail` so the UI can offer Explain without making the next turn reread
- * a wall of play-by-play.
+ * Prefer a titled Outcome/Details report for the chat bubble. Stash leftover
+ * play-by-play as `detail` (Working notes). Findings that landed before
+ * ## Outcome are promoted into Details so they stay visible.
  */
 export function compactChatReport(content) {
   const raw = String(content || '').trim();
@@ -343,13 +406,16 @@ export function compactChatReport(content) {
   const parsed = parseAgentReport(raw);
   if (parsed.hasReport && parsed.body.trim()) {
     const body = stripInProgressNarration(parsed.body) || parsed.body.trim();
-    const detail = parsed.activity && parsed.activity !== body ? parsed.activity : '';
-    return { body, detail, compact: true };
+    const promoted = promoteFindingsIntoDetails(body, parsed.activity);
+    const detail = !promoted.promoted && parsed.activity && parsed.activity !== promoted.body
+      ? parsed.activity
+      : '';
+    return { body: promoted.body, detail, compact: true };
   }
 
   const stripped = stripInProgressNarration(raw) || raw;
 
-  if (stripped.length <= COMPACT_REPORT_MAX) {
+  if (countReportBullets(stripped) >= 3 || stripped.length <= COMPACT_REPORT_MAX) {
     return { body: stripped, detail: '', compact: false };
   }
 

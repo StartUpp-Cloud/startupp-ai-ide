@@ -8,6 +8,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 {
   const agentGatewaySource = readFileSync(resolve(__dirname, '../agentGateway.js'), 'utf8');
+  const diligenceSource = readFileSync(resolve(__dirname, '../diligence.js'), 'utf8');
 
   assert.match(
     agentGatewaySource,
@@ -41,8 +42,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
   );
   assert.match(
     agentGatewaySource,
-    /## Outcome/,
-    'Agent mode should require a compact Outcome/Details final report',
+    /FINAL_REPORT_GUIDANCE/,
+    'Agent mode should inject the shared Outcome/Details final-report contract',
+  );
+  assert.match(
+    diligenceSource,
+    /Direct answers to the user/,
+    'Final reports must include findings and recommendations, not only a two-sentence outcome',
   );
 }
 

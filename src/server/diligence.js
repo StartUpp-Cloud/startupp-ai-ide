@@ -16,8 +16,8 @@
  *   3. NUDGE   — buildNudgeMessage() turns an unmet verdict into a direct,
  *                actionable continuation prompt that is fed back to the same
  *                CLI session, looping until the gate passes or a budget is hit.
- *   4. REPORT  — the doctrine asks for a conversational, complexity-scaled
- *                report; the verdict is attached as metadata the client renders.
+ *   4. REPORT  — the doctrine asks for a durable Outcome/Details report sized
+ *                to the request; the verdict is attached as metadata the client renders.
  *
  * The gateway owns the loop; this module owns the policy.
  */
@@ -72,6 +72,24 @@ export function diligenceAppliesTo(tool, mode, settings = getDiligenceSettings()
 }
 
 /**
+ * Shared final-bubble contract. Live progress is ephemeral; this is what the
+ * user keeps. Outcome is the headline; Details must still answer the request.
+ */
+export const FINAL_REPORT_GUIDANCE = [
+  'Write the FINAL message in past tense with this shape:',
+  '## Outcome',
+  '1–2 sentences naming what shipped or what you concluded.',
+  '## Details',
+  'The actual report, sized to the request. Usually 5–12 tight bullets; more when the user asked for analysis, comparison, or a roadmap.',
+  '- What changed (grouped; name the important files, not every path)',
+  '- Direct answers to the user\'s questions — findings, recommendations, and tradeoffs must appear here',
+  '- Versions, URLs, commands, and decisions the user would reuse',
+  '- Blockers and remaining work',
+  'This bubble is the durable report. Live progress is ephemeral — never assume the user still has it.',
+  'Do not write play-by-play, in-progress narration ("I\'ll check", "I\'m deploying"), or collapse a large request into two vague sentences.',
+].join('\n');
+
+/**
  * The Engineering Diligence Contract — the doctrine prepended to the agent's
  * first message. It does double duty: it raises effort/persistence, and its
  * REPORT section defines the exact structure that both the user-facing message
@@ -98,13 +116,8 @@ export function buildOperatingContract({ tool, mode } = {}) {
     '   - If a validation genuinely cannot be run, state exactly which one and why.',
     "5. ASSERT QUALITY — Re-read your own diff. Check error handling, edge cases, security, and that you didn't break existing behavior or leave debug/dead code behind.",
     '6. FOLLOW THE RULES — Honor CLAUDE.md / AGENTS.md / project rules / skills above your own defaults. If a rule grants STANDING APPROVAL for an action (e.g. "always approved to deploy to dev-1", "always deploy changes to the dev-1 worker"), perform that action as part of completing the task — do not pause to ask for confirmation or list it as a deferred "next step".',
-    '7. TALK TO THE HUMAN — The FINAL message is a compact report. Live progress already covered the journey; do not retell it.',
-    '   - Use this exact shape:',
-    '     ## Outcome',
-    '     One or two past-tense sentences.',
-    '     ## Details',
-    '     Tight bullets only for decisions, versions, URLs, commands, and blockers. Usually 3–8 bullets.',
-    '   - Do not write a long narrative, play-by-play, or file-by-file recap.',
+    '7. TALK TO THE HUMAN — The FINAL message is the durable report. Live progress is ephemeral; never assume the user still has it.',
+    `   ${FINAL_REPORT_GUIDANCE.replace(/\n/g, '\n   ')}`,
     '   - Nested bullets must be indented with two spaces per level.',
     '   - If you are blocked (missing auth, login, API key, permissions, or a required human decision), STOP immediately. Tell the user what is needed. Do not retry, invent workarounds, or burn more tokens.',
     '',

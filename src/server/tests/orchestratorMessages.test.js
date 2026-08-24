@@ -105,6 +105,25 @@ assert.match(selectedFinal, /4378713d/);
 assert.match(selectedFinal, /acf275d2-a183-4e37-ac8b-2b56c36b4369/);
 assert.doesNotMatch(selectedFinal, /I'll check|I’m starting|I'm starting/i);
 
+const thinCloserAfterReport = selectFinalAgentMessage([
+  "I'll inspect OpenClaw and the debug UI next.",
+  [
+    '## Outcome',
+    'Removed visual debug and bumped the release.',
+    '',
+    '## Details',
+    '- Deleted CDP/debug-element routes, pages, and nav entries.',
+    '- Back/Close are icon-only with tooltips.',
+    '- Version is now 1.1.0.5.',
+    '- OpenClaw comparison: we lack durable tool-loop memory, typed tool results, and a restart-safe agent session.',
+    '- Implement those three next so coding sessions survive disconnects and stay inspectable.',
+  ].join('\n'),
+  'Removed the unfinished visual-debug/CDP feature end to end, compacted child-session navigation controls, and moved the application/client release to 1.1.0.5. The comparison with OpenClaw identified a focused roadmap for making the coding assistant more durable, observable, and extensible.',
+]);
+assert.match(thinCloserAfterReport, /durable tool-loop memory|typed tool results|restart-safe/);
+assert.match(thinCloserAfterReport, /1\.1\.0\.5/);
+assert.doesNotMatch(thinCloserAfterReport, /I'll inspect/i);
+
 const progressThinFinal = buildThinFinalResponse({
   completed: [{
     task: { title: 'Complete user request', status: 'completed' },
@@ -150,6 +169,22 @@ assert.match(compactStructured.body, /acf275d2/);
 assert.doesNotMatch(compactStructured.body, /I'll inspect/i);
 assert.match(compactStructured.detail, /I'll inspect|inspect wrangler/i);
 
+const outcomeOnlyWithFindings = compactChatReport([
+  "I'll compare the harness with OpenClaw next.",
+  '',
+  '- OpenClaw keeps a durable tool loop and typed results across reconnects.',
+  '- We should add restart-safe agent sessions and a visible run timeline.',
+  '- Missing: plugin tools, approval queues, and persisted working memory.',
+  '',
+  '## Outcome',
+  'Removed the unfinished visual-debug/CDP feature and moved the release to 1.1.0.5. The OpenClaw comparison produced a focused roadmap.',
+].join('\n'));
+assert.match(outcomeOnlyWithFindings.body, /## Outcome/);
+assert.match(outcomeOnlyWithFindings.body, /## Details/);
+assert.match(outcomeOnlyWithFindings.body, /durable tool loop/);
+assert.match(outcomeOnlyWithFindings.body, /restart-safe agent sessions/);
+assert.doesNotMatch(outcomeOnlyWithFindings.body, /I'll compare/i);
+
 const longNarrative = `${'The agent checked authentication and repository state. '.repeat(40)}\n\nThen it deployed the worker and confirmed health checks.`;
 const compactLong = compactChatReport(longNarrative);
 assert.equal(compactLong.compact, true);
@@ -164,7 +199,7 @@ assert.match(orchestratorSource, /<ide_orchestrator_handoff version="1">/);
 assert.match(orchestratorSource, /session_continuity/);
 assert.match(orchestratorSource, /user_profile_and_preferences/);
 assert.match(orchestratorSource, /response_guidance/);
-assert.match(orchestratorSource, /## Outcome/);
+assert.match(orchestratorSource, /FINAL_REPORT_GUIDANCE/);
 assert.match(orchestratorSource, /_postStoppedSummary/);
 assert.match(orchestratorSource, /buildStoppedRunResponse/);
 

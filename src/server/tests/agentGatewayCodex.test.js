@@ -53,6 +53,36 @@ assert.match(narrated.text, /Deployment succeeded/);
 assert.match(narrated.text, /4378713d/);
 assert.doesNotMatch(narrated.text, /I'll check|I'm starting/i);
 
+const thinCloser = agentGateway._parseCodexJsonOutput([
+  JSON.stringify({ type: 'thread.started', thread_id: 'codex-thread-4' }),
+  JSON.stringify({
+    type: 'item.completed',
+    item: {
+      type: 'agent_message',
+      text: [
+        '## Outcome',
+        'Removed visual debug and bumped to 1.1.0.5.',
+        '',
+        '## Details',
+        '- Deleted CDP debug-element pages and nav.',
+        '- OpenClaw gap: no durable tool-loop memory or restart-safe sessions.',
+        '- Next: persist agent transcripts and typed tool results.',
+      ].join('\n'),
+    },
+  }),
+  JSON.stringify({
+    type: 'item.completed',
+    item: {
+      type: 'agent_message',
+      text: 'Removed the unfinished visual-debug/CDP feature end to end and moved the release to 1.1.0.5. The OpenClaw comparison identified a focused roadmap.',
+    },
+  }),
+  JSON.stringify({ type: 'turn.completed' }),
+].join('\n'), 'codex exec --json test');
+assert.match(thinCloser.text, /durable tool-loop memory/);
+assert.match(thinCloser.text, /restart-safe sessions/);
+assert.doesNotMatch(thinCloser.text, /I'll /i);
+
 const rejected = agentGateway._parseCodexJsonOutput([
   JSON.stringify({ type: 'thread.started', thread_id: 'codex-thread-2' }),
   JSON.stringify({ type: 'error', message: JSON.stringify({ type: 'error', error: { message: "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account." } }) }),
@@ -73,7 +103,7 @@ assert.match(gatewaySource, /killRegisteredAgentProcesses/);
 assert.match(gatewaySource, /agentDockerExecArgs/);
 assert.match(gatewaySource, /containerAgentShellPrelude/);
 assert.match(gatewaySource, /selectFinalAgentMessage/);
-assert.match(gatewaySource, /past-tense report|## Outcome/);
+assert.match(gatewaySource, /FINAL_REPORT_GUIDANCE/);
 assert.match(gatewaySource, /_finalizeStoppedTurn/);
 assert.match(gatewaySource, /aborted: true/);
 assert.doesNotMatch(gatewaySource, /resolve\(\{ success: false, aborted: true, displayOutput: '' \}\)/);
