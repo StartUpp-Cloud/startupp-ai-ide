@@ -20,6 +20,11 @@ import { startProvision, waitForProvision } from './containerProvision.js';
 import { isIdeShellProject } from './ideShell.js';
 import { normalizeYnPromptInput } from './interactivePromptInput.js';
 import {
+  attachWsToChatSession,
+  detachWsFromAllChatSessions,
+  detachWsFromChatSession,
+} from './chatSessionAttach.js';
+import {
   ACTIVE_RUN_STALE_MS,
   RELIABILITY_SWEEP_INTERVAL_MS,
   STREAM_AUTO_RETRY_MAX_AGE_MS,
@@ -66,10 +71,10 @@ class TerminalServer {
     this.reliabilityMonitor = null;
     this.reliabilitySweepRunning = false;
 
-    // Per-session WebSocket tracking for isolation
-    // Each chat session gets its own dedicated client set
+    // One IDE socket can watch many chat sessions. Switching projects
+    // must keep previous sessions attached so progress keeps flowing.
     this.chatSessionClients = new Map(); // chatSessionId -> Set of ws clients
-    this.clientChatSessions = new Map(); // ws -> chatSessionId (for cleanup)
+    this.clientChatSessions = new Map(); // ws -> Set<chatSessionId>
   }
 
   /**
@@ -77,26 +82,10 @@ class TerminalServer {
    * This enables per-session isolation for parallel work.
    */
   attachToChatSession(ws, chatSessionId) {
-    // Remove from previous chat session if any
-    const prevSession = this.clientChatSessions.get(ws);
-    if (prevSession && prevSession !== chatSessionId) {
-      const prevClients = this.chatSessionClients.get(prevSession);
-      if (prevClients) {
-        prevClients.delete(ws);
-        if (prevClients.size === 0) {
-          this.chatSessionClients.delete(prevSession);
-        }
-      }
+    const result = attachWsToChatSession(this, ws, chatSessionId);
+    if (result.attached) {
+      console.log(`[TerminalServer] Client attached to chat session ${chatSessionId} (${result.sessionCount} watched)`);
     }
-
-    // Add to new chat session
-    if (!this.chatSessionClients.has(chatSessionId)) {
-      this.chatSessionClients.set(chatSessionId, new Set());
-    }
-    this.chatSessionClients.get(chatSessionId).add(ws);
-    this.clientChatSessions.set(ws, chatSessionId);
-
-    console.log(`[TerminalServer] Client attached to chat session ${chatSessionId}`);
   }
 
   /**
@@ -136,18 +125,12 @@ class TerminalServer {
   /**
    * Clean up chat session tracking when a client disconnects.
    */
-  detachFromChatSession(ws) {
-    const chatSessionId = this.clientChatSessions.get(ws);
+  detachFromChatSession(ws, chatSessionId = null) {
     if (chatSessionId) {
-      const clients = this.chatSessionClients.get(chatSessionId);
-      if (clients) {
-        clients.delete(ws);
-        if (clients.size === 0) {
-          this.chatSessionClients.delete(chatSessionId);
-        }
-      }
-      this.clientChatSessions.delete(ws);
+      detachWsFromChatSession(this, ws, chatSessionId);
+      return;
     }
+    detachWsFromAllChatSessions(this, ws);
   }
 
   /**
@@ -606,12 +589,23 @@ class TerminalServer {
       // ── Per-session WebSocket management ──
 
       case 'attach-chat-session': {
-        // Attach this WebSocket to a specific chat session for isolated communication
         const { chatSessionId, projectId } = payload;
         console.log(`[terminalServer] ▶ attach-chat-session received: project=${projectId}, session=${chatSessionId}`);
         if (chatSessionId) {
-          await this._inspectChatSession(ws, { projectId, chatSessionId, acknowledgeAttach: true, reason: 'attach' });
+          await this._inspectChatSession(ws, {
+            projectId,
+            chatSessionId,
+            acknowledgeAttach: true,
+            reason: 'attach',
+            recover: payload.recover === true,
+          });
         }
+        break;
+      }
+
+      case 'detach-chat-session': {
+        const { chatSessionId } = payload;
+        if (chatSessionId) this.detachFromChatSession(ws, chatSessionId);
         break;
       }
 
@@ -831,7 +825,7 @@ class TerminalServer {
 
         try {
           this.openShellStream(payload.projectId, chatSessionId, content);
-          shellProxy.send({ projectId: payload.projectId, chatSessionId, input: content });
+          await shellProxy.send({ projectId: payload.projectId, chatSessionId, input: content });
         } catch (err) {
           this.completeShellStream(this.shellKey(payload.projectId, chatSessionId), {
             error: `Shell proxy error: ${err.message}`,
@@ -939,23 +933,9 @@ class TerminalServer {
       case 'chat-stop': {
         const { agentGateway } = await import('./agentGateway.js');
         const { agentOrchestrator } = await import('./agentOrchestrator.js');
-        const { chatStore: stopChatStore } = await import('./chatStore.js');
         const stopSessionId = payload.sessionId || payload.projectId;
-        // Check running state before abort (abort flips the flag)
-        const wasRunning = agentGateway.isRunning(stopSessionId);
-        // Abort by session ID (supports parallel sessions)
-        const orchestratorAborted = agentOrchestrator.abortSession(stopSessionId);
+        agentOrchestrator.abortSession(stopSessionId);
         agentGateway.abort(stopSessionId);
-        // Persist a visible "Stopped" message so the user sees feedback in chat history
-        if (wasRunning || orchestratorAborted > 0) {
-          const stoppedMsg = stopChatStore.addMessage({
-            projectId: payload.projectId,
-            sessionId: payload.sessionId,
-            role: 'error',
-            content: 'Stopped by user.',
-          });
-          this.broadcastToChatSession(payload.sessionId, { type: 'chat-message', message: stoppedMsg });
-        }
         this.broadcastToChatSession(payload.sessionId, { type: 'agent-status', projectId: payload.projectId, sessionId: payload.sessionId, busy: false });
         this.broadcast({ type: 'agent-status', projectId: payload.projectId, sessionId: payload.sessionId, busy: false });
         break;
@@ -1048,7 +1028,7 @@ class TerminalServer {
         try {
           if (filePath) {
             // Capture specific log file
-            logOutput = containerManager.execInContainer(
+            logOutput = await containerManager.execInContainerAsync(
               project.containerName,
               `tail -n ${lines} ${filePath.replace(/"/g, '\\"')}`,
               { timeout: 10000 },
@@ -1332,18 +1312,28 @@ class TerminalServer {
           }
 
           const { containerManager } = await import('./containerManager.js');
-          const status = containerManager.getContainerStatus(containerName);
-          if (!status) {
-            throw new Error(`Container '${containerName}' does not exist. Recreate it from System Health.`);
+          const inspect = await containerManager.inspectContainerStateAsync(containerName);
+          if (inspect.kind === 'timeout' || inspect.kind === 'error') {
+            throw new Error(`Docker could not reach container '${containerName}': ${inspect.error || inspect.kind}. Retry in a moment.`);
           }
-          if (status !== 'running') {
-            const started = containerManager.startContainer(containerName);
+          if (inspect.missing || !inspect.status) {
+            this.send(ws, {
+              type: 'output',
+              data: `\r\n\x1b[33mContainer '${containerName}' is missing. Recreating it from saved volumes…\x1b[0m\r\n`,
+            });
+            try {
+              await containerManager.recreateContainer(project);
+            } catch (err) {
+              throw new Error(`Container '${containerName}' is missing and could not be recreated: ${err.message}. Use Recreate Container in System Health.`);
+            }
+          } else if (inspect.status !== 'running') {
+            const started = await containerManager.startContainer(containerName);
             if (!started) {
-              throw new Error(`Failed to start container '${containerName}' (status: ${status})`);
+              throw new Error(`Failed to start container '${containerName}' (status: ${inspect.status})`);
             }
           }
 
-          workingDir = containerManager.getWorkDir(containerName) || '/workspace';
+          workingDir = await containerManager.getWorkDirAsync(containerName) || '/workspace';
         } else if (project?.folderPath) {
           workingDir = project.folderPath;
         }

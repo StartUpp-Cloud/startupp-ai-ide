@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { RefreshCw, Server, Box, AlertTriangle, Ship } from 'lucide-react';
 import { useProjects } from '../contexts/ProjectContext';
 
-const POLL_INTERVAL = 5000; // 5 seconds
+const POLL_INTERVAL = 15000;
 
 function formatUptime(seconds) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;

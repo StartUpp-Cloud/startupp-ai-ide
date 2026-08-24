@@ -68,7 +68,7 @@ class ShellProxy extends EventEmitter {
     return `${projectId}:${chatSessionId}`;
   }
 
-  ensureSession({ projectId, chatSessionId }) {
+  async ensureSession({ projectId, chatSessionId }) {
     const key = this.key(projectId, chatSessionId);
     const existing = this.sessions.get(key);
     if (existing?.ptyProcess && existing.status === 'active') return existing;
@@ -82,13 +82,14 @@ class ShellProxy extends EventEmitter {
     const runtimeEnv = resolveRuntimeEnvironment({ projectId, target: 'shell-proxy' }).env;
 
     if (project.containerName) {
-      const status = containerManager.getContainerStatus(project.containerName);
+      const status = await containerManager.getContainerStatusAsync(project.containerName);
       if (!status) throw new Error(`Container '${project.containerName}' does not exist`);
-      if (status !== 'running' && !containerManager.startContainer(project.containerName)) {
-        throw new Error(`Failed to start container '${project.containerName}'`);
+      if (status !== 'running') {
+        const started = await containerManager.startContainer(project.containerName);
+        if (!started) throw new Error(`Failed to start container '${project.containerName}'`);
       }
 
-      const workDir = containerManager.getWorkDir(project.containerName) || '/workspace';
+      const workDir = await containerManager.getWorkDirAsync(project.containerName) || '/workspace';
       const dockerArgs = interactiveDockerExecArgs({
         extraEnv: [
           '-e', 'NO_COLOR=1',
@@ -165,8 +166,8 @@ class ShellProxy extends EventEmitter {
     });
   }
 
-  send({ projectId, chatSessionId, input }) {
-    const session = this.ensureSession({ projectId, chatSessionId });
+  async send({ projectId, chatSessionId, input }) {
+    const session = await this.ensureSession({ projectId, chatSessionId });
     const data = normalizeInput(session, input);
     session.atPrompt = false;
     session.currentCommand = String(input || '').trim();
@@ -174,8 +175,8 @@ class ShellProxy extends EventEmitter {
     return { key: session.key, atPrompt: session.atPrompt };
   }
 
-  interrupt({ projectId, chatSessionId }) {
-    const session = this.ensureSession({ projectId, chatSessionId });
+  async interrupt({ projectId, chatSessionId }) {
+    const session = await this.ensureSession({ projectId, chatSessionId });
     session.ptyProcess.write('\x03');
   }
 }

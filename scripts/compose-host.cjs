@@ -10,6 +10,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const { seedHostAuthIntoIde, hostAuthMountArgs } = require('./hostAuthSeed.cjs');
+
 const ROOT = path.resolve(__dirname, '..');
 const WIN_PIPE = 'npipe:////./pipe/dockerDesktopLinuxEngine';
 const CONTAINER = 'sai-ide';
@@ -254,12 +256,14 @@ function runWindowsNative({
     '-e', 'SAI_IN_CONTAINER=1',
     '-e', `NODE_ENV=${dev ? 'development' : 'production'}`,
     '-e', 'PORT=55590',
+    '-e', 'HOST_AUTH_DIR=/root/host-auth',
     '-p', '55590:55590',
     '-v', 'sai-ide-data:/app/data',
     '-v', 'sai-ide-logs:/app/logs',
     '-v', 'sai-ide-home:/root',
     '-v', '/var/run/docker.sock:/var/run/docker.sock',
     '--add-host', 'host.docker.internal:host-gateway',
+    ...hostAuthMountArgs({ home: os.homedir(), appData: process.env.APPDATA || '' }),
   ];
   if (dev) runArgs.push('-p', '5173:5173');
   runArgs.push(image);
@@ -267,6 +271,7 @@ function runWindowsNative({
 
   process.stderr.write(`Starting ${CONTAINER} via docker.exe run…\n`);
   dockerSync(docker, runArgs, env);
+  seedHostAuthWhenReady({ docker, env });
 
   if (detach) {
     process.stderr.write(`${CONTAINER} is up. Images were not deleted.\n`);
@@ -274,6 +279,25 @@ function runWindowsNative({
   }
 
   followIdeLogs({ docker, env });
+}
+
+function seedHostAuthWhenReady({ docker, env, attempts = 30, delayMs = 2000 } = {}) {
+  let left = attempts;
+  const tick = () => {
+    const inspect = dockerRaw(docker, ['inspect', '-f', '{{.State.Running}}', CONTAINER], { env, encoding: 'utf8' });
+    if (inspect.status === 0 && String(inspect.stdout || '').trim() === 'true') {
+      try {
+        seedHostAuthIntoIde({ docker, env, container: CONTAINER });
+      } catch (error) {
+        process.stderr.write(`host auth seed skipped: ${error.message || error}\n`);
+      }
+      return;
+    }
+    left -= 1;
+    if (left <= 0) return;
+    setTimeout(tick, delayMs);
+  };
+  setTimeout(tick, 400);
 }
 
 function runCompose({
@@ -295,6 +319,7 @@ function runCompose({
   if (sync) {
     const result = dockerRaw(docker, args, { env: hostDockerEnv(), stdio: 'inherit' });
     if (result.status !== 0) process.exit(result.status ?? 1);
+    seedHostAuthWhenReady({ docker, env: hostDockerEnv() });
     return;
   }
   const child = spawn(docker, args, {
@@ -304,6 +329,7 @@ function runCompose({
     windowsHide: true,
     shell: false,
   });
+  seedHostAuthWhenReady({ docker, env: hostDockerEnv() });
   child.on('exit', (code) => process.exit(code ?? 1));
 }
 

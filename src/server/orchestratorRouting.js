@@ -25,7 +25,8 @@ function hasEnumeratedSteps(text) {
 export function shouldOrchestrateRequest({ mode, content, executeReviewedPlan = false }) {
   if (executeReviewedPlan) return true;                        // approved plan → execute as steps
   if (mode === 'plan' || mode === 'plan-review') return false; // planning never auto-executes
-  if (mode === 'autonomous') return true;                      // explicit opt-in
+  // Agent and legacy "autonomous" are the same high-effort execution mode.
+  // Orchestrate only when the request is genuinely multi-step.
 
   const text = String(content || '').trim();
   if (!text) return false;

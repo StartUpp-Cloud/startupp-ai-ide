@@ -27,6 +27,7 @@ const EditProject = () => {
   const [formData, setFormData] = useState({
     name: "",
     description: "",
+    client: "",
     rules: [""],
     selectedPresets: [],
     environments: [],
@@ -46,6 +47,7 @@ const EditProject = () => {
       setFormData({
         name: projectData.name,
         description: projectData.description,
+        client: projectData.client || "",
         rules: projectData.rules.length > 0 ? projectData.rules : [""],
         selectedPresets: projectData.selectedPresets || [],
         environments: projectData.environments || [],
@@ -116,6 +118,7 @@ const EditProject = () => {
       await updateProject(id, {
         name: formData.name.trim(),
         description: formData.description.trim(),
+        client: formData.client || "",
         rules: formData.rules.filter((r) => r.trim()),
         selectedPresets: formData.selectedPresets,
         environments: formData.environments,
@@ -209,6 +212,18 @@ const EditProject = () => {
           {errors.description && (
             <p className="text-error">{errors.description}</p>
           )}
+        </div>
+
+        <div>
+          <label htmlFor="client" className="label">Client</label>
+          <input
+            type="text"
+            id="client"
+            value={formData.client || ""}
+            onChange={(e) => handleInputChange("client", e.target.value)}
+            className="input"
+            placeholder="e.g. Openava — groups matching names together"
+          />
         </div>
 
         {/* Presets */}

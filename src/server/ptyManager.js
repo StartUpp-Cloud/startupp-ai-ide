@@ -154,19 +154,17 @@ function dockerHostExec(cmd, opts = {}) {
   return execDockerCmd(cmd, opts);
 }
 
-function ensureDtach(containerName) {
+async function ensureDtach(containerName) {
   if (_dtachChecked.has(containerName)) return;
 
   const dockerBin = findDockerBinary();
   try {
-    dockerHostExec(`${dockerBin} exec ${containerName} which dtach`, { timeout: 5000 });
-    // dtach exists
+    await dockerHostExec(`${dockerBin} exec ${containerName} which dtach`, { timeout: 5000 });
     _dtachChecked.add(containerName);
   } catch {
-    // dtach not found — install it
     console.log(`[ptyManager] Installing dtach in container ${containerName}...`);
     try {
-      dockerHostExec(
+      await dockerHostExec(
         `${dockerBin} exec -u root ${containerName} sh -c "apt-get update -qq && apt-get install -y -qq dtach"`,
         { timeout: 60000 },
       );
@@ -268,7 +266,9 @@ class PTYManager extends EventEmitter {
       } else {
         // Hidden agent sessions use dtach so background agent processes remain
         // isolated from each other and can survive transient client disconnects.
-        ensureDtach(containerName);
+        void ensureDtach(containerName).catch((err) => {
+          console.warn(`[ptyManager] dtach setup skipped: ${err?.message || err}`);
+        });
         const socketPath = `/tmp/${role}-${sessionId}.dtach`;
 
         // Clean any orphaned dtach socket before creating new session

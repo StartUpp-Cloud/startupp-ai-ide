@@ -2,24 +2,22 @@
  * Docker talks to the engine via the Unix socket (`/var/run/docker.sock`).
  * The IDE runs in Linux (the Compose service). There is no Windows docker.exe
  * route.
+ *
+ * All docker CLI goes through dockerBroker so a wedged engine cannot freeze
+ * the HTTP event loop.
  */
 
-import { execFileSync, execSync, exec as execCallback, spawn } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
+import {
+  dockerBroker,
+  dockerEnv,
+  runDockerCommand,
+  startDockerWatchdog,
+  refreshDockerAvailability,
+} from './dockerBroker.js';
 
-const execAsync = promisify(execCallback);
-
-let _available;
-let _cachedAt = 0;
-const ROUTE_TTL_MS = 8000;
-
-function dockerEnv(base = process.env) {
-  return {
-    ...base,
-    DOCKER_CLI_HINTS: 'false',
-    DOCKER_SCAN_SUGGEST: 'false',
-  };
-}
+export const CONTAINER_DEV_HOME = '/home/dev';
+export const CONTAINER_CLOUDFLARE_ENV = '/home/dev/.config/cloudflare.env';
 
 /**
  * Interactive `docker exec` for a real Linux PTY (node-pty inside the IDE container).
@@ -32,6 +30,7 @@ export function interactiveDockerExecArgs({
 } = {}) {
   return [
     'exec', '-it',
+    '-e', `HOME=${CONTAINER_DEV_HOME}`,
     '-e', 'TERM=xterm-256color',
     '-e', 'COLORTERM=truecolor',
     '-e', 'BROWSER=false',
@@ -42,27 +41,32 @@ export function interactiveDockerExecArgs({
   ];
 }
 
-function probeDocker() {
-  try {
-    execFileSync('docker', ['info'], {
-      stdio: 'pipe',
-      timeout: 15000,
-      env: dockerEnv(),
-    });
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Non-PTY agent `docker exec` (stdin script). Interactive terminals use
+ * `bash -l`, which sources ~/.bashrc including cloudflare.env. Agent runs
+ * non-interactive `bash -s`; ~/.bashrc returns immediately, so Wrangler
+ * never sees CLOUDFLARE_API_TOKEN and falls back to stale OAuth.
+ */
+export function agentDockerExecArgs({
+  workDir = '/workspace',
+  containerName,
+} = {}) {
+  return [
+    'exec', '-i',
+    '-e', `HOME=${CONTAINER_DEV_HOME}`,
+    '-w', workDir,
+    containerName,
+    'setsid', '-w', 'bash', '-s',
+  ];
 }
 
-export function isDockerAvailable(force = false) {
-  if (force || Date.now() - _cachedAt > ROUTE_TTL_MS) {
-    _available = undefined;
-  }
-  if (_available !== undefined) return _available;
-  _available = probeDocker();
-  _cachedAt = Date.now();
-  return _available;
+/** Source the same Cloudflare token file the user's login shell loads. */
+export function containerAgentShellPrelude() {
+  return `[ -f ${CONTAINER_CLOUDFLARE_ENV} ] && . ${CONTAINER_CLOUDFLARE_ENV}\n`;
+}
+
+export function isDockerAvailable(_force = false) {
+  return dockerBroker.isDockerAvailable();
 }
 
 /** Identity — build/copy helpers no longer rewrite host paths. */
@@ -70,42 +74,31 @@ export function dockerCliPath(input) {
   return input;
 }
 
-export function execDockerCmd(cmd, opts = {}) {
-  if (!isDockerAvailable()) {
+function assertDockerReachable() {
+  if (!dockerBroker.isDockerAvailable()) {
     throw new Error('Docker engine is not reachable. Start Docker on the host, then retry.');
   }
+}
 
-  return execSync(cmd, {
-    encoding: 'utf-8',
-    stdio: opts.stdio || 'pipe',
-    timeout: opts.timeout,
-    maxBuffer: opts.maxBuffer || 10 * 1024 * 1024,
-    env: dockerEnv(opts.env || process.env),
-    shell: true,
-    ...opts,
-  });
+/**
+ * Run a docker CLI command without blocking the HTTP event loop.
+ * Returns a Promise<string>. Callers must await.
+ */
+export function execDockerCmd(cmd, opts = {}) {
+  return execDockerCmdAsync(cmd, opts);
 }
 
 export async function execDockerCmdAsync(cmd, opts = {}) {
-  if (!isDockerAvailable()) {
-    throw new Error('Docker engine is not reachable. Start Docker on the host, then retry.');
-  }
-
-  const { stdout } = await execAsync(cmd, {
-    encoding: 'utf-8',
-    maxBuffer: opts.maxBuffer || 10 * 1024 * 1024,
+  assertDockerReachable();
+  const stdout = await runDockerCommand(cmd, {
     timeout: opts.timeout,
-    env: dockerEnv(opts.env || process.env),
-    shell: true,
-    ...opts,
+    env: opts.env,
   });
   return stdout;
 }
 
 export function getDockerSpawnSpec(dockerArgs = []) {
-  if (!isDockerAvailable()) {
-    throw new Error('Docker engine is not reachable. Start Docker on the host, then retry.');
-  }
+  assertDockerReachable();
   return { cmd: 'docker', args: dockerArgs, cwd: undefined, env: dockerEnv() };
 }
 
@@ -122,20 +115,25 @@ function spawnDocker(args, { timeout = 300000, stdin } = {}) {
     });
 
     let stderr = '';
+    let settled = false;
+    const settle = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
     const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`docker ${args[0]} timed out after ${timeout}ms`));
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      try { child.unref(); } catch { /* ignore */ }
+      settle(new Error(`docker ${args[0]} timed out after ${timeout}ms`));
     }, timeout);
 
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+    child.on('error', (err) => settle(err));
     child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve({ ok: true });
-      else reject(new Error(stderr.trim() || `docker ${args.join(' ')} exited ${code}`));
+      if (code === 0) settle(null, { ok: true });
+      else settle(new Error(stderr.trim() || `docker ${args.join(' ')} exited ${code}`));
     });
 
     if (stdin !== undefined) child.stdin.end(stdin);
@@ -160,37 +158,35 @@ export function pullDockerImage(ref, { timeout = 300000 } = {}) {
   return spawnDocker(['pull', ref], { timeout }).then(() => ({ pulled: true, image: ref }));
 }
 
-export function tagDockerImage(source, target) {
-  execFileSync('docker', ['tag', source, target], {
-    stdio: 'pipe',
-    env: dockerEnv(),
-  });
+export async function tagDockerImage(source, target) {
+  await runDockerCommand(`docker tag ${source} ${target}`, { timeout: 30000 });
   return { source, target };
 }
 
 export function getDockerRouteStatus() {
-  const dockerAvailable = isDockerAvailable();
+  const dockerAvailable = dockerBroker.isDockerAvailable();
   return {
     dockerAvailable,
     dockerRoute: dockerAvailable ? 'socket' : null,
     dockerOnWindows: false,
     inContainer: process.env.SAI_IN_CONTAINER === '1',
+    ...dockerBroker.snapshot(),
   };
 }
 
 export function clearDockerRouteCache() {
-  _available = undefined;
-  _cachedAt = 0;
+  dockerBroker.invalidate();
 }
 
-// Back-compat names used by older call sites / tests.
 export function getDockerRoute() {
-  return isDockerAvailable() ? 'socket' : null;
+  return dockerBroker.isDockerAvailable() ? 'socket' : null;
 }
 
 export function dockerCliEnv(base = process.env) {
   return dockerEnv(base);
 }
+
+export { startDockerWatchdog, refreshDockerAvailability };
 
 /** @deprecated Unused — kept so accidental imports do not crash. */
 export function findWindowsDockerExe() {

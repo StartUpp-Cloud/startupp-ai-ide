@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ChatMessage from './ChatMessage';
-import ChatInput, { buildRolePromptInstructions, normalizeRolePromptIds } from './ChatInput';
+import ChatInput from './ChatInput';
 import BranchBar from './BranchBar';
 import InternalConsole from './InternalConsole';
 import ContainerFileEditor from './ContainerFileEditor';
@@ -16,6 +16,12 @@ import {
   supportsEffortSelection,
   supportsModelSelection,
 } from '../utils/sessionAssistantOptions';
+import {
+  chronologicalMessages,
+  conversationEmptyState,
+  isAbortLikeError,
+  shouldRefetchWithoutSince,
+} from '../utils/chatHistoryLoad';
 
 const VISIBLE_SESSION_HEALTH_INTERVAL_MS = 5000;
 const NOT_BUSY_CLEAR_GRACE_MS = 12000;
@@ -64,7 +70,8 @@ function mergeChangedFiles(current = [], incoming = []) {
 }
 
 function getSessionMode(session, fallback = 'agent') {
-  return session?.mode || fallback || 'agent';
+  const mode = session?.mode || fallback || 'agent';
+  return mode === 'autonomous' ? 'agent' : mode;
 }
 
 function getSessionStatus(session, { expanded = false, active = false } = {}) {
@@ -938,7 +945,7 @@ function LiveChecksPanel({ checks }) {
   );
 }
 
-function WorkingIndicator({ wsRef, projectId, sessionId }) {
+function WorkingIndicator({ wsRef, projectId, sessionId, runStatus = null }) {
   const [elapsed, setElapsed] = useState(0);
   const [liveOutput, setLiveOutput] = useState('');
   const [showLive, setShowLive] = useState(true);
@@ -1030,6 +1037,11 @@ function WorkingIndicator({ wsRef, projectId, sessionId }) {
             Stop
           </button>
         </div>
+        {runStatus && runStatus.phase !== 'idle' && (
+          <div className="px-3 pb-2">
+            <AssistantRunStatusBar status={runStatus} fullWidth />
+          </div>
+        )}
 
         {showLive && displayLines.length > 0 && (
           <div ref={outputRef} className="px-3 pb-2 max-h-32 overflow-y-auto">
@@ -1189,7 +1201,7 @@ function PhaseGroup({ phase, index, defaultOpen }) {
   );
 }
 
-function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, projectId, sessionId }) {
+function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, projectId, sessionId, runStatus = null }) {
   const tasks = run?.tasks || [];
   const planItems = bucketItems(phaseProgress['_general']);
   const phases = [];
@@ -1226,6 +1238,11 @@ function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, project
           <Square size={9} /> Stop
         </button>
       </div>
+      {runStatus && runStatus.phase !== 'idle' && (
+        <div className="mb-1.5">
+          <AssistantRunStatusBar status={runStatus} fullWidth />
+        </div>
+      )}
       <div className="space-y-0.5">
         {phases.map((p, i) => (
           <PhaseGroup
@@ -1294,49 +1311,57 @@ function MainThreadHeader({ project, session }) {
   );
 }
 
-function ChildThreadHeader({ project, session, mainSession, onOpenMain, onCloseSession }) {
-  const status = getSessionStatus(session, { expanded: true, active: true });
-  const sessionName = session?.name || 'Thread';
-
+function AssistantRunStatusBar({ status, fullWidth = false }) {
+  if (!status || status.phase === 'idle') return null;
+  const percent = Math.max(0, Math.min(100, Number(status.percent) || 0));
+  const failed = status.phase === 'failed';
+  const done = status.phase === 'done';
+  const todoHint = status.todoTotal > 0 ? ` (${status.todoDone}/${status.todoTotal})` : '';
+  const title = `${percent}% · ${status.label || 'Working'}${todoHint}`;
   return (
-    <div className="border-b border-surface-700/45 bg-surface-950/95 px-3 py-2 shadow-[0_6px_18px_rgba(0,0,0,0.18)] sm:px-4">
-      <div className="flex min-w-0 items-center gap-3">
-        <button
-          type="button"
-          onClick={onOpenMain}
-          disabled={!mainSession?.id}
-          className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-full border border-surface-700 bg-surface-900 px-2.5 py-1.5 text-[11px] font-medium text-surface-300 transition-colors hover:border-primary-500/45 hover:bg-primary-500/10 hover:text-primary-200 disabled:cursor-not-allowed disabled:opacity-50"
-          title="Back to main thread"
-        >
-          <ArrowLeft size={13} />
-          <span className="hidden sm:inline">Back</span>
-        </button>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <MessageCircle size={14} className="flex-shrink-0 text-primary-400" />
-            <span className="truncate text-sm font-semibold text-surface-100">{sessionName}</span>
-            <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`} />
-            <span className={`hidden text-[10px] sm:inline ${status.text}`}>{status.label}</span>
-          </div>
-          <div className="truncate text-[11px] text-surface-500">
-            {project?.name || 'Project'} child session
-          </div>
+    <div
+      className={`flex items-center gap-2 min-w-0 ${fullWidth ? 'w-full max-w-none' : 'min-w-[148px] max-w-[240px]'}`}
+      title={title}
+      aria-label={title}
+    >
+      <div className={`${fullWidth ? 'flex-1' : 'min-w-[72px] flex-1'}`}>
+        <div className="h-1.5 overflow-hidden rounded-full bg-surface-700">
+          <div
+            className={`h-full rounded-full transition-all duration-300 ${
+              failed ? 'bg-red-500' : done ? 'bg-emerald-500' : 'bg-primary-500'
+            }`}
+            style={{ width: `${percent}%` }}
+          />
         </div>
-        <button
-          type="button"
-          onClick={onCloseSession}
-          className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-full border border-surface-700 bg-surface-900 px-2.5 py-1.5 text-[11px] font-medium text-surface-300 transition-colors hover:border-red-500/45 hover:bg-red-500/10 hover:text-red-200"
-          title="Close this child session"
-        >
-          <X size={13} />
-          <span className="hidden sm:inline">Close</span>
-        </button>
       </div>
+      <span className={`text-[10px] tabular-nums ${failed ? 'text-red-300' : 'text-surface-200'}`}>
+        {percent}%
+      </span>
+      {status.label ? (
+        <span className={`truncate text-[10px] text-surface-400 ${fullWidth ? 'max-w-[40%]' : 'max-w-[96px]'}`}>
+          {status.label}
+        </span>
+      ) : null}
     </div>
   );
 }
 
-function SessionAssistantControls({ session, defaultTool, disabled = false, projectId, onUpdate, channel = 'assistant', onChannelChange, project, onOpenProjectContext, mobileLayout = false }) {
+function SessionAssistantControls({
+  session,
+  defaultTool,
+  disabled = false,
+  projectId,
+  onUpdate,
+  channel = 'assistant',
+  onChannelChange,
+  project,
+  onOpenProjectContext,
+  mobileLayout = false,
+  isChildSession = false,
+  mainSession = null,
+  onOpenMain,
+  onCloseSession,
+}) {
   const effectiveTool = session?.tool || defaultTool || 'claude';
   const rawModel = session?.model || '';
   const rawEffort = session?.effort || '';
@@ -1346,6 +1371,7 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   // Also loads for OpenCode and Aider since they support ollama/ provider prefix
   const [ollamaModels, setOllamaModels] = useState(null);
   const [opencodeModels, setOpencodeModels] = useState(null);
+  const [codexModels, setCodexModels] = useState(null);
   useEffect(() => {
     if (effectiveTool !== 'ollama' && effectiveTool !== 'opencode' && effectiveTool !== 'aider') return;
     // Use project-specific endpoint (merges host + container) if projectId is available
@@ -1403,6 +1429,32 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       .catch(() => { setOpencodeModels(null); });
   }, [effectiveTool, projectId]);
 
+  useEffect(() => {
+    if (effectiveTool !== 'codex' || !projectId) {
+      setCodexModels(null);
+      return;
+    }
+
+    fetch(`/api/projects/${projectId}/codex-models`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const models = data?.models;
+        if (Array.isArray(models) && models.length > 0) {
+          setCodexModels([
+            { value: '', label: 'Tool default (gpt-5.6-sol)' },
+            ...models.map(m => ({
+              value: m.name,
+              label: m.label || m.name,
+              efforts: m.efforts || [],
+            })),
+          ]);
+        } else {
+          setCodexModels(null);
+        }
+      })
+      .catch(() => { setCodexModels(null); });
+  }, [effectiveTool, projectId]);
+
   // Only show the model/effort if it belongs to this tool's options — prevents
   // stale values from a previous tool leaking into the dropdown.
   // For Ollama: use dynamic models if available, otherwise static fallback
@@ -1413,6 +1465,9 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
     }
     if (effectiveTool === 'opencode' && opencodeModels) {
       return opencodeModels;
+    }
+    if (effectiveTool === 'codex' && codexModels) {
+      return codexModels;
     }
     if ((effectiveTool === 'opencode' || effectiveTool === 'aider') && ollamaModels && ollamaModels.length > 0) {
       // Insert Ollama models after "Tool default" option
@@ -1427,7 +1482,12 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
     }
     return getToolModelOptions(effectiveTool);
   })();
-  const toolEfforts = getToolEffortOptions(effectiveTool);
+  const selectedCodexModel = effectiveTool === 'codex'
+    ? (codexModels || getToolModelOptions('codex')).find((option) => option.value && option.value === rawModel)
+    : null;
+  const toolEfforts = (selectedCodexModel?.efforts?.length
+    ? [{ value: '', label: 'Default effort' }, ...selectedCodexModel.efforts.map((effort) => ({ value: effort, label: effort }))]
+    : getToolEffortOptions(effectiveTool));
   const selectedEffort = toolEfforts.some(o => o.value === rawEffort) ? rawEffort : '';
   const rawModelOptions = effectiveTool === 'ollama' && ollamaModels
     ? (ollamaModels.some(o => o.value === rawModel) ? ollamaModels : [...ollamaModels, ...(rawModel ? [{ value: rawModel, label: `${rawModel} (current)` }] : [])])
@@ -1440,7 +1500,30 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
   const modelSelectClass = mobileLayout ? 'max-w-[150px]' : 'max-w-[150px] sm:max-w-[220px]';
 
   return (
-    <div className={`flex flex-wrap items-center gap-2 px-2 py-2 border-b border-surface-700/40 bg-surface-850/40 ${mobileLayout ? '' : 'sm:px-3'}`}>
+    <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1 border-b border-surface-700/40 bg-surface-850/40 ${mobileLayout ? '' : 'sm:px-3'}`}>
+      {isChildSession && (
+        <>
+          <button
+            type="button"
+            onClick={onOpenMain}
+            disabled={!mainSession?.id}
+            className="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-surface-700 bg-surface-900 px-2 py-1 text-[11px] font-medium text-surface-300 transition-colors hover:border-primary-500/45 hover:bg-primary-500/10 hover:text-primary-200 disabled:cursor-not-allowed disabled:opacity-50"
+            title="Back to main thread"
+          >
+            <ArrowLeft size={12} />
+            <span className="hidden sm:inline">Back</span>
+          </button>
+          <button
+            type="button"
+            onClick={onCloseSession}
+            className="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-surface-700 bg-surface-900 px-2 py-1 text-[11px] font-medium text-surface-300 transition-colors hover:border-red-500/45 hover:bg-red-500/10 hover:text-red-200"
+            title="Close this child session"
+          >
+            <X size={12} />
+            <span className="hidden sm:inline">Close</span>
+          </button>
+        </>
+      )}
       <div className={`flex ${channelTabsClass} items-center gap-1 overflow-x-auto rounded-md border border-surface-700 bg-surface-900/60 p-0.5`}>
         <button
           onClick={() => onChannelChange?.('assistant')}
@@ -1493,13 +1576,13 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
 
       {channel === 'assistant' && (
         <>
-      <div className="flex items-center gap-1.5 min-w-0">
-        <span className="text-[10px] uppercase tracking-wide text-surface-500">Mode</span>
+      <div className="flex items-center gap-1 min-w-0">
+        <span className="text-[10px] uppercase tracking-wide text-surface-500 sm:sr-only">Mode</span>
         <ModeToggle mode={sessionMode} onChange={(nextMode) => onUpdate({ mode: nextMode })} compact disabled={disabled} />
       </div>
 
-      <div className="flex items-center gap-1.5 min-w-0">
-        <span className="text-[10px] uppercase tracking-wide text-surface-500">Assistant</span>
+      <div className="flex items-center gap-1 min-w-0">
+        <span className="text-[10px] uppercase tracking-wide text-surface-500 sm:sr-only">Assistant</span>
         <select
           value={effectiveTool}
           disabled={disabled}
@@ -1515,8 +1598,8 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       </div>
 
       {supportsModelSelection(effectiveTool) && (
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-[10px] uppercase tracking-wide text-surface-500">Model</span>
+        <div className="flex items-center gap-1 min-w-0">
+          <span className="text-[10px] uppercase tracking-wide text-surface-500 sm:sr-only">Model</span>
           <select
             value={selectedModel}
             disabled={disabled}
@@ -1538,8 +1621,8 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
       )}
 
       {supportsEffortSelection(effectiveTool) && (
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-[10px] uppercase tracking-wide text-surface-500">Effort</span>
+        <div className="flex items-center gap-1 min-w-0">
+          <span className="text-[10px] uppercase tracking-wide text-surface-500 sm:sr-only">Effort</span>
           <select
             value={selectedEffort}
             disabled={disabled}
@@ -1566,12 +1649,12 @@ function SessionAssistantControls({ session, defaultTool, disabled = false, proj
           onChange={(e) => onUpdate({ validateVisually: e.target.checked })}
           className="w-3.5 h-3.5 accent-primary-500 disabled:opacity-50"
         />
-        <span className="text-[11px] text-surface-300">Validate visually</span>
+        <span className="text-[11px] text-surface-300 hidden lg:inline">Validate visually</span>
       </label>
         </>
       )}
 
-      <div className={`${mobileLayout ? 'hidden' : 'hidden sm:block sm:ml-auto'} min-w-0 text-[10px] text-surface-500 truncate`}>
+      <div className={`${mobileLayout ? 'hidden' : 'hidden lg:block lg:ml-auto'} min-w-0 text-[10px] text-surface-500 truncate`}>
         {channel === 'salesforce'
           ? 'Salesforce workbench: schema, SOQL, flows, debug, REST, data'
           : channel === 'shell'
@@ -1621,11 +1704,15 @@ function ChatSessionContent({
   mainThreadRailActive = false,
   onContractMainThread,
   mobileLayout = false,
+  historyReloadNonce = 0,
 }) {
   const fileEditor = useFileEditor();
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
+  const [runStatus, setRunStatus] = useState(null);
+  const [codexAccountStatus, setCodexAccountStatus] = useState(null);
+  const [codexAccountLoading, setCodexAccountLoading] = useState(false);
   const [chatChannel, setChatChannel] = useState('assistant');
   const [showProjectContext, setShowProjectContext] = useState(false);
   const [queuedShellCommand, setQueuedShellCommand] = useState(null);
@@ -1641,6 +1728,8 @@ function ChatSessionContent({
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
   const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  const [localReloadNonce, setLocalReloadNonce] = useState(0);
 
   const messagesEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
@@ -1752,11 +1841,10 @@ function ChatSessionContent({
     });
   }, [isVisible]);
 
-  const applyPersistedOrchestratorRuns = useCallback((runs = []) => {
+  const applyPersistedOrchestratorRuns = useCallback((runs = [], { live } = {}) => {
     const activeRun = runs.find(run => run && !['completed', 'failed', 'blocked', 'cancelled'].includes(run.status));
-    if (activeRun) {
+    if (activeRun && live !== false) {
       setOrchestratorRun(activeRun);
-      setAgentBusy(true);
       setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
       return;
     }
@@ -1774,6 +1862,9 @@ function ChatSessionContent({
         if (err?.name !== 'AbortError') console.warn('[chat] Failed to rehydrate orchestrator runs:', err.message);
       });
   }, [projectId, sessionId, applyPersistedOrchestratorRuns]);
+
+  const rehydrateOrchestratorRunsRef = useRef(rehydrateOrchestratorRuns);
+  rehydrateOrchestratorRunsRef.current = rehydrateOrchestratorRuns;
 
   const loadOlderMessages = useCallback(async () => {
     if (!projectId || !sessionId || !isVisible || searchResults) return;
@@ -1905,10 +1996,9 @@ function ChatSessionContent({
     historyCursorRef.current = null;
     suppressNextAutoScrollRef.current = false;
     isNearBottomRef.current = true;
-    setMessages([]);
-    setLoading(true);
     setSearchResults(null);
     setHasMoreHistory(false);
+    setLoadError(null);
     setShowJumpBottom(false);
     setShowJumpTop(false);
   }, [projectId, sessionId]);
@@ -1926,8 +2016,12 @@ function ChatSessionContent({
     onUnreadChange?.(projectId, sessionId, false);
   }, [projectId, sessionId, onSessionUpdate, onUnreadChange]);
 
+  const markCurrentSessionReadRef = useRef(markCurrentSessionRead);
+  markCurrentSessionReadRef.current = markCurrentSessionRead;
+
   const clearBusyState = useCallback(() => {
     setAgentBusy(false);
+    setRunStatus(null);
     setStreamingMessage(null);
     streamingChunksRef.current = '';
     setLiveProgressEntries([]);
@@ -2010,61 +2104,101 @@ function ChatSessionContent({
     }
   }, [clearBusyState, markMessageForTyping, updateMessages]);
 
-  // Load messages only when visible. Hidden pinned tabs should not block the
-  // active session by reading chat files or recovering stale streams.
+  // Load messages only when visible. Hidden tabs stay mounted; do not treat
+  // abort/errors as an empty conversation, and do not skip a retry after one.
   useEffect(() => {
-    if (!projectId || !sessionId || !isVisible || messagesLoadedRef.current) return;
+    if (!projectId || !sessionId || !isVisible) return;
 
-    // Reset scroll state for fresh load
     isInitialLoadRef.current = true;
     prevMessageCountRef.current = 0;
     historySinceRef.current = chatHistorySinceIso();
     historyCursorRef.current = null;
-    setHasMoreHistory(false);
 
     const controller = new AbortController();
     let cancelled = false;
     setLoading(true);
-    const params = new URLSearchParams({
-      limit: String(CHAT_HISTORY_PAGE_SIZE),
-      sessionId,
-      since: historySinceRef.current,
-    });
-    fetch(`/api/projects/${projectId}/chat?${params.toString()}`, { signal: controller.signal })
-      .then(r => r.json())
-      .then(data => {
+    setLoadError(null);
+
+    const applyMessages = (msgs, { hasMore, nextBefore, markRead = true } = {}) => {
+      const next = Array.isArray(msgs) ? msgs : [];
+      knownIdsRef.current = new Set(next.map(m => m.id).filter(Boolean));
+      historyCursorRef.current = nextBefore || next[0]?.id || null;
+      setHasMoreHistory(Boolean(hasMore));
+      updateMessages(next);
+      messagesLoadedRef.current = next.length > 0;
+      if (markRead) markCurrentSessionReadRef.current?.();
+      rehydrateOrchestratorRunsRef.current?.(controller.signal);
+      return next;
+    };
+
+    const fetchPage = async ({ before } = {}) => {
+      const params = new URLSearchParams({
+        limit: String(CHAT_HISTORY_PAGE_SIZE),
+        sessionId,
+      });
+      if (before) params.set('before', before);
+      const response = await fetch(`/api/projects/${projectId}/chat?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`Failed to load conversation (${response.status})`);
+      return response.json();
+    };
+
+    (async () => {
+      try {
+        let data = await fetchPage();
         if (cancelled) return;
-        const msgs = (data.messages || []).reverse();
-        knownIdsRef.current = new Set(msgs.map(m => m.id));
-        historyCursorRef.current = data.nextBefore || msgs[0]?.id || null;
-        setHasMoreHistory(Boolean(data.hasMore));
-        updateMessages(msgs);
-        messagesLoadedRef.current = true;
-        // Mark as read
-        markCurrentSessionRead();
-        rehydrateOrchestratorRuns(controller.signal);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          updateMessages([]);
-          setHasMoreHistory(false);
+        let msgs = chronologicalMessages(data);
+        let hasMore = Boolean(data.hasMore);
+        let nextBefore = data.nextBefore || msgs[0]?.id || null;
+        const expected = Math.max(Number(data.total) || 0, Number(session?.messageCount) || 0);
+        let visible = msgs.filter((message) => message.role !== 'progress');
+
+        // Latest page can be almost all transient progress. Keep walking older
+        // pages until there is a real transcript (or history runs out).
+        while (visible.length < 20 && hasMore && nextBefore && !cancelled) {
+          data = await fetchPage({ before: nextBefore });
+          if (cancelled) return;
+          const older = chronologicalMessages(data);
+          if (older.length === 0) break;
+          const seen = new Set(msgs.map((message) => message.id).filter(Boolean));
+          msgs = [...older.filter((message) => message.id && !seen.has(message.id)), ...msgs];
+          visible = msgs.filter((message) => message.role !== 'progress');
+          hasMore = Boolean(data.hasMore);
+          nextBefore = data.nextBefore || older[0]?.id || null;
         }
-      })
-      .finally(() => { if (!cancelled) setLoading(false); });
+
+        if (cancelled) return;
+        applyMessages(msgs, { hasMore, nextBefore });
+        if (shouldRefetchWithoutSince({
+          messages: visible,
+          total: expected,
+          sessionMessageCount: expected,
+        })) {
+          setLoadError('Conversation failed to load');
+        }
+      } catch (error) {
+        if (cancelled || isAbortLikeError(error)) return;
+        messagesLoadedRef.current = false;
+        setLoadError(error.message || 'Failed to load conversation');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
 
     return () => {
       cancelled = true;
       controller.abort();
     };
-  }, [projectId, sessionId, isVisible, markCurrentSessionRead, rehydrateOrchestratorRuns, updateMessages]);
+  }, [projectId, sessionId, isVisible, historyReloadNonce, localReloadNonce, updateMessages]);
 
   useEffect(() => {
     if (isVisible) markCurrentSessionRead();
   }, [isVisible, markCurrentSessionRead]);
 
-  // Attach to chat session for WebSocket events
+  // Attach even when hidden so project switches do not drop live progress.
   useEffect(() => {
-    if (!projectId || !sessionId || !isVisible || !wsRef?.current) return;
+    if (!projectId || !sessionId || !wsRef?.current) return;
 
     let cancelled = false;
     let retryCount = 0;
@@ -2077,6 +2211,7 @@ function ChatSessionContent({
           type: 'attach-chat-session',
           chatSessionId: sessionId,
           projectId,
+          recover: false,
         }));
         rehydrateOrchestratorRuns();
         return true;
@@ -2101,8 +2236,15 @@ function ChatSessionContent({
     return () => {
       cancelled = true;
       wsRef?.current?.removeEventListener('open', handleOpen);
+      if (wsRef?.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'detach-chat-session',
+          chatSessionId: sessionId,
+          projectId,
+        }));
+      }
     };
-  }, [projectId, sessionId, isVisible, wsRef, wsConnectionVersion, rehydrateOrchestratorRuns]);
+  }, [projectId, sessionId, wsRef, wsConnectionVersion, rehydrateOrchestratorRuns]);
 
   const requestSessionHealth = useCallback((reason = 'visible', recover = false) => {
     if (!projectId || !sessionId || !isVisible) return false;
@@ -2124,7 +2266,7 @@ function ChatSessionContent({
 
   useEffect(() => {
     if (!isVisible) return undefined;
-    requestSessionHealth('visible', true);
+    requestSessionHealth('visible', false);
 
     const timer = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
@@ -2145,9 +2287,9 @@ function ChatSessionContent({
     };
   }, [isVisible, requestSessionHealth, projectSwitchKey, wsConnectionVersion]);
 
-  // Handle WebSocket messages for THIS session
+  // Keep listening while hidden so switching projects does not freeze progress.
   useEffect(() => {
-    if (!wsRef?.current || !sessionId || !isVisible) return;
+    if (!wsRef?.current || !sessionId) return;
 
     const handleMessage = (event) => {
       let msg;
@@ -2169,6 +2311,7 @@ function ChatSessionContent({
               markMessageForTyping(msg.message);
               streamingChunksRef.current = '';
               setAgentBusy(false);
+              setRunStatus(null);
               setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
             } else if (msg.message.role === 'user') {
               setLiveProgressEntries([]);
@@ -2200,7 +2343,7 @@ function ChatSessionContent({
         case 'chat-session-health':
           if (msg.projectId === projectId && (msg.sessionId === sessionId || msg.chatSessionId === sessionId)) {
             mergeServerMessages(msg.messages || [], { authoritativeBusy: msg.busy === true });
-            if (Array.isArray(msg.runs)) applyPersistedOrchestratorRuns(msg.runs);
+            if (Array.isArray(msg.runs)) applyPersistedOrchestratorRuns(msg.runs, { live: msg.busy === true });
           }
           break;
 
@@ -2235,6 +2378,7 @@ function ChatSessionContent({
               setLiveChangedFiles([]);
               setLiveChecks([]);
               setPhaseProgress({});
+              setRunStatus(null);
               markMessageForTyping(msg.message);
             }
             updateMessages(prev => [
@@ -2313,6 +2457,18 @@ function ChatSessionContent({
           }
           break;
 
+        case 'assistant-run-status':
+          if (msg.projectId === projectId && (!msg.sessionId || msg.sessionId === sessionId) && msg.status) {
+            setRunStatus(msg.status);
+          }
+          break;
+
+        case 'codex-account-status':
+          if (msg.projectId === projectId && msg.status) {
+            setCodexAccountStatus(msg.status);
+          }
+          break;
+
         case 'job-progress':
           if (msg.progress) {
             if (Array.isArray(msg.progress.changedFiles)) {
@@ -2359,6 +2515,8 @@ function ChatSessionContent({
               setLiveChangedFiles([]);
               setLiveChecks([]);
               setPhaseProgress({});
+              setRunStatus(null);
+              setOrchestratorRun(null);
               setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
             }
           }
@@ -2471,15 +2629,25 @@ function ChatSessionContent({
   const sessionModel = session?.model || '';
   const sessionEffort = session?.effort || '';
   const sessionMode = getSessionMode(session, mode);
-  const selectedRolePromptIds = useMemo(
-    () => normalizeRolePromptIds(session?.activeRolePromptIds),
-    [session?.activeRolePromptIds],
-  );
-  const rolePromptInstructions = useMemo(
-    () => buildRolePromptInstructions(selectedRolePromptIds),
-    [selectedRolePromptIds],
-  );
   const settingsDisabled = agentBusy || Boolean(streamingMessage) || recoveryStatus.active;
+
+  const loadCodexAccountStatus = useCallback((refresh = false) => {
+    if (effectiveTool !== 'codex' || !projectId) return;
+    setCodexAccountLoading(true);
+    fetch(`/api/projects/${projectId}/codex-account-status${refresh ? '?refresh=1' : ''}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (data) setCodexAccountStatus(data); })
+      .catch(() => {})
+      .finally(() => setCodexAccountLoading(false));
+  }, [effectiveTool, projectId]);
+
+  useEffect(() => {
+    if (effectiveTool !== 'codex' || !projectId) {
+      setCodexAccountStatus(null);
+      return;
+    }
+    loadCodexAccountStatus(false);
+  }, [effectiveTool, projectId, loadCodexAccountStatus]);
 
   const handleStartProjectContextSession = useCallback((contextPrompt) => {
     if (!contextPrompt || !onMainThreadSend) return;
@@ -2488,10 +2656,10 @@ function ChatSessionContent({
       tool: effectiveTool,
       model: sessionModel || null,
       effort: sessionEffort || null,
-      activeRolePromptIds: selectedRolePromptIds,
+      activeRolePromptIds: [],
     });
     setShowProjectContext(false);
-  }, [onMainThreadSend, sessionMode, effectiveTool, sessionModel, sessionEffort, selectedRolePromptIds]);
+  }, [onMainThreadSend, sessionMode, effectiveTool, sessionModel, sessionEffort]);
 
   // Send message handler
   const handleSend = useCallback((content, attachments = [], options = {}) => {
@@ -2506,7 +2674,7 @@ function ChatSessionContent({
         tool: effectiveTool,
         model: sessionModel || null,
         effort: sessionEffort || null,
-        activeRolePromptIds: selectedRolePromptIds,
+        activeRolePromptIds: [],
       });
       return;
     }
@@ -2575,8 +2743,7 @@ function ChatSessionContent({
           sessionId,
           filePath: filePath || undefined,
           instruction,
-          activeRolePromptIds: selectedRolePromptIds,
-          rolePromptInstructions,
+          activeRolePromptIds: [],
         }));
       }
       return;
@@ -2594,7 +2761,7 @@ function ChatSessionContent({
       sessionId,
       role: 'user',
       content: displayContent,
-      metadata: { mode: sessionMode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null, activeRolePromptIds: selectedRolePromptIds, clientMessageId },
+      metadata: { mode: sessionMode, attachments, tool: effectiveTool, model: sessionModel || null, effort: sessionEffort || null, clientMessageId },
       createdAt: new Date().toISOString(),
     };
     updateMessages(prev => [...prev, optimistic]);
@@ -2620,8 +2787,7 @@ function ChatSessionContent({
         model: sessionModel || null,
         effort: sessionEffort || null,
         validateVisually: !!session?.validateVisually,
-        activeRolePromptIds: selectedRolePromptIds,
-        rolePromptInstructions,
+        activeRolePromptIds: [],
       }));
     } else {
       setAgentBusy(false);
@@ -2633,7 +2799,7 @@ function ChatSessionContent({
         createdAt: new Date().toISOString(),
       }]);
     }
-  }, [projectId, sessionId, session?.isMainThread, sessionMode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, selectedRolePromptIds, rolePromptInstructions, updateMessages, onMainThreadSend]);
+  }, [projectId, sessionId, session?.isMainThread, sessionMode, wsRef, effectiveTool, sessionModel, sessionEffort, chatChannel, updateMessages, onMainThreadSend]);
 
   useEffect(() => {
     if (!isVisible || !initialMessage) return;
@@ -2713,14 +2879,13 @@ function ChatSessionContent({
         tool: effectiveTool,
         model: sessionModel || null,
         effort: sessionEffort || null,
-        activeRolePromptIds: selectedRolePromptIds,
-        rolePromptInstructions,
+        activeRolePromptIds: [],
         targetMessageId: targetMessage.id,
         review: targetMessage?.metadata?.review || null,
         executeReviewedPlan: !!options.executeReviewedPlan,
       }));
     }
-  }, [messages, projectId, sessionId, wsRef, sessionMode, effectiveTool, sessionModel, sessionEffort, selectedRolePromptIds, rolePromptInstructions]);
+  }, [messages, projectId, sessionId, wsRef, sessionMode, effectiveTool, sessionModel, sessionEffort]);
 
   // Prepare display messages
   const sortedMessages = useMemo(() =>
@@ -2730,7 +2895,7 @@ function ChatSessionContent({
 
   useEffect(() => {
     const lastMessage = sortedMessages[sortedMessages.length - 1] || null;
-    const working = agentBusy || Boolean(streamingMessage) || recoveryStatus.active || Boolean(orchestratorRun);
+    const working = agentBusy || Boolean(streamingMessage) || recoveryStatus.active;
     const awaitingFeedback = !working && (lastMessage?.role === 'agent' || lastMessage?.role === 'error');
     onSessionUpdate?.(sessionId, {
       busy: working,
@@ -2739,7 +2904,7 @@ function ChatSessionContent({
       lastMessageRole: lastMessage?.role || null,
       messageCount: Math.max(session?.messageCount || 0, sortedMessages.filter(message => message.role !== 'progress').length),
     });
-  }, [agentBusy, streamingMessage, recoveryStatus.active, orchestratorRun, sortedMessages, sessionId, session?.messageCount, onSessionUpdate]);
+  }, [agentBusy, streamingMessage, recoveryStatus.active, sortedMessages, sessionId, session?.messageCount, onSessionUpdate]);
 
   const progressTranscriptEntries = useMemo(() => {
     if (searchResults) return [];
@@ -2798,6 +2963,14 @@ function ChatSessionContent({
 
   const displayMessages = searchResults || filteredMessages;
   const showMainThreadSessionBubbles = session?.isMainThread && !searchResults && mainThreadSessionBubbles;
+  const emptyState = conversationEmptyState({
+    loading,
+    error: loadError,
+    messageCount: session?.messageCount,
+    loadedCount: displayMessages.length,
+    isMainThread: session?.isMainThread,
+    searching: Boolean(searchResults),
+  });
   const renderedChatChannel = contracted ? 'assistant' : chatChannel;
   const showOnlySessions = contracted && session?.isMainThread;
 
@@ -2844,10 +3017,6 @@ function ChatSessionContent({
         </div>
       )}
 
-      {!session?.isMainThread && (
-        <ChildThreadHeader project={project} session={session} mainSession={mainSession} onOpenMain={onOpenMain} onCloseSession={onCloseSession} />
-      )}
-
       {!contracted && !(fileEditor?.editor && isVisible) && (
         <SessionAssistantControls
           session={session}
@@ -2860,6 +3029,10 @@ function ChatSessionContent({
           project={project}
           onOpenProjectContext={session?.isMainThread ? () => setShowProjectContext(true) : null}
           mobileLayout={mobileLayout}
+          isChildSession={!session?.isMainThread}
+          mainSession={mainSession}
+          onOpenMain={onOpenMain}
+          onCloseSession={onCloseSession}
         />
       )}
 
@@ -2897,13 +3070,29 @@ function ChatSessionContent({
           </div>
         )}
 
-        {showOnlySessions ? null : loading ? (
+        {showOnlySessions ? null : emptyState === 'loading' ? (
           <div className="flex items-center justify-center h-full">
             <Loader size={22} className="animate-spin text-surface-600" />
           </div>
         ) : displayMessages.length === 0 ? (
-          <div className={`${showMainThreadSessionBubbles ? 'px-3 py-6 text-center' : 'flex h-full items-center justify-center'} text-surface-500 text-sm`}>
-            {searchResults ? 'No results found' : (session?.isMainThread ? 'Message the main thread to coordinate this project...' : 'Start a conversation...')}
+          <div className={`${showMainThreadSessionBubbles ? 'px-3 py-6 text-center' : 'flex h-full flex-col items-center justify-center gap-2'} text-surface-500 text-sm`}>
+            {emptyState === 'no-results'
+              ? 'No results found'
+              : emptyState === 'reload' ? (
+                <>
+                  <span>{loadError || 'This conversation has messages that did not load.'}</span>
+                  <button
+                    type="button"
+                    onClick={() => setLocalReloadNonce((n) => n + 1)}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-surface-700 px-3 py-1 text-[11px] text-surface-300 hover:border-surface-500 hover:text-surface-100"
+                  >
+                    <RefreshCw size={11} />
+                    Reload conversation
+                  </button>
+                </>
+              ) : emptyState === 'main-empty'
+                ? 'Message the main thread to coordinate this project...'
+                : 'Start a conversation...'}
           </div>
         ) : (
           displayMessages.map(msg => (
@@ -2930,6 +3119,7 @@ function ChatSessionContent({
             wsRef={wsRef}
             projectId={projectId}
             sessionId={sessionId}
+            runStatus={runStatus}
           />
         )}
 
@@ -2978,7 +3168,7 @@ function ChatSessionContent({
         )}
 
         {!showOnlySessions && (agentBusy || recoveryStatus.active || (streamingMessage && !streamingMessage.shell)) && (
-          !orchestratorRun && !hasPhaseProgress && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} />
+          !orchestratorRun && !hasPhaseProgress && <WorkingIndicator wsRef={wsRef} projectId={projectId} sessionId={sessionId} runStatus={runStatus} />
         )}
 
         <div ref={messagesEndRef} />
@@ -3008,17 +3198,6 @@ function ChatSessionContent({
         </>
       )}
 
-      {isVisible && containerName && !contracted && (
-        <BranchBar
-          containerName={containerName}
-          session={session}
-          projectId={projectId}
-          onBranchChange={(branch) => onUpdateSessionConfig?.(sessionId, { branch })}
-          onSessionUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
-          containerRepos={containerRepos}
-        />
-      )}
-
       <div className={contracted ? 'hidden' : ''}>
         <ChatInput
           mode={sessionMode}
@@ -3031,9 +3210,6 @@ function ChatSessionContent({
           busy={agentBusy}
           isVisible={isVisible && !contracted}
           focusSignal={focusInputSignal}
-          selectedRolePromptIds={selectedRolePromptIds}
-          onSelectedRolePromptIdsChange={(nextIds) => onUpdateSessionConfig?.(sessionId, { activeRolePromptIds: nextIds })}
-          hideRolePrompts={contracted}
           placeholderOverride={session?.isMainThread && renderedChatChannel === 'assistant'
             ? 'Write in Main, then choose where to send... (Ctrl+Enter starts a new session)'
             : null}
@@ -3046,6 +3222,21 @@ function ChatSessionContent({
           onSecondarySend={session?.isMainThread && renderedChatChannel === 'assistant'
             ? (content, attachments) => handleSend(content, attachments, { channel: 'assistant', directMain: true })
             : null}
+          codexAccountStatus={codexAccountStatus}
+          codexAccountLoading={codexAccountLoading}
+          onRefreshCodexAccount={() => loadCodexAccountStatus(true)}
+          showCodexAccountStatus={effectiveTool === 'codex' && renderedChatChannel === 'assistant'}
+          footerActionsEnd={isVisible && containerName && renderedChatChannel !== 'shell' ? (
+            <BranchBar
+              variant="actions"
+              containerName={containerName}
+              session={session}
+              projectId={projectId}
+              onBranchChange={(branch) => onUpdateSessionConfig?.(sessionId, { branch })}
+              onSessionUpdate={(updates) => onUpdateSessionConfig?.(sessionId, updates)}
+              containerRepos={containerRepos}
+            />
+          ) : null}
         />
       </div>
         </>
@@ -3071,9 +3262,11 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   const [pendingDirectMainMessages, setPendingDirectMainMessages] = useState({});
   const [mainThreadExpanded, setMainThreadExpanded] = useState(false);
   const [sessionInputFocusSignal, setSessionInputFocusSignal] = useState(0);
+  const [historyReloadNonce, setHistoryReloadNonce] = useState(0);
   const sessionListRef = useRef(null);
   const sessionsRef = useRef([]);
   const openTabsRef = useRef([]);
+  const activeSessionIdRef = useRef(null);
   const [projectSwitchKey, setProjectSwitchKey] = useState(0);
 
   useEffect(() => {
@@ -3083,6 +3276,10 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   useEffect(() => {
     openTabsRef.current = openTabs;
   }, [openTabs]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   useEffect(() => {
     if (projectId) setProjectSwitchKey(k => k + 1);
@@ -3118,9 +3315,9 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   useEffect(() => {
     if (isActive && activeSessionId) {
       const activeSession = sessions.find(s => s.id === activeSessionId);
-      onActiveSessionChange?.(activeSessionId, activeSession?.branch || null);
+      onActiveSessionChange?.(activeSessionId, activeSession?.branch || null, activeSession?.name || null);
     } else if (isActive) {
-      onActiveSessionChange?.(null, null);
+      onActiveSessionChange?.(null, null, null);
     }
   }, [isActive, activeSessionId, sessions, onActiveSessionChange]);
 
@@ -3278,9 +3475,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
       branch: settings.branch !== undefined ? settings.branch : (mainSession?.branch || null),
       repoPath: settings.repoPath !== undefined ? settings.repoPath : (mainSession?.repoPath || null),
       worktreePath: settings.worktreePath !== undefined ? settings.worktreePath : (mainSession?.worktreePath || null),
-      activeRolePromptIds: settings.activeRolePromptIds !== undefined
-        ? normalizeRolePromptIds(settings.activeRolePromptIds)
-        : (mainSession?.activeRolePromptIds || []),
+      activeRolePromptIds: [],
     };
     const optimisticSession = {
       id: tempId,
@@ -3412,6 +3607,11 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
   }, [projectId, markSessionRead, getTabsWithMain]);
 
   const openSession = useCallback((sessionId) => {
+    if (sessionId && sessionId === activeSessionIdRef.current) {
+      setHistoryReloadNonce((n) => n + 1);
+      markSessionRead(sessionId);
+      return;
+    }
     const nextTabs = getTabsWithMain(sessionId);
     const nextOpen = new Set(nextTabs);
     const previouslyOpen = openTabsRef.current.filter(id => !nextOpen.has(id));
@@ -4176,6 +4376,7 @@ export default function ChatPanel({ projectId, wsRef, wsConnectionVersion = 0, m
                         mainThreadRailActive={isMainTab && Boolean(activeChildSessionId)}
                         onContractMainThread={() => setMainThreadExpanded(false)}
                         mobileLayout={mobileLayout}
+                        historyReloadNonce={historyReloadNonce}
                       />
                     )}
                   </div>

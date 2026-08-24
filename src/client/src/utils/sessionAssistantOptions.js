@@ -132,14 +132,14 @@ const MODEL_OPTIONS = {
     { value: 'gpt-5', label: 'gpt-5 (paid)' },
   ],
   codex: [
-    { value: '', label: 'Tool default' },
-    { value: 'gpt-5.4', label: 'gpt-5.4' },
-    { value: 'gpt-5.3-codex', label: 'gpt-5.3-codex' },
-    { value: 'gpt-5.2-codex', label: 'gpt-5.2-codex' },
-    { value: 'gpt-5.2', label: 'gpt-5.2' },
-    { value: 'gpt-5-mini', label: 'gpt-5-mini' },
-    { value: 'o3', label: 'o3' },
-    { value: 'o4-mini', label: 'o4-mini' },
+    { value: '', label: 'Tool default (gpt-5.6-sol)' },
+    { value: 'gpt-5.6-sol', label: 'GPT-5.6-Sol' },
+    { value: 'gpt-5.6-terra', label: 'GPT-5.6-Terra' },
+    { value: 'gpt-5.6-luna', label: 'GPT-5.6-Luna' },
+    { value: 'gpt-5.5', label: 'GPT-5.5' },
+    { value: 'gpt-5.4', label: 'GPT-5.4' },
+    { value: 'gpt-5.4-mini', label: 'GPT-5.4-Mini' },
+    { value: 'gpt-5.3-codex-spark', label: 'GPT-5.3-Codex-Spark' },
   ],
   copilot: [
     { value: '', label: 'Tool default' },
@@ -186,11 +186,13 @@ const EFFORT_OPTIONS = {
     { value: 'xhigh', label: 'xhigh' },
   ],
   codex: [
-    { value: '', label: 'Default effort (xhigh)' },
+    { value: '', label: 'Default effort' },
     { value: 'low', label: 'low' },
     { value: 'medium', label: 'medium' },
     { value: 'high', label: 'high' },
     { value: 'xhigh', label: 'xhigh' },
+    { value: 'max', label: 'max' },
+    { value: 'ultra', label: 'ultra' },
   ],
 };
 

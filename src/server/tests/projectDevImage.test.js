@@ -28,6 +28,12 @@ assert.equal(typeof manifest.version, 'string');
 assert.equal(manifest.localTag, 'startupp-ai-ide-dev:latest');
 assert.equal(manifest.versionLabel, 'org.startupp.image.version');
 
+const projectDockerfile = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '../../../docker/Dockerfile.dev'),
+  'utf8',
+);
+assert.match(projectDockerfile, /^FROM node:22-bookworm AS base$/m, 'project containers must ship Node 22 for current Wrangler');
+
 const spec = getProjectDevImageSpec({});
 assert.equal(spec.remoteTag, `${manifest.repository}:${manifest.version}`);
 assert.equal(spec.localTag, manifest.localTag);

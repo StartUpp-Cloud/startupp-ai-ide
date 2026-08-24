@@ -233,7 +233,7 @@ router.delete("/:id/deploy/:containerName", async (req, res) => {
 router.get("/:id/deploy/:containerName", async (req, res) => {
   try {
     const { id, containerName } = req.params;
-    const deployed = skillManager.getDeploymentStatus(id, containerName);
+    const deployed = await skillManager.getDeploymentStatus(id, containerName);
     res.json({ deployed });
   } catch (error) {
     res.status(500).json({

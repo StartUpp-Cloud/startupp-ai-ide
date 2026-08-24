@@ -16,6 +16,7 @@ import { initDB } from "./db.js";
 import { terminalServer } from "./terminalServer.js";
 import { ptyManager } from "./ptyManager.js";
 import { agentOrchestrator } from "./agentOrchestrator.js";
+import { startDockerWatchdog } from "./dockerRoute.js";
 // Initialize agent shell pool (attaches ptyManager data listener in constructor)
 import "./agentShellPool.js";
 
@@ -312,6 +313,16 @@ async function startServer() {
       console.log(`WebSocket terminal available at ws://localhost:${PORT}/ws/terminal`);
       console.log(`Environment: ${NODE_ENV}`);
       console.log(`PM2 Process: ${process.env.pm_id || "Not managed by PM2"}`);
+      startDockerWatchdog();
+      import("./containerManager.js")
+        .then(({ containerManager }) => containerManager.startManagedContainers())
+        .then((results) => {
+          const started = (results || []).filter((row) => row.started).map((row) => row.name);
+          if (started.length) console.log(`[containerManager] Started project containers: ${started.join(", ")}`);
+        })
+        .catch((err) => {
+          console.warn(`[containerManager] Could not start project containers: ${err.message}`);
+        });
 
       // Auto-start Slack bot if previously configured
       try {
@@ -344,6 +355,13 @@ process.on("SIGINT", async () => {
   } catch (e) { console.warn("Cleanup error:", e.message); }
   terminalServer.cleanup();
   process.exit(0);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("[unhandledRejection]", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
 });
 
 // Start the server

@@ -31,6 +31,7 @@ import {
   looksLikePrompt,
   orchestratedAutoConfirm,
 } from './agentAutoConfirm.js';
+import { selectFinalAgentMessage, buildStoppedRunResponse, compactChatReport } from './orchestratorMessages.js';
 import fs from 'fs';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
@@ -51,8 +52,12 @@ import { checklistTracker } from './checklistTracker.js';
 import { drainSteers, buildSteerPrompt } from './steeringInbox.js';
 import { buildEnvironmentsSummary } from './projectEnvironments.js';
 import { runHostShell, findGitBash, getHostBashStdinSpec } from './hostShell.js';
-import { getDockerSpawnSpec, execDockerCmd } from './dockerRoute.js';
+import { getDockerSpawnSpec, execDockerCmd, agentDockerExecArgs, containerAgentShellPrelude } from './dockerRoute.js';
 import { copyIntoContainer } from './dockerCopy.js';
+import { DEFAULT_CHATGPT_CODEX_MODEL, unwrapCodexErrorMessage } from './codexModels.js';
+import { createCodexStatusTracker, extractJsonlEvents } from './codexStatus.js';
+import { refreshAndBroadcastCodexAccountStatus } from './codexAccountStatus.js';
+import { createInnerPidMarker, extractInnerPid, killRegisteredAgentProcesses, stripInnerPidLines } from './agentProcessKill.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -403,7 +408,7 @@ class AgentGateway extends EventEmitter {
     try {
       if (project?.containerName) {
         const { containerManager } = await import('./containerManager.js');
-        out = containerManager.execInContainer(project.containerName, cmd, { timeout: 8000 }) || '';
+        out = await containerManager.execInContainerAsync(project.containerName, cmd, { timeout: 8000 }) || '';
       } else if (project?.folderPath) {
         out = runHostShell(cmd, { cwd: project.folderPath, timeout: 8000 }) || '';
       }
@@ -721,7 +726,7 @@ class AgentGateway extends EventEmitter {
       containerName = project?.containerName || null;
       if (containerName) {
         const { containerManager } = await import('./containerManager.js');
-        workDir = containerManager.getWorkDir(containerName) || '/workspace';
+        workDir = await containerManager.getWorkDirAsync(containerName) || '/workspace';
       }
     } catch {}
 
@@ -736,7 +741,7 @@ class AgentGateway extends EventEmitter {
     // Ensure upload staging dir exists inside the container
     const uploadDir = `${workDir}/.uploads`;
     try {
-      execDockerCmd(`docker exec ${containerName} mkdir -p ${uploadDir}`, { stdio: 'pipe' });
+      await execDockerCmd(`docker exec ${containerName} mkdir -p ${uploadDir}`, { stdio: 'pipe' });
     } catch (err) {
       console.warn(`[agentGateway] Could not create container upload dir: ${err.message}`);
     }
@@ -746,7 +751,7 @@ class AgentGateway extends EventEmitter {
       const filename = path.basename(att.path);
       const containerPath = `${uploadDir}/${filename}`;
       try {
-        copyIntoContainer(att.path, containerName, containerPath, { timeout: 30000 });
+        await copyIntoContainer(att.path, containerName, containerPath, { timeout: 30000 });
         result.set(att.path, containerPath);
         console.log(`[agentGateway] Copied attachment into container: ${containerPath}`);
       } catch (err) {
@@ -1046,29 +1051,47 @@ RULES:
 
   _readChangedFileSnapshot(target) {
     const command = `git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git status --porcelain=v1 --untracked-files=all 2>/dev/null`;
-    let output = null;
 
     try {
       if (target.type === 'container') {
-        output = target.containerManager.execInContainer(
-          target.containerName,
-          `cd ${this._quoteCliArg(target.workDir)} && ${command}`,
-          { timeout: 5000 },
-        );
-      } else if (target.type === 'local') {
-        output = execSync(`cd ${this._quoteCliArg(target.workDir)} && ${command}`, {
+        const key = `${target.containerName}:${target.workDir}`;
+        if (!this._gitSnapCache) this._gitSnapCache = new Map();
+        if (!this._gitSnapInflight) this._gitSnapInflight = new Set();
+        if (!this._gitSnapInflight.has(key)) {
+          this._gitSnapInflight.add(key);
+          target.containerManager.execInContainerAsync(
+            target.containerName,
+            `cd ${this._quoteCliArg(target.workDir)} && ${command}`,
+            { timeout: 5000 },
+          ).then((output) => {
+            const files = this._parseGitStatusOutput(output);
+            this._gitSnapCache.set(key, files);
+          }).catch(() => {
+            this._gitSnapCache.set(key, []);
+          }).finally(() => {
+            this._gitSnapInflight.delete(key);
+          });
+        }
+        return this._gitSnapCache.has(key) ? this._gitSnapCache.get(key) : [];
+      }
+      if (target.type === 'local') {
+        const output = execSync(`cd ${this._quoteCliArg(target.workDir)} && ${command}`, {
           encoding: 'utf8',
           stdio: 'pipe',
           timeout: 5000,
-          windowsHide: true, // don't flash a console window on each poll
+          windowsHide: true,
         }).trim();
+        return this._parseGitStatusOutput(output);
       }
     } catch {
       return null;
     }
+    return null;
+  }
 
+  _parseGitStatusOutput(output) {
     if (!output) return [];
-    return output.split('\n')
+    return String(output).split('\n')
       .map(line => this._parseGitStatusLine(line))
       .filter(Boolean)
       .slice(0, 200);
@@ -1118,7 +1141,7 @@ RULES:
         sessionId: chatSessionId,
         role: 'agent',
         initialContent: `Waiting for ${tool}...`,
-        metadata: { tool, streaming: true },
+        metadata: { tool, streaming: true, mode, planMode: mode === 'plan' },
       });
 
     // Create a job for reliable tracking
@@ -1242,6 +1265,23 @@ RULES:
           const combinedDisplay = diligence.displayOutput || result.displayOutput;
           const combinedClean = diligence.cleanOutput || result.cleanOutput;
 
+          if (ctx.aborted) {
+            return this._finalizeStoppedTurn({
+              projectId,
+              chatSessionId,
+              tool,
+              mode,
+              result: { ...result, displayOutput: combinedDisplay, cleanOutput: combinedClean },
+              streamingMsg,
+              job,
+              fileTracker,
+              broadcastFn,
+              skipUnread,
+              silent,
+              attempt,
+            });
+          }
+
           // ── Success: format and finalize ──
           const finalContent = await this._cleanContent(combinedDisplay);
           const reviewMeta = await this._analyzeResponseForReview({
@@ -1260,15 +1300,10 @@ RULES:
           // surface the Verification block as discrete checks. Graceful no-op
           // when the agent didn't emit a recognizable report. ──
           const report = parseAgentReport(finalContent);
-          // Fall back to the full content if the parsed body came out empty, so
-          // we never render a blank message.
-          const displayContent = report.hasReport && report.body.trim() ? report.body : finalContent;
-          // checks live in metadata.checks (merged with run steps); keep report
-          // meta to the summary only to avoid duplicating the check list.
-          const reportMeta = report.hasReport ? { summary: report.summary } : null;
-          const activityNarration = report.hasReport && report.activity ? report.activity : null;
-          // Finalize the live checklist for this message (merges run steps with
-          // the report's verification checks) before we tear the tracker down.
+          const compact = compactChatReport(finalContent);
+          const displayContent = compact.body || (report.hasReport && report.body.trim() ? report.body : finalContent);
+          const reportMeta = compact.body ? { summary: report.summary || compact.body.split('\n').find(Boolean) || '' } : (report.hasReport ? { summary: report.summary } : null);
+          const activityNarration = compact.detail || (report.hasReport && report.activity ? report.activity : null);
           const finalChecks = silent ? [] : checklistTracker.finalize(streamingMsg.id, report.checks);
 
           // Complete the job
@@ -1285,6 +1320,8 @@ RULES:
               finalContent: displayContent,
               metadata: {
                 tool,
+                mode,
+                planMode: mode === 'plan',
                 jobId: job.id,
                 rawOutput: rawForDisplay.slice(-8000),
                 attempts: attempt,
@@ -1293,7 +1330,7 @@ RULES:
                 ...(logContext ? { logContext } : {}),
                 ...(diligenceMeta ? { diligence: diligenceMeta } : {}),
                 ...(reportMeta ? { report: reportMeta } : {}),
-                ...(activityNarration ? { activity: activityNarration } : {}),
+                ...(activityNarration ? { activity: activityNarration, detail: activityNarration } : {}),
                 ...(finalChecks?.length ? { checks: finalChecks } : {}),
               },
             });
@@ -1318,7 +1355,7 @@ RULES:
                   ...(logContext ? { logContext } : {}),
                   ...(diligenceMeta ? { diligence: diligenceMeta } : {}),
                   ...(reportMeta ? { report: reportMeta } : {}),
-                  ...(activityNarration ? { activity: activityNarration } : {}),
+                  ...(activityNarration ? { activity: activityNarration, detail: activityNarration } : {}),
                   ...(finalChecks?.length ? { checks: finalChecks } : {}),
                 },
               },
@@ -1345,6 +1382,23 @@ RULES:
             console.warn('[agentGateway] Memory learning skipped:', err.message);
           });
           return { success: true, content: displayContent, tool, jobId: job.id, messageId: streamingMsg.id, attempts: attempt, rawOutput: rawForDisplay.slice(-8000), changedFiles, ...(diligenceMeta ? { diligence: diligenceMeta } : {}) };
+        }
+
+        if (result.aborted || ctx.aborted) {
+          return this._finalizeStoppedTurn({
+            projectId,
+            chatSessionId,
+            tool,
+            mode,
+            result,
+            streamingMsg,
+            job,
+            fileTracker,
+            broadcastFn,
+            skipUnread,
+            silent,
+            attempt,
+          });
         }
 
         if (result.retry && attempt < MAX_ATTEMPTS) {
@@ -1386,7 +1440,22 @@ RULES:
             : result.retryType === 'context-limit' ? 1000
             : 2000;
           const shouldContinue = await this._waitForRetryBackoff(ctx, backoffMs);
-          if (!shouldContinue) return { success: false, error: 'Aborted', tool, jobId: job.id, messageId: streamingMsg.id, aborted: true };
+          if (!shouldContinue) {
+            return this._finalizeStoppedTurn({
+              projectId,
+              chatSessionId,
+              tool,
+              mode,
+              result,
+              streamingMsg,
+              job,
+              fileTracker,
+              broadcastFn,
+              skipUnread,
+              silent,
+              attempt,
+            });
+          }
           continue;
         }
 
@@ -1399,7 +1468,7 @@ RULES:
             ? (result.error.startsWith('🔐') || result.error.startsWith('⏳') || result.error.startsWith('🔄')
                 ? result.error
                 : `Error: ${result.error}`)
-            : result.displayOutput || `No response from ${tool}. Check Internal Console.`;
+            : result.displayOutput || result.retryReason || `No response from ${tool}. Check Internal Console.`;
         const changedFiles = fileTracker?.poll().files || [];
 
         // Fail the job
@@ -1456,6 +1525,20 @@ RULES:
           changedFiles,
         };
       }
+      return this._finalizeStoppedTurn({
+        projectId,
+        chatSessionId,
+        tool,
+        mode,
+        result: {},
+        streamingMsg,
+        job,
+        fileTracker,
+        broadcastFn,
+        skipUnread,
+        silent,
+        attempt: MAX_ATTEMPTS,
+      });
     } finally {
       // Clean up event handler
       jobManager.removeListener('job-progress', jobProgressHandler);
@@ -1463,6 +1546,98 @@ RULES:
       // (no-op if it was already finalized in the success branch).
       checklistTracker.abort(streamingMsg.id);
     }
+  }
+
+  /**
+   * User hit Stop: keep whatever the agent already produced so the next
+   * message can continue from that state instead of a blank "Stopped by user."
+   */
+  _finalizeStoppedTurn({
+    projectId,
+    chatSessionId,
+    tool,
+    mode,
+    result = {},
+    streamingMsg,
+    job,
+    fileTracker,
+    broadcastFn,
+    skipUnread,
+    silent,
+    attempt = 1,
+  }) {
+    const changedFiles = fileTracker?.poll().files || result.changedFiles || [];
+    const partial = String(result.displayOutput || result.content || '').trim();
+    const stopContent = buildStoppedRunResponse({
+      partialContent: partial,
+      changedFiles,
+      tool,
+    });
+    try { jobManager.cancelJob(job.id); } catch { try { jobManager.failJob(job.id, stopContent); } catch {} }
+
+    const finalChecks = silent ? [] : checklistTracker.finalize(streamingMsg.id, []);
+    if (!silent) {
+      chatStore.finalizeStreamingMessage({
+        projectId,
+        sessionId: chatSessionId,
+        messageId: streamingMsg.id,
+        finalContent: stopContent,
+        metadata: {
+          tool,
+          mode,
+          planMode: mode === 'plan',
+          jobId: job.id,
+          stopped: true,
+          attempts: attempt,
+          ...(changedFiles.length > 0 ? { changedFiles } : {}),
+          ...(finalChecks?.length ? { checks: finalChecks } : {}),
+        },
+      });
+      broadcastFn?.({
+        type: 'chat-message-stream-complete',
+        projectId,
+        sessionId: chatSessionId,
+        messageId: streamingMsg.id,
+        jobId: job.id,
+        message: {
+          ...streamingMsg,
+          content: stopContent,
+          metadata: {
+            tool,
+            jobId: job.id,
+            stopped: true,
+            ...(changedFiles.length > 0 ? { changedFiles } : {}),
+            ...(finalChecks?.length ? { checks: finalChecks } : {}),
+          },
+        },
+      });
+      if (!skipUnread) {
+        const changed = chatStore.markSessionUnread(projectId, chatSessionId);
+        if (changed) {
+          broadcastFn?.({
+            type: 'session-unread',
+            projectId,
+            sessionId: chatSessionId,
+            hasUnread: true,
+          });
+        }
+      }
+    }
+
+    return {
+      success: false,
+      aborted: true,
+      retryable: false,
+      errorType: 'cancelled',
+      error: stopContent,
+      content: stopContent,
+      displayOutput: partial,
+      tool,
+      jobId: job.id,
+      messageId: streamingMsg.id,
+      attempts: attempt,
+      changedFiles,
+    };
   }
 
   /**
@@ -1727,6 +1902,11 @@ RULES:
       let child;
       try {
         child = spawn(spawnCmd, spawnArgs, { cwd: spawnCwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        this._registerPipedProcess(ctx, {
+          child,
+          containerName: isContainer ? project.containerName : null,
+          innerPid: null,
+        });
       } catch (err) {
         resolve({ success: false, retry: false, error: `Failed to launch cursor-agent: ${err.message}` });
         return;
@@ -1942,9 +2122,10 @@ RULES:
         this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
       }
       if (parsed.isError) {
-        if (parsed.errorType === 'auth') return { success: false, retry: true, retryReason: 'Codex transient auth error', retryType: 'codex-transient' };
-        if (parsed.errorType === 'rate_limit') return { success: false, retry: true, retryReason: 'Codex rate limit', retryType: 'codex-rate-limit' };
-        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+        if (parsed.errorType === 'auth') return { success: false, retry: false, retryReason: 'Authentication required', retryType: 'needs-user', errorType: 'needs-user', requiresUserInput: true, displayOutput, error: displayOutput };
+        if (parsed.errorType === 'rate_limit') return { success: false, retry: true, retryReason: 'Codex rate limit', retryType: 'codex-rate-limit', displayOutput };
+        const permanent = /not supported|invalid_request_error|model metadata/i.test(displayOutput);
+        return { success: false, retry: !permanent, retryReason: displayOutput.slice(0, 200), retryType: 'error', displayOutput, error: displayOutput };
       }
     } else if (tool === 'ollama') {
       const parsed = this._parseOllamaOutput(cleanOutput, cmd);
@@ -1998,7 +2179,10 @@ RULES:
     // finalizer prompts. stdin has no such limit.
     let spawnCmd, spawnArgs, spawnCwd;
     if (isContainer) {
-      const dockerArgs = ['exec', '-i', '-w', workDir || '/workspace', project.containerName, 'bash', '-s'];
+      const dockerArgs = agentDockerExecArgs({
+        workDir: workDir || '/workspace',
+        containerName: project.containerName,
+      });
       const spec = getDockerSpawnSpec(dockerArgs);
       spawnCmd = spec.cmd;
       spawnArgs = spec.args;
@@ -2015,7 +2199,15 @@ RULES:
       try {
         child = spawn(spawnCmd, spawnArgs, { cwd: spawnCwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
         child.stdin.on('error', () => {}); // ignore EPIPE if the shell exits early
-        child.stdin.write(cmd + '\n');
+        const pidMarker = createInnerPidMarker();
+        this._registerPipedProcess(ctx, {
+          child,
+          containerName: isContainer ? project.containerName : null,
+          innerPid: null,
+          marker: pidMarker,
+        });
+        const envPrelude = isContainer ? containerAgentShellPrelude() : '';
+        child.stdin.write(`echo ${pidMarker}:$$ >&2\n${envPrelude}${cmd}\n`);
         child.stdin.end();
       } catch (err) {
         resolve({ success: false, retry: true, retryReason: `Failed to launch ${tool}: ${err.message}`, error: err.message });
@@ -2027,6 +2219,63 @@ RULES:
       const startedAt = Date.now();
       let lastOutputAt = startedAt, timedOut = false;
       const IDLE_MS = 6 * 60 * 1000, MAX_MS = 30 * 60 * 1000;
+      const statusTracker = tool === 'codex' && typeof broadcastFn === 'function'
+        ? createCodexStatusTracker()
+        : null;
+      let jsonLineBuf = '';
+      let lastStatusKey = '';
+      const emitRunStatus = (status, force = false) => {
+        if (!statusTracker || !broadcastFn || !status) return;
+        const key = `${status.phase}|${status.percent}|${status.label}|${status.todoDone}|${status.todoTotal}`;
+        if (!force && key === lastStatusKey) return;
+        lastStatusKey = key;
+        try {
+          broadcastFn({
+            type: 'assistant-run-status',
+            projectId,
+            sessionId: chatSessionId,
+            tool,
+            status,
+          });
+        } catch {}
+      };
+      const ingestStatusChunk = (chunk) => {
+        if (!statusTracker) return;
+        jsonLineBuf += this._stripAnsi(chunk);
+        const parsed = extractJsonlEvents(jsonLineBuf);
+        jsonLineBuf = parsed.remainder;
+        for (const event of parsed.events) {
+          emitRunStatus(statusTracker.ingest(event));
+        }
+      };
+      const finishRunStatus = (ok) => {
+        if (!statusTracker) return;
+        const parsed = extractJsonlEvents(`${jsonLineBuf}\n`);
+        jsonLineBuf = '';
+        for (const event of parsed.events) {
+          emitRunStatus(statusTracker.ingest(event));
+        }
+        const snap = statusTracker.snapshot();
+        if (snap.phase !== 'done' && snap.phase !== 'failed') {
+          emitRunStatus(statusTracker.ingest({ type: ok ? 'turn.completed' : 'turn.failed' }), true);
+        } else {
+          emitRunStatus(snap, true);
+        }
+      };
+      if (statusTracker) {
+        emitRunStatus(statusTracker.ingest({ type: 'turn.started' }), true);
+      }
+      let accountRefreshStarted = false;
+      const refreshAccountStatus = () => {
+        if (tool !== 'codex' || accountRefreshStarted) return;
+        accountRefreshStarted = true;
+        refreshAndBroadcastCodexAccountStatus({
+          projectId,
+          containerName: project?.containerName || null,
+          broadcastFn,
+          sessionId: chatSessionId,
+        }).catch(() => {});
+      };
       const pollFiles = () => {
         if (!fileTracker || !broadcastFn) return;
         const now = Date.now();
@@ -2043,6 +2292,12 @@ RULES:
         totalOutput += s;
         if (onChunk) onChunk(s);
         if (job) { try { jobManager.recordOutput(job.id, s); } catch {} }
+        const handle = ctx?.pipedProcesses?.find((entry) => entry.child === child);
+        if (handle && !handle.innerPid && handle.marker) {
+          const pid = extractInnerPid(s, handle.marker);
+          if (pid) handle.innerPid = pid;
+        }
+        ingestStatusChunk(s);
         const now = Date.now();
         if (now - lastProgress > 2000) {
           const event = this._parseStreamEvent(this._stripAnsi(s));
@@ -2050,7 +2305,15 @@ RULES:
         }
         pollFiles();
       });
-      child.stderr.on('data', (d) => { if (stderrBuf.length < 16000) stderrBuf += d.toString(); });
+      child.stderr.on('data', (d) => {
+        const s = d.toString();
+        if (stderrBuf.length < 16000) stderrBuf += s;
+        const handle = ctx?.pipedProcesses?.find((entry) => entry.child === child);
+        if (handle && !handle.innerPid && handle.marker) {
+          const pid = extractInnerPid(s, handle.marker);
+          if (pid) handle.innerPid = pid;
+        }
+      });
 
       const abortTimer = setInterval(() => {
         if (!child || child.killed) return;
@@ -2065,18 +2328,41 @@ RULES:
       }, 5000);
       child.on('error', (err) => {
         clearInterval(abortTimer);
+        finishRunStatus(false);
+        refreshAccountStatus();
         resolve({ success: false, retry: true, retryReason: `${tool} spawn error: ${err.message}`, error: err.message });
       });
       child.on('close', () => {
         clearInterval(abortTimer);
         pollFiles();
-        if (killedForAbort || ctx?.aborted) { resolve({ success: false, aborted: true, displayOutput: '' }); return; }
-        const combined = totalOutput.trim() ? totalOutput : `${totalOutput}\n${stderrBuf}`;
+        refreshAccountStatus();
+        if (killedForAbort || ctx?.aborted) {
+          finishRunStatus(false);
+          const combined = stripInnerPidLines(totalOutput.trim() ? totalOutput : `${totalOutput}\n${stderrBuf}`);
+          const res = combined.trim()
+            ? this._finalizeToolOutput(tool, combined, cmd, cliState, chatSessionId, projectId, worktreeOverride)
+            : { displayOutput: '' };
+          resolve({
+            success: false,
+            aborted: true,
+            retry: false,
+            displayOutput: res.displayOutput || '',
+            cleanOutput: combined,
+          });
+          return;
+        }
+        const combined = stripInnerPidLines(totalOutput.trim() ? totalOutput : `${totalOutput}\n${stderrBuf}`);
         const res = this._finalizeToolOutput(tool, combined, cmd, cliState, chatSessionId, projectId, worktreeOverride);
         if (timedOut) {
-          if (res.success) { res.displayOutput = `${res.displayOutput || ''}\n\n⚠️ *Stopped: ${tool} hit the idle/time limit — likely a blocking command. Verify what completed; re-run the last step if needed.*`; return resolve(res); }
+          if (res.success) {
+            res.displayOutput = `${res.displayOutput || ''}\n\n⚠️ *Stopped: ${tool} hit the idle/time limit — likely a blocking command. Verify what completed; re-run the last step if needed.*`;
+            finishRunStatus(true);
+            return resolve(res);
+          }
+          finishRunStatus(false);
           return resolve({ success: false, retry: false, error: `${tool} stopped (idle/timeout) before finishing — a command likely blocked.`, displayOutput: res.displayOutput });
         }
+        finishRunStatus(!!res.success);
         resolve(res);
       });
     });
@@ -2474,15 +2760,14 @@ RULES:
         this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
       }
       if (parsed.isError) {
-        // Codex auth/rate-limit errors are often transient (retry usually works),
-        // so treat them as retryable instead of terminal failures.
         if (parsed.errorType === 'auth') {
-          return { success: false, retry: true, retryReason: 'Codex transient auth error', retryType: 'codex-transient' };
+          return { success: false, retry: false, retryReason: 'Authentication required', retryType: 'needs-user', errorType: 'needs-user', requiresUserInput: true, displayOutput, error: displayOutput };
         }
         if (parsed.errorType === 'rate_limit') {
-          return { success: false, retry: true, retryReason: 'Codex rate limit', retryType: 'codex-rate-limit' };
+          return { success: false, retry: true, retryReason: 'Codex rate limit', retryType: 'codex-rate-limit', displayOutput };
         }
-        return { success: false, retry: true, retryReason: displayOutput.slice(0, 100), retryType: 'error' };
+        const permanent = /not supported|invalid_request_error|model metadata/i.test(displayOutput);
+        return { success: false, retry: !permanent, retryReason: displayOutput.slice(0, 200), retryType: 'error', displayOutput, error: displayOutput };
       }
     } else if (tool === 'cursor') {
       const parsed = this._parseCursorJsonOutput(cleanOutput, cmd);
@@ -2712,6 +2997,7 @@ RULES:
       .filter(l => {
         const t = l.trim();
         if (t.startsWith('{"type"')) return false;
+        if (/^SAI_INNER_PID_[A-Za-z0-9]+:\d+$/.test(t)) return false;
         if (t.startsWith('claude -p')) return false;
         if (t.startsWith('copilot -p')) return false;
         if (t.startsWith('opencode run')) return false;
@@ -2962,7 +3248,7 @@ Format as a brief bullet list. Be concise — max 8 bullets. Omit anything the c
         const { containerManager } = await import('./containerManager.js');
         const sessionMeta = chatStore.getSession(projectId, chatSessionId);
         const workDir = this._sessionWorkDir(projectId, sessionMeta) || '/workspace';
-        diffStat = containerManager.execInContainer(project.containerName,
+        diffStat = await containerManager.execInContainerAsync(project.containerName,
           `cd '${workDir}' && git diff --stat HEAD 2>/dev/null | tail -20`,
           { timeout: 5000 },
         ) || '';
@@ -3176,11 +3462,11 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     // agent/plan mode personas. Injecting them confuses the underlying model.
     if (tool !== 'aider') {
       if (mode === 'plan') {
-        parts.push('\nMODE: PLAN — You are in planning mode. Do NOT make any changes to files or run any commands that modify the codebase.\n\nYou are acting as a Chief Technology Officer. Your job is to identify the best solution given the full context of this project.\n- Present only the most viable options — omit approaches that are unlikely to work given the current stack, constraints, or scale.\n- Prioritize scalability, performance, and maintainability in every recommendation.\n- Use the full context available from this project (codebase, architecture, conventions, dependencies) to present an informed solution.\n- Follow the user\'s instructions precisely.\n- Do not execute anything. Present your analysis and recommendation clearly, then wait for explicit approval before any changes are made.');
+        parts.push('\nMODE: PLAN — Do NOT edit files or run mutating commands. Inspect enough of the repo to propose a real plan.\n\nWrite the plan as a readable design review, similar to a Cursor plan:\n- Start with a short goal and recommended approach.\n- Include architecture notes, data/schema changes (tables or markdown schemas), API shapes, and UI impact when they matter.\n- Use markdown tables for objects/fields/permissions and fenced code blocks for schemas or examples.\n- List implementation steps as a tight numbered list. Indent sub-steps with two spaces.\n- Call out risks, auth/permission needs, and open questions.\n- End by asking for approval before any implementation.\n- Do not dump a file-by-file changelog. Keep it conversational and sized to the complexity.');
       } else if (mode === 'plan-review') {
         parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
       } else {
-        parts.push('\nMODE: AGENT — You are in autonomous agent mode. Execute tasks directly:\n- Make file changes as needed\n- Run commands and tests\n- Auto-approve safe operations\n- Commit and push when asked\n- Report results when done\n- Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.\n- IMPORTANT: Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops). Complete your task with the information available in a single pass and report results immediately.');
+        parts.push('\nMODE: AGENT — Execute the user\'s goal at full effort. Make the changes, verify them, and talk back like a teammate.\n- Auto-approve safe operations.\n- Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.\n- If blocked by missing authentication, login, API keys, permissions, or a required human decision, STOP immediately and tell the user what they need to do. Do not retry or burn tokens on the same blocker.\n- Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops).\n- Mid-run status may say what you are about to do. The FINAL message is a compact past-tense report, not a narrative.\n- Use ## Outcome (1–2 sentences) then ## Details (tight bullets for decisions, versions, URLs, commands, blockers). Do not retell the journey or re-list every file.');
 
         // Engineering Diligence Contract — tool-agnostic doctrine that raises
         // effort/persistence and mandates the verify+report structure. Returns
@@ -3241,6 +3527,8 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
     if (supportsSessionModelSelection(tool) && assistantSettings?.model) {
       args += ` --model ${this._quoteCliArg(assistantSettings.model)}`;
+    } else if (tool === 'codex') {
+      args += ` --model ${this._quoteCliArg(DEFAULT_CHATGPT_CODEX_MODEL)}`;
     }
 
     if (supportsSessionEffortSelection(tool) && assistantSettings?.effort) {
@@ -3647,6 +3935,8 @@ Reply with exactly one word: YES or NO.`,
         finalContent: finalText,
         metadata: {
           tool,
+          mode: 'plan',
+          planMode: true,
           planLoops: loopsCompleted,
           ...(reviewMeta ? { review: reviewMeta } : {}),
         },
@@ -3662,6 +3952,8 @@ Reply with exactly one word: YES or NO.`,
           content: finalText,
           metadata: {
             tool,
+            mode: 'plan',
+            planMode: true,
             planLoops: loopsCompleted,
             ...(reviewMeta ? { review: reviewMeta } : {}),
           },
@@ -3755,10 +4047,20 @@ Reply with exactly one word: YES or NO.`,
     return !!(entry && !entry.aborted);
   }
 
+  _registerPipedProcess(ctx, handle) {
+    if (!ctx || !handle) return handle;
+    ctx.pipedProcesses = Array.isArray(ctx.pipedProcesses) ? ctx.pipedProcesses : [];
+    ctx.pipedProcesses.push(handle);
+    return handle;
+  }
+
   abort(sessionId) {
     const entry = this._running.get(sessionId);
     if (entry) entry.aborted = true;
     this._lastProgress.delete(sessionId);
+    if (entry?.pipedProcesses?.length) {
+      try { killRegisteredAgentProcesses({ processes: entry.pipedProcesses }); } catch {}
+    }
 
     const shellSessionId = this._activeShellSessions.get(sessionId);
     if (shellSessionId) {
@@ -4451,6 +4753,7 @@ NEEDS_USER`,
     let isError = false;
     let errorType = null;
     const messageParts = [];
+    cleanOutput = stripInnerPidLines(cleanOutput);
 
     for (const line of cleanOutput.split('\n')) {
       const idx = line.indexOf('{');
@@ -4464,22 +4767,28 @@ NEEDS_USER`,
         }
 
         // Collect agent message text
-        if (json.type === 'item.completed' && json.item?.type === 'agent_message' && json.item?.text) {
-          messageParts.push(json.item.text);
+        if (json.type === 'item.completed' && json.item?.type === 'agent_message') {
+          const text = json.item.text || json.item.content || json.item.message;
+          if (typeof text === 'string' && text.trim()) messageParts.push(text);
         }
 
         // Detect errors
-        if (json.type === 'error') {
+        const itemError = json.type === 'item.completed' && json.item?.type === 'error'
+          ? (json.item.message || json.item.error || '')
+          : '';
+        if (json.type === 'error' || json.type === 'turn.failed' || itemError) {
           isError = true;
-          const errMsg = json.message || json.error || '';
+          const errMsg = unwrapCodexErrorMessage(
+            itemError || json.message || json.error?.message || json.error || '',
+          );
           if (/auth|401|unauthorized/i.test(errMsg)) errorType = 'auth';
           else if (/429|rate.?limit|too many/i.test(errMsg)) errorType = 'rate_limit';
-          if (errMsg) messageParts.push(`\n\n**Error:** ${errMsg}`);
+          if (errMsg && !messageParts.includes(errMsg)) messageParts.push(errMsg);
         }
       } catch {}
     }
 
-    let text = messageParts.join('\n\n');
+    let text = selectFinalAgentMessage(messageParts);
 
     if (!text) {
       text = this._extractToolResponse(cleanOutput, cmd);
@@ -4498,7 +4807,7 @@ NEEDS_USER`,
       if (/authentication.*error|401.*invalid|unauthorized/i.test(cleanOutput)) {
         isError = true;
         errorType = 'auth';
-        text = '🔐 **Authentication failed** — Transient OpenAI error. Retrying automatically...';
+        text = '🔐 **Authentication failed** — Codex is not logged in or its credentials expired. Re-authenticate in Settings, then send again.';
       } else if (/429|too many requests|rate.?limit/i.test(cleanOutput)) {
         isError = true;
         errorType = 'rate_limit';

@@ -7,6 +7,19 @@ import { normalizeEnvironments, maskEnvironmentsForClient } from "../projectEnvi
 import { skillManager } from "../skillManager.js";
 import { runHostShell } from "../hostShell.js";
 import { startProvision, getProvisionJob, withProvision } from "../containerProvision.js";
+import {
+  CODEX_MODELS_CACHE_PATH,
+  FALLBACK_CHATGPT_CODEX_MODELS,
+  listSupportedCodexModels,
+  parseCodexModelsCache,
+} from "../codexModels.js";
+import { getCodexAccountStatus } from "../codexAccountStatus.js";
+import { importHostAuth, listHostAuthStatus } from "../hostAuthImport.js";
+import {
+  moveClientGroup,
+  moveProjectInClientGroup,
+  normalizeClient,
+} from "../projectOrganization.js";
 
 const router = express.Router();
 
@@ -141,7 +154,7 @@ router.get("/:id/provision", (req, res) => {
 
 // POST /api/projects/:id/provision-container
 // Start (or reuse) background container setup. Returns immediately.
-router.post("/:id/provision-container", (req, res) => {
+router.post("/:id/provision-container", async (req, res) => {
   try {
     const { id } = req.params;
     const project = Project.findById(id);
@@ -154,7 +167,7 @@ router.post("/:id/provision-container", (req, res) => {
     }
 
     if (project.containerName) {
-      const status = containerManager.getContainerStatus(project.containerName);
+      const status = await containerManager.getContainerStatusAsync(project.containerName);
       if (status) {
         return res.json({
           status: "exists",
@@ -180,7 +193,7 @@ router.post("/:id/provision-container", (req, res) => {
 // POST /api/projects - Create new project
 router.post("/", async (req, res) => {
   try {
-    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath, runtime, stack, stackManualOverride, salesforce, environments } = req.body;
+    const { name, description, rules, selectedPresets, cloneFromId, promptSettings, folderPath, runtime, stack, stackManualOverride, salesforce, environments, client } = req.body;
 
     // Handle project cloning
     if (cloneFromId) {
@@ -200,6 +213,7 @@ router.post("/", async (req, res) => {
         stack: sourceProject.stack || "generic",
         stackManualOverride: sourceProject.stackManualOverride === true,
         salesforce: sourceProject.salesforce || {},
+        client: sourceProject.client || "",
       });
 
       await skillManager.ensureDefaultSkillsActive(clonedProject.id);
@@ -252,6 +266,7 @@ router.post("/", async (req, res) => {
       stackManualOverride,
       salesforce: normalizeSalesforceSettings(salesforce),
       environments,
+      client,
     });
 
     // Enable the bundled default-on skills on the new project.
@@ -305,6 +320,7 @@ router.post("/:id/clone", async (req, res) => {
       stack: sourceProject.stack || "generic",
       stackManualOverride: sourceProject.stackManualOverride === true,
       salesforce: sourceProject.salesforce || {},
+      client: sourceProject.client || "",
     });
 
     res.status(201).json(clonedProject);
@@ -319,7 +335,7 @@ router.post("/:id/clone", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, rules, selectedPresets, promptSettings, folderPath, containerName, runtime, gitUrl, repos, containerPorts, containerStatus, environments } = req.body;
+    const { name, description, rules, selectedPresets, promptSettings, folderPath, containerName, runtime, gitUrl, repos, containerPorts, containerStatus, environments, client, sortOrder } = req.body;
 
     const project = Project.findById(id);
     if (!project) {
@@ -393,6 +409,14 @@ router.put("/:id", async (req, res) => {
     if (environments !== undefined) {
       updates.environments = normalizeEnvironments(environments, project.environments || []);
     }
+    if (client !== undefined) updates.client = normalizeClient(client);
+    if (sortOrder !== undefined) {
+      const parsed = Number(sortOrder);
+      if (!Number.isFinite(parsed)) {
+        return res.status(400).json({ error: "sortOrder must be a number" });
+      }
+      updates.sortOrder = parsed;
+    }
 
     const stackError = applyStackUpdates(project, updates, req.body);
     if (stackError) return res.status(400).json({ error: stackError });
@@ -403,6 +427,41 @@ router.put("/:id", async (req, res) => {
     res
       .status(500)
       .json({ error: "Failed to update project", message: error.message });
+  }
+});
+
+// POST /api/projects/:id/move — reorder a project or its client group
+router.post("/:id/move", async (req, res) => {
+  try {
+    const project = Project.findById(req.params.id);
+    if (!project) return res.status(404).json({ error: "Project not found" });
+
+    const direction = req.body?.direction === "up" ? "up" : req.body?.direction === "down" ? "down" : null;
+    if (!direction) {
+      return res.status(400).json({ error: "direction must be 'up' or 'down'" });
+    }
+
+    const scope = req.body?.scope === "client" ? "client" : "project";
+    const current = Project.getAll();
+    const result = scope === "client"
+      ? moveClientGroup(current, project.client, direction)
+      : moveProjectInClientGroup(current, project.id, direction);
+
+    if (result.moved) {
+      for (const next of result.projects) {
+        const prev = current.find((p) => p.id === next.id);
+        if (prev && prev.sortOrder !== next.sortOrder) {
+          await Project.update(next.id, { sortOrder: next.sortOrder });
+        }
+      }
+    }
+
+    res.json({
+      moved: result.moved,
+      projects: Project.getAll().map((p) => withProvision(safeProject(p))),
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to move project", message: error.message });
   }
 });
 
@@ -428,10 +487,10 @@ router.get("/:id/ollama-models", async (req, res) => {
   let containerModels = [];
   if (project.containerName) {
     try {
-      const status = containerManager.getContainerStatus(project.containerName);
+      const status = await containerManager.getContainerStatusAsync(project.containerName);
       if (status === 'running') {
         // OLLAMA_HOST is set to host.docker.internal:11434 in every container
-        const raw = containerManager.execInContainer(
+        const raw = await containerManager.execInContainerAsync(
           project.containerName,
           'curl -s --max-time 5 "$OLLAMA_HOST/api/tags" 2>/dev/null || curl -s --max-time 5 "http://host.docker.internal:11434/api/tags" 2>/dev/null',
           { timeout: 8000 },
@@ -477,9 +536,9 @@ router.get("/:id/opencode-models", async (req, res) => {
   let containerModels = [];
   if (project.containerName) {
     try {
-      const status = containerManager.getContainerStatus(project.containerName);
+      const status = await containerManager.getContainerStatusAsync(project.containerName);
       if (status === 'running') {
-        const raw = containerManager.execInContainer(
+        const raw = await containerManager.execInContainerAsync(
           project.containerName,
           'opencode models 2>/dev/null',
           { timeout: 10000 },
@@ -497,6 +556,133 @@ router.get("/:id/opencode-models", async (req, res) => {
     fromContainer: containerModels.length > 0,
     fromHost: hostModels.length > 0,
   });
+});
+
+/**
+ * GET /api/projects/:id/codex-models
+ * Account-aware Codex catalog from ~/.codex/models_cache.json in the
+ * project container. Hidden and ChatGPT-deprecated slugs are omitted.
+ */
+router.get("/:id/codex-models", async (req, res) => {
+  const project = Project.findById(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  let containerModels = [];
+  if (project.containerName) {
+    try {
+      const status = await containerManager.getContainerStatusAsync(project.containerName);
+      if (status === 'running') {
+        const raw = await containerManager.execInContainerAsync(
+          project.containerName,
+          `cat ${CODEX_MODELS_CACHE_PATH} 2>/dev/null`,
+          { timeout: 8000 },
+        );
+        containerModels = listSupportedCodexModels(parseCodexModelsCache(raw))
+          .map((model) => ({
+            name: model.id,
+            label: model.name,
+            efforts: model.efforts,
+            source: 'container',
+          }));
+      }
+    } catch { /* container query failed */ }
+  }
+
+  let hostModels = [];
+  try {
+    const { llmProvider } = await import('../llmProvider.js');
+    hostModels = (await llmProvider.getCodexModels({ allowFallback: false }))
+      .map((model) => ({
+        name: model.id || model.name,
+        label: model.name || model.id,
+        efforts: model.efforts,
+        source: 'host',
+      }));
+  } catch { /* host cache missing */ }
+
+  const models = mergeModelsByName(containerModels, hostModels);
+  res.json({
+    models: models.length > 0 ? models : FALLBACK_CHATGPT_CODEX_MODELS.map((model) => ({
+      name: model.id,
+      label: model.name,
+      efforts: model.efforts,
+      source: 'fallback',
+    })),
+    fromContainer: containerModels.length > 0,
+    fromHost: hostModels.length > 0,
+  });
+});
+
+/**
+ * GET /api/projects/:id/codex-account-status
+ * Persistent ChatGPT/Codex quota snapshot (weekly / 5h remaining).
+ * Pass ?refresh=1 to query Codex again; otherwise a fresh cache is reused.
+ */
+router.get("/:id/codex-account-status", async (req, res) => {
+  const project = Project.findById(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  try {
+    const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const status = await getCodexAccountStatus({
+      projectId: project.id,
+      containerName: project.containerName || null,
+      refresh,
+    });
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || 'Failed to read Codex account status' });
+  }
+});
+
+/**
+ * GET /api/projects/:id/host-auth
+ * Which host/IDE CLI logins can be copied into this project container.
+ * Never returns token values.
+ */
+router.get("/:id/host-auth", async (req, res) => {
+  const project = Project.findById(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  let status = project.containerName
+    ? await containerManager.ensureContainerRunning(project.containerName)
+    : null;
+  const running = status === 'running';
+  res.json({
+    containerName: project.containerName || null,
+    running,
+    tools: listHostAuthStatus(),
+  });
+});
+
+/**
+ * POST /api/projects/:id/host-auth
+ * Copy selected host/IDE auth files into the project container.
+ * Body: { tools?: ['gh','wrangler','codex','opencode','claude'] }
+ */
+router.post("/:id/host-auth", async (req, res) => {
+  const project = Project.findById(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (!project.containerName) {
+    return res.status(409).json({ error: 'Project has no container yet' });
+  }
+  if ((await containerManager.ensureContainerRunning(project.containerName)) !== 'running') {
+    return res.status(409).json({ error: 'Project container is not running' });
+  }
+
+  const requested = Array.isArray(req.body?.tools) ? req.body.tools : [];
+  const tools = requested.includes('all') ? [] : requested;
+
+  try {
+    const result = await importHostAuth({
+      containerName: project.containerName,
+      tools,
+      execFn: (containerName, command) => containerManager.execInContainerAsync(containerName, command),
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || 'Failed to import host auth' });
+  }
 });
 
 router.delete("/:id", async (req, res) => {
@@ -518,7 +704,7 @@ router.delete("/:id", async (req, res) => {
 
     // Remove container and its volumes (workspace + home)
     if (project.containerName) {
-      containerManager.removeContainer(project.containerName);
+      await containerManager.removeContainer(project.containerName);
     }
 
     // Clean up chat history

@@ -1,5 +1,6 @@
 import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText } from 'lucide-react';
 import { useEffect, useState, useMemo } from 'react';
+import { parseMarkdownBlocks } from '../utils/chatMarkdown.js';
 
 const ROLE_STYLES = {
   user: { align: 'justify-end', bubble: 'bg-blue-600/15 border-blue-500/20', icon: User, label: 'You' },
@@ -168,7 +169,7 @@ function renderMarkdown(text) {
   if (!text) return null;
 
   // Convert common HTML tags to markdown before processing
-  let cleaned = String(text)
+  const cleaned = String(text)
     .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
     .replace(/\x1B[P^_][\s\S]*?\x1B\\/g, '')
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
@@ -191,12 +192,6 @@ function renderMarkdown(text) {
     .replace(/<h([1-6])>([\s\S]*?)<\/h\1>/gi, (_, level, content) => '#'.repeat(parseInt(level)) + ' ' + content)
     // Catch any remaining HTML tags
     .replace(/<\/?[a-z][a-z0-9]*[^>]*>/gi, '');
-
-  const lines = cleaned.split('\n');
-  const elements = [];
-  let inCodeBlock = false;
-  let codeLines = [];
-  let codeLang = '';
 
   const processInline = (line) => {
     // Bold: **text** or __text__
@@ -237,113 +232,74 @@ function renderMarkdown(text) {
     return parts;
   };
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  const listRow = (key, indent, marker, body) => (
+    <div key={key} className="flex items-start gap-1.5 leading-snug" style={{ paddingLeft: `${4 + indent * 16}px` }}>
+      {marker}
+      <span className="min-w-0 flex-1 text-surface-200">{body}</span>
+    </div>
+  );
 
-    // Code block start/end
-    if (line.trim().startsWith('```')) {
-      if (inCodeBlock) {
-        elements.push(
-          <pre key={`code-${i}`} className="my-2 p-3 rounded-md bg-surface-950/80 border border-surface-700/30 text-[12px] font-mono text-surface-300 overflow-x-auto">
-            {codeLang && <div className="text-[10px] text-surface-500 mb-1 uppercase">{codeLang}</div>}
-            {codeLines.join('\n')}
-          </pre>
-        );
-        codeLines = [];
-        codeLang = '';
-        inCodeBlock = false;
-      } else {
-        inCodeBlock = true;
-        codeLang = line.trim().slice(3).trim();
-      }
-      continue;
+  return parseMarkdownBlocks(cleaned).map((block, i) => {
+    if (block.type === 'code') {
+      return (
+        <pre key={`code-${i}`} className="my-2 p-3 rounded-md bg-surface-950/80 border border-surface-700/30 text-[12px] font-mono text-surface-300 overflow-x-auto">
+          {block.lang && <div className="text-[10px] text-surface-500 mb-1 uppercase">{block.lang}</div>}
+          {block.text}
+        </pre>
+      );
     }
-
-    if (inCodeBlock) {
-      codeLines.push(line);
-      continue;
+    if (block.type === 'gap') return <div key={`gap-${i}`} className="h-1.5" />;
+    if (block.type === 'h4') return <h4 key={i} className="text-[13px] font-semibold text-surface-100 mt-2 mb-0.5">{processInline(block.text)}</h4>;
+    if (block.type === 'h3') return <h3 key={i} className="text-sm font-semibold text-surface-100 mt-2 mb-0.5">{processInline(block.text)}</h3>;
+    if (block.type === 'h2') return <h2 key={i} className="text-[15px] font-bold text-surface-100 mt-2 mb-0.5">{processInline(block.text)}</h2>;
+    if (block.type === 'hr') return <hr key={i} className="border-surface-700/50 my-2" />;
+    if (block.type === 'bullet') {
+      return listRow(i, block.indent, <span className="text-primary-400 mt-0.5 flex-shrink-0">•</span>, processInline(block.text));
     }
-
-    // Empty line
-    if (!line.trim()) {
-      elements.push(<div key={`br-${i}`} className="h-2" />);
-      continue;
+    if (block.type === 'number') {
+      return listRow(
+        i,
+        block.indent,
+        <span className="w-4 flex-shrink-0 text-right text-[11px] font-mono text-surface-500 mt-0.5">{block.n}.</span>,
+        processInline(block.text),
+      );
     }
-
-    // Headers
-    if (line.startsWith('### ')) {
-      elements.push(<h4 key={i} className="text-[13px] font-semibold text-surface-100 mt-2 mb-1">{processInline(line.slice(4))}</h4>);
-      continue;
+    if (block.type === 'check') {
+      return listRow(
+        i,
+        block.indent,
+        block.checked
+          ? <CheckCircle size={13} className="text-green-400 mt-0.5 flex-shrink-0" />
+          : <div className="w-[13px] h-[13px] rounded border border-surface-600 mt-0.5 flex-shrink-0" />,
+        <span className={block.checked ? 'text-surface-400 line-through' : undefined}>{processInline(block.text)}</span>,
+      );
     }
-    if (line.startsWith('## ')) {
-      elements.push(<h3 key={i} className="text-sm font-semibold text-surface-100 mt-2 mb-1">{processInline(line.slice(3))}</h3>);
-      continue;
-    }
-    if (line.startsWith('# ')) {
-      elements.push(<h2 key={i} className="text-[15px] font-bold text-surface-100 mt-2 mb-1">{processInline(line.slice(2))}</h2>);
-      continue;
-    }
-
-    // Checkbox list: - [ ] or - [x]
-    const checkMatch = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.*)$/);
-    if (checkMatch) {
-      const checked = checkMatch[1] !== ' ';
-      elements.push(
-        <div key={i} className="flex items-start gap-2 pl-1 py-0.5">
-          {checked
-            ? <CheckCircle size={13} className="text-green-400 mt-0.5 flex-shrink-0" />
-            : <div className="w-[13px] h-[13px] rounded border border-surface-600 mt-0.5 flex-shrink-0" />
-          }
-          <span className={checked ? 'text-surface-400 line-through' : 'text-surface-200'}>{processInline(checkMatch[2])}</span>
+    if (block.type === 'table') {
+      return (
+        <div key={i} className="my-2 overflow-x-auto rounded-md border border-surface-700/40">
+          <table className="min-w-full text-left text-[12px]">
+            <thead className="bg-surface-900/80 text-surface-300">
+              <tr>
+                {block.headers.map((cell, ci) => (
+                  <th key={ci} className="border-b border-surface-700/40 px-2 py-1 font-semibold">{processInline(cell)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, ri) => (
+                <tr key={ri} className="odd:bg-surface-950/30">
+                  {row.map((cell, ci) => (
+                    <td key={ci} className="border-t border-surface-700/25 px-2 py-0.5 text-surface-200">{processInline(cell)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       );
-      continue;
     }
-
-    // Bullet list: - item or * item
-    const bulletMatch = line.match(/^\s*[-*]\s+(.*)$/);
-    if (bulletMatch) {
-      elements.push(
-        <div key={i} className="flex items-start gap-2 pl-1 py-0.5">
-          <span className="text-primary-400 mt-0.5 flex-shrink-0">•</span>
-          <span className="text-surface-200">{processInline(bulletMatch[1])}</span>
-        </div>
-      );
-      continue;
-    }
-
-    // Numbered list: 1. item
-    const numMatch = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
-    if (numMatch) {
-      elements.push(
-        <div key={i} className="flex items-start gap-2 pl-1 py-0.5">
-          <span className="text-surface-500 text-[11px] font-mono mt-0.5 flex-shrink-0 w-4 text-right">{numMatch[1]}.</span>
-          <span className="text-surface-200">{processInline(numMatch[2])}</span>
-        </div>
-      );
-      continue;
-    }
-
-    // Horizontal rule
-    if (line.match(/^---+$/) || line.match(/^\*\*\*+$/)) {
-      elements.push(<hr key={i} className="border-surface-700/50 my-2" />);
-      continue;
-    }
-
-    // Regular paragraph
-    elements.push(<p key={i} className="text-surface-200">{processInline(line)}</p>);
-  }
-
-  // Close unclosed code block
-  if (inCodeBlock && codeLines.length > 0) {
-    elements.push(
-      <pre key="code-end" className="my-2 p-3 rounded-md bg-surface-950/80 border border-surface-700/30 text-[12px] font-mono text-surface-300 overflow-x-auto">
-        {codeLines.join('\n')}
-      </pre>
-    );
-  }
-
-  return elements;
+    return <p key={i} className="text-surface-200 leading-relaxed">{processInline(block.text)}</p>;
+  });
 }
 
 function useTypedContent(content, enabled) {
@@ -373,7 +329,7 @@ function useTypedContent(content, enabled) {
 export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry, animateContent = false, threadKind = 'session' }) {
   const [showRaw, setShowRaw] = useState(false);
   const [showChangedFiles, setShowChangedFiles] = useState(false);
-  const [showActivity, setShowActivity] = useState(false);
+  const [showDetail, setShowDetail] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
   const [showLogInput, setShowLogInput] = useState(false);
   const shellPrompt = message.metadata?.shell?.prompt;
@@ -391,12 +347,14 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
     ? message.metadata.changedFiles.filter(file => file?.path)
     : [];
   const plan = message.metadata?.plan;
+  const isPlanReply = (message.metadata?.mode === 'plan' || message.metadata?.planMode) && (message.role === 'agent' || message.role === 'system');
   const suggestions = message.metadata?.suggestions;
   const review = message.metadata?.review;
   const logContext = message.metadata?.logContext;
   const diligence = message.metadata?.diligence;
   const checks = Array.isArray(message.metadata?.checks) ? message.metadata.checks : [];
   const activity = message.metadata?.activity;
+  const detail = message.metadata?.detail || activity;
   const visualValidation = message.metadata?.visualValidation;
 
   // Suggestion buttons: render as a row of clickable chips
@@ -469,7 +427,10 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
         </div>
 
         {/* Content — rendered as markdown */}
-        <div className="text-sm leading-relaxed break-words">
+        <div className={`text-sm leading-relaxed break-words ${isPlanReply ? 'rounded-md border border-purple-500/25 bg-purple-500/5 px-2.5 py-2' : ''}`}>
+          {isPlanReply && (
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-purple-300">Plan</div>
+          )}
           {renderedContent}
           {isTyping && <span className="ml-0.5 inline-block h-4 w-1 translate-y-0.5 animate-pulse bg-surface-300" />}
         </div>
@@ -524,18 +485,18 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
           <DiligenceStrip diligence={diligence} />
         )}
 
-        {(rawOutput || changedFiles.length > 0 || activity) && (
+        {(rawOutput || changedFiles.length > 0 || detail) && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            {activity && (
-              <button onClick={() => setShowActivity(!showActivity)} className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
-                {showActivity ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                Show activity
+            {detail && (
+              <button onClick={() => setShowDetail(!showDetail)} className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
+                {showDetail ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                Explain
               </button>
             )}
             {rawOutput && (
               <button onClick={() => setShowRaw(!showRaw)} className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
                 {showRaw ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                Raw output
+                Run log
               </button>
             )}
             {changedFiles.length > 0 && (
@@ -546,9 +507,9 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
             )}
           </div>
         )}
-        {showActivity && activity && (
+        {showDetail && detail && (
           <div className="mt-1 p-2 bg-surface-950/60 rounded border border-surface-700/20 text-[12px] text-surface-400 max-h-72 overflow-y-auto whitespace-pre-wrap leading-relaxed">
-            {activity}
+            {detail}
           </div>
         )}
         {showRaw && rawOutput && (

@@ -4,7 +4,7 @@ const TOOL_EFFORT_LEVELS = {
   claude: ['low', 'medium', 'high', 'max'],
   copilot: ['low', 'medium', 'high', 'xhigh'],
   opencode: ['minimal', 'low', 'medium', 'high', 'max'],
-  codex: ['low', 'medium', 'high', 'xhigh'],
+  codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
 };
 
 function hasOwn(obj, key) {

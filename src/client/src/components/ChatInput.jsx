@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Send, Search, X, Paperclip, Upload, Image, FileText, File, Loader, MessageSquare } from 'lucide-react';
 import ContainerUploadPopover from './ContainerUploadPopover';
+import CodexAccountStatusBar from './CodexAccountStatusBar';
 
 export const ROLE_PROMPTS = [
   {
@@ -96,9 +97,6 @@ export default function ChatInput({
   disabled = false,
   busy = false,
   isVisible = true,
-  selectedRolePromptIds = [],
-  onSelectedRolePromptIdsChange,
-  hideRolePrompts = false,
   focusSignal = 0,
   placeholderOverride = null,
   sendLabel = null,
@@ -108,6 +106,11 @@ export default function ChatInput({
   secondarySendVariant = 'primary',
   secondarySendIconOnly = false,
   onSecondarySend,
+  codexAccountStatus = null,
+  codexAccountLoading = false,
+  onRefreshCodexAccount,
+  showCodexAccountStatus = false,
+  footerActionsEnd = null,
 }) {
   const [text, setText] = useState('');
   const [searching, setSearching] = useState(false);
@@ -164,14 +167,6 @@ export default function ChatInput({
   const handleSearch = (q) => {
     setSearchQuery(q);
     onSearch?.(q);
-  };
-
-  const activeRolePromptIds = normalizeRolePromptIds(selectedRolePromptIds);
-  const toggleRolePrompt = (roleId) => {
-    const current = new Set(activeRolePromptIds);
-    if (current.has(roleId)) current.delete(roleId);
-    else current.add(roleId);
-    onSelectedRolePromptIdsChange?.(normalizeRolePromptIds([...current]));
   };
 
   const handleFileSelect = async (e) => {
@@ -355,37 +350,19 @@ export default function ChatInput({
             >
               <Upload size={16} />
             </button>
-
-            {channel !== 'shell' && !hideRolePrompts && (
-              <div className="ml-1 flex max-w-full flex-wrap items-center gap-1 border-l border-surface-700/50 pl-2">
-                {ROLE_PROMPTS.map(role => {
-                  const active = activeRolePromptIds.includes(role.id);
-                  return (
-                    <button
-                      key={role.id}
-                      type="button"
-                      onClick={() => toggleRolePrompt(role.id)}
-                      aria-pressed={active}
-                      className={`flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] transition-colors ${
-                        active
-                          ? 'border-primary-500/40 bg-primary-500/15 text-primary-200'
-                          : 'border-surface-700/70 bg-surface-900/30 text-surface-500 hover:border-surface-600 hover:text-surface-300'
-                      }`}
-                      title={`${role.title}\n${role.description}`}
-                    >
-                      <span className={`relative h-3 w-5 rounded-full transition-colors ${active ? 'bg-primary-500/70' : 'bg-surface-700'}`}>
-                        <span className={`absolute left-0.5 top-0.5 h-2 w-2 rounded-full bg-white/90 transition-transform ${active ? 'translate-x-2' : 'translate-x-0'}`} />
-                      </span>
-                      <span className="hidden min-[390px]:inline">{role.shortLabel}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
           </div>
 
-          {/* Send button(s) */}
+          {/* Codex limit, git/SSH actions, send */}
           <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-1.5">
+            {showCodexAccountStatus && (
+              <CodexAccountStatusBar
+                status={codexAccountStatus}
+                loading={codexAccountLoading}
+                onRefresh={onRefreshCodexAccount}
+                compact
+              />
+            )}
+            {footerActionsEnd}
             {onSecondarySend && secondarySendLabel && (
               <button
                 type="button"

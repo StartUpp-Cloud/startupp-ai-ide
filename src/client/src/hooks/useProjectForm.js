@@ -3,6 +3,7 @@ import { useState } from "react";
 const defaultFormData = {
   name: "",
   description: "",
+  client: "",
   rules: [""],
   selectedPresets: [],
   excludedPresetRules: [],
@@ -74,6 +75,7 @@ export default function useProjectForm(initialData) {
     setFormData({
       name: project.name,
       description: project.description,
+      client: project.client || "",
       rules: project.rules?.length > 0 ? [...project.rules] : [""],
       selectedPresets: project.selectedPresets || [],
       excludedPresetRules: project.excludedPresetRules || [],

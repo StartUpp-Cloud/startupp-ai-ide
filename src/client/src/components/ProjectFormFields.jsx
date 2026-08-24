@@ -78,6 +78,20 @@ const ProjectFormFields = ({
         )}
       </div>
 
+      <div>
+        <label className="label">Client</label>
+        <input
+          type="text"
+          value={formData.client || ""}
+          onChange={(e) => handleInputChange("client", e.target.value)}
+          className="input"
+          placeholder="e.g. Openava — groups matching names together"
+        />
+        <p className="text-[11px] text-surface-500 mt-1">
+          Optional. Projects with the same client name are grouped and share a color.
+        </p>
+      </div>
+
       {/* Runtime mode: Container vs Host */}
       <div>
         <label className="label">Runtime</label>

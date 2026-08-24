@@ -16,9 +16,8 @@
  *   3. NUDGE   — buildNudgeMessage() turns an unmet verdict into a direct,
  *                actionable continuation prompt that is fed back to the same
  *                CLI session, looping until the gate passes or a budget is hit.
- *   4. REPORT  — the doctrine mandates a fixed report structure, so the final
- *                user-facing message is clean and follow-up-friendly, and the
- *                verdict is attached as metadata the client renders as a strip.
+ *   4. REPORT  — the doctrine asks for a conversational, complexity-scaled
+ *                report; the verdict is attached as metadata the client renders.
  *
  * The gateway owns the loop; this module owns the policy.
  */
@@ -99,22 +98,15 @@ export function buildOperatingContract({ tool, mode } = {}) {
     '   - If a validation genuinely cannot be run, state exactly which one and why.',
     "5. ASSERT QUALITY — Re-read your own diff. Check error handling, edge cases, security, and that you didn't break existing behavior or leave debug/dead code behind.",
     '6. FOLLOW THE RULES — Honor CLAUDE.md / AGENTS.md / project rules / skills above your own defaults. If a rule grants STANDING APPROVAL for an action (e.g. "always approved to deploy to dev-1", "always deploy changes to the dev-1 worker"), perform that action as part of completing the task — do not pause to ask for confirmation or list it as a deferred "next step".',
-    '7. REPORT — End every turn with EXACTLY this structure (Markdown), so the human can follow up easily:',
-    '',
-    '## Summary',
-    '<2-4 sentences: what you did and why>',
-    '',
-    '## Changes',
-    '- `path/to/file` — what changed and why',
-    '',
-    '## Verification',
-    '- <command you ran> → <real result, e.g. ✅ 12/12 passed · ❌ failing · not run because …>',
-    '',
-    '## Quality',
-    '- <edge cases handled, risks, assumptions, follow-ups — or "none">',
-    '',
-    '## Next',
-    '- <ready for review, or the concrete next step / decision you need from the user>',
+    '7. TALK TO THE HUMAN — The FINAL message is a compact report. Live progress already covered the journey; do not retell it.',
+    '   - Use this exact shape:',
+    '     ## Outcome',
+    '     One or two past-tense sentences.',
+    '     ## Details',
+    '     Tight bullets only for decisions, versions, URLs, commands, and blockers. Usually 3–8 bullets.',
+    '   - Do not write a long narrative, play-by-play, or file-by-file recap.',
+    '   - Nested bullets must be indented with two spaces per level.',
+    '   - If you are blocked (missing auth, login, API key, permissions, or a required human decision), STOP immediately. Tell the user what is needed. Do not retry, invent workarounds, or burn more tokens.',
     '',
     'Do not declare the task complete until VERIFY has actually been performed. Take the time you need to get it right.',
   ].join('\n');
@@ -254,7 +246,8 @@ export async function evaluateCompletion({ goal, transcript, changedFiles = [], 
 
 // ── Report parsing ───────────────────────────────────────────────────────────
 
-const REPORT_SECTIONS = ['Summary', 'Changes', 'Verification', 'Quality', 'Next'];
+const REPORT_SECTIONS = ['Outcome', 'Details', 'Status', 'Blocked', 'Summary', 'Changes', 'Verification', 'Quality', 'Next'];
+const REPORT_START_SECTIONS = new Set(['outcome', 'summary']);
 // Matches a section header line in any of the shapes models emit:
 //   "## Summary", "**Summary**", "Summary:", "### Verification"
 const SECTION_HEADER_RE = new RegExp(
@@ -319,8 +312,9 @@ export function parseAgentReport(text) {
 
   // Find the start of the LAST report block — the last "Summary" header, or the
   // earliest header of the last contiguous run if Summary is absent.
-  const summaryIdxs = headers.filter((h) => /^summary$/i.test(h.name));
-  const startHeader = summaryIdxs.length ? summaryIdxs[summaryIdxs.length - 1] : null;
+  const startHeader = [...headers].reverse().find((h) => REPORT_START_SECTIONS.has(h.name.toLowerCase()))
+    || headers[0]
+    || null;
   if (!startHeader) {
     return { hasReport: false, activity: '', body: src, summary: '', checks: [] };
   }
@@ -350,7 +344,7 @@ export function parseAgentReport(text) {
     hasReport: true,
     activity,
     body: bodyParts.join('\n\n').trim(),
-    summary: sections.summary || '',
+    summary: sections.outcome || sections.summary || '',
     checks,
   };
 }
@@ -386,7 +380,7 @@ export function buildNudgeMessage(verdict) {
     lines.push(verdict.nudge, '');
   }
   lines.push(
-    'Do NOT restate what you already did. Finish the remaining work, then ACTUALLY RUN the relevant validation (tests / build / typecheck / e2e — write a test first if none exists) and report the real command output. End with the standard ## Summary / ## Changes / ## Verification / ## Quality / ## Next report.',
+    'Do NOT restate what you already did. Finish the remaining work, then ACTUALLY RUN the relevant validation (tests / build / typecheck / e2e — write a test first if none exists). When you report back, write a conversational update sized to the remaining work — not a rigid Summary/Changes/Verification template.',
   );
   return lines.join('\n');
 }

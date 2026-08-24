@@ -23,6 +23,7 @@ import {
   Sparkles,
   CheckCircle,
   Bot,
+  MessageSquare,
 } from 'lucide-react';
 
 const API_BASE = '/api';
@@ -49,7 +50,7 @@ function normalizeOpenCodeModels(models = []) {
   }).filter(model => model.id));
 }
 
-export default function LLMSettingsPanel({ isOpen, onClose, project = null, projectId = null }) {
+export default function LLMSettingsPanel({ isOpen, onClose, project = null, projectId = null, onOpenSlack }) {
   const effectiveProjectId = project?.id || projectId || null;
   const projectName = project?.name || '';
   const [settings, setSettings] = useState(null);
@@ -355,6 +356,7 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
             { id: 'codex', label: 'Codex', icon: Bot },
             { id: 'deepseek', label: 'DeepSeek', icon: Brain },
             { id: 'github', label: 'GitHub', icon: Sparkles },
+            { id: 'integrations', label: 'Integrations', icon: MessageSquare },
             { id: 'advanced', label: 'Advanced', icon: Sliders },
           ].map((tab) => (
             <button
@@ -1397,6 +1399,25 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
                       className="w-full px-3 py-2.5 bg-surface-800 border border-surface-700 rounded-lg text-surface-200 text-sm font-mono placeholder-surface-600 focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500/50 outline-none"
                     />
                   </div>
+                </div>
+              )}
+
+              {activeTab === 'integrations' && (
+                <div className="space-y-4">
+                  <p className="text-sm text-surface-400">
+                    Connect external services to your IDE workspace.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => onOpenSlack?.()}
+                    className="flex w-full items-center gap-3 rounded-lg border border-surface-700 bg-surface-800 px-4 py-3 text-left transition-colors hover:border-[#4A154B]/50 hover:bg-surface-750"
+                  >
+                    <MessageSquare className="h-5 w-5 text-[#4A154B]" />
+                    <div>
+                      <div className="text-sm font-medium text-surface-100">Slack</div>
+                      <div className="text-xs text-surface-500">Connect a Slack workspace for notifications and bot commands</div>
+                    </div>
+                  </button>
                 </div>
               )}
 

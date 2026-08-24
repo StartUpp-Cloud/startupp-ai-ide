@@ -14,6 +14,14 @@ import { encrypt, decrypt } from './fieldEncryption.js';
 import { decryptWithResult } from './fieldEncryption.js';
 import { redactObject, redactSecrets } from './connections/redaction.js';
 import { listConnections } from './sqliteStore.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import {
+  FALLBACK_CHATGPT_CODEX_MODELS,
+  listSupportedCodexModels,
+  parseCodexModelsCache,
+} from './codexModels.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -65,32 +73,6 @@ function fallbackOpenCodeModels() {
 }
 
 const CODEX_MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
-const CODEX_FALLBACK_MODELS = [
-  'gpt-5.4',
-  'gpt-5.3-codex',
-  'gpt-5.2-codex',
-  'gpt-5.2',
-  'gpt-5-mini',
-  'o3',
-  'o4-mini',
-];
-
-function fallbackCodexModels() {
-  return CODEX_FALLBACK_MODELS.map((id) => ({ id, name: id, provider: 'codex' }));
-}
-
-function parseCodexModels(raw) {
-  const seen = new Set();
-  const models = [];
-  for (const line of String(raw || '').split(/\r?\n/)) {
-    const token = line.trim().split(/\s+/)[0];
-    if (!token || token.startsWith('-') || token.toLowerCase() === 'model') continue;
-    if (seen.has(token)) continue;
-    seen.add(token);
-    models.push({ id: token, name: token, provider: 'codex' });
-  }
-  return models;
-}
 
 /**
  * Extract the assistant text from `codex exec --json` event stream.
@@ -1592,24 +1574,22 @@ class LLMProvider extends EventEmitter {
     }
 
     try {
-      const spec = linuxCliSpec('codex', ['models']);
-      const result = await execFileAsync(spec.cmd, spec.args, {
-        encoding: 'utf-8',
-        timeout: 20000,
-        maxBuffer: OPENCODE_MODELS_MAX_BUFFER,
-        windowsHide: true,
-      });
-      const stdout = typeof result === 'string' ? result : result?.stdout;
-      const models = parseCodexModels(stdout);
+      const cachePath = path.join(os.homedir(), '.codex', 'models_cache.json');
+      const raw = fs.readFileSync(cachePath, 'utf8');
+      const models = listSupportedCodexModels(parseCodexModelsCache(raw))
+        .map((model) => ({ ...model, provider: 'codex' }));
       if (models.length > 0) {
         this.codexModelsCache = { models, fetchedAt: now };
         return models;
       }
     } catch (error) {
-      console.warn('[llmProvider] Codex model discovery failed:', error.message);
+      if (error.code !== 'ENOENT') {
+        console.warn('[llmProvider] Codex model cache unreadable:', error.message);
+      }
     }
 
-    return this.codexModelsCache?.models || (allowFallback ? fallbackCodexModels() : []);
+    const fallback = FALLBACK_CHATGPT_CODEX_MODELS.map((model) => ({ ...model, provider: 'codex' }));
+    return this.codexModelsCache?.models || (allowFallback ? fallback : []);
   }
 
   /**

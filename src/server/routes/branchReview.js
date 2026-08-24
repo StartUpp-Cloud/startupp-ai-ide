@@ -27,13 +27,16 @@ const MAX_DIFF_LENGTH = 5000;
  * @param {string} [ctx.workDir] - Working directory inside the container
  * @returns {string} trimmed stdout
  */
-function run(cmd, ctx) {
+async function run(cmd, ctx) {
   if (ctx.containerName) {
     const dir = ctx.workDir || '/workspace';
-    const escaped = cmd.replace(/"/g, '\\"');
-    return runHostShell(`docker exec -w "${dir}" ${ctx.containerName} bash -c "${escaped}"`, { timeout: 30000 }).trim();
+    const output = await containerManager.execInContainerAsync(
+      ctx.containerName,
+      `cd '${dir}' && ${cmd}`,
+      { timeout: 30000 },
+    );
+    return (output || '').trim();
   }
-  // Host project — run in the IDE container so POSIX pipelines match Linux.
   return runHostShell(cmd, { cwd: ctx.projectPath }).trim();
 }
 
@@ -41,25 +44,22 @@ function run(cmd, ctx) {
  * Resolve execution context from a projectId.
  * Returns { projectPath, containerName, workDir } or null.
  */
-function resolveContext(projectId) {
+async function resolveContext(projectId) {
   if (!projectId) return null;
   const project = findProjectById(projectId);
   if (!project) return null;
 
   if (project.containerName) {
-    // Container project — find the first git repo inside /workspace
-    const status = containerManager.getContainerStatus(project.containerName);
+    const status = await containerManager.getContainerStatusAsync(project.containerName);
     if (!status || status !== 'running') return null;
 
     let workDir = '/workspace';
     try {
-      // Find git repos inside /workspace
-      const dirs = containerManager.execInContainer(project.containerName, 'ls -d /workspace/*/ 2>/dev/null');
+      const dirs = await containerManager.execInContainerAsync(project.containerName, 'ls -d /workspace/*/ 2>/dev/null');
       if (dirs) {
         const dirList = dirs.split('\n').filter(Boolean).map(d => d.replace(/\/$/, ''));
-        // Pick the first one that's a git repo
         for (const dir of dirList) {
-          const isGit = containerManager.execInContainer(project.containerName, `test -d ${dir}/.git && echo yes`);
+          const isGit = await containerManager.execInContainerAsync(project.containerName, `test -d ${dir}/.git && echo yes`);
           if (isGit === 'yes') { workDir = dir; break; }
         }
       }
@@ -92,20 +92,20 @@ function mapGitStatus(letter) {
  * Returns recent commits for the user to select which ones to review.
  * Query: projectId, count (default 20)
  */
-router.get('/commits', (req, res) => {
+router.get('/commits', async (req, res) => {
   try {
     const { projectId, count = 20 } = req.query;
-    const ctx = resolveContext(projectId);
+    const ctx = await resolveContext(projectId);
     if (!ctx) return res.status(400).json({ error: 'Could not resolve project. Is the container running?' });
 
     const n = Math.max(1, Math.min(parseInt(count, 10) || 20, 100));
 
     let branch = 'unknown';
-    try { branch = run('git branch --show-current', ctx); } catch {}
+    try { branch = await run('git branch --show-current', ctx); } catch {}
 
     let logOutput = '';
     try {
-      logOutput = run(`git log --oneline --format="%H||%h||%s||%an||%ar" -${n}`, ctx);
+      logOutput = await run(`git log --oneline --format="%H||%h||%s||%an||%ar" -${n}`, ctx);
     } catch {}
 
     const commits = logOutput ? logOutput.split('\n').map(line => {
@@ -124,14 +124,14 @@ router.get('/commits', (req, res) => {
  * Returns changed files with diffs.
  * Query: projectId, fromCommit, toCommit, mode (commits|working)
  */
-router.get('/changes', (req, res) => {
+router.get('/changes', async (req, res) => {
   try {
     const { projectId, fromCommit, toCommit, mode = 'commits' } = req.query;
-    const ctx = resolveContext(projectId);
+    const ctx = await resolveContext(projectId);
     if (!ctx) return res.status(400).json({ error: 'Could not resolve project. Is the container running?' });
 
     let currentBranch = 'unknown';
-    try { currentBranch = run('git branch --show-current', ctx); } catch {}
+    try { currentBranch = await run('git branch --show-current', ctx); } catch {}
 
     let diffRange;
     if (mode === 'working') {
@@ -145,10 +145,12 @@ router.get('/changes', (req, res) => {
     let nameStatusOutput = '';
     try {
       if (mode === 'working') {
-        const staged = run('git diff --cached --name-status', ctx);
-        const unstaged = run('git diff --name-status', ctx);
+        const [staged, unstaged] = await Promise.all([
+          run('git diff --cached --name-status', ctx),
+          run('git diff --name-status', ctx),
+        ]);
         let untracked = '';
-        try { untracked = run('git ls-files --others --exclude-standard', ctx); } catch {}
+        try { untracked = await run('git ls-files --others --exclude-standard', ctx); } catch {}
 
         const parts = [];
         if (staged) parts.push(staged);
@@ -168,7 +170,7 @@ router.get('/changes', (req, res) => {
           return true;
         }).join('\n');
       } else {
-        nameStatusOutput = run(`git diff --name-status ${diffRange}`, ctx);
+        nameStatusOutput = await run(`git diff --name-status ${diffRange}`, ctx);
       }
     } catch (error) {
       return res.status(400).json({ error: 'Failed to get git diff', message: error.message });
@@ -184,7 +186,8 @@ router.get('/changes', (req, res) => {
     const lines = nameStatusOutput.split('\n').filter(Boolean);
     const summary = { added: 0, modified: 0, deleted: 0, renamed: 0, total: 0 };
 
-    const files = lines.map(line => {
+    const files = [];
+    for (const line of lines) {
       const parts = line.split('\t');
       const statusLetter = parts[0].charAt(0);
       const filePath = statusLetter === 'R' ? parts[2] : parts[1];
@@ -195,20 +198,20 @@ router.get('/changes', (req, res) => {
       let diff = '';
       try {
         if (mode === 'working') {
-          diff = run(`git diff --cached -- "${filePath}"`, ctx);
-          if (!diff) diff = run(`git diff -- "${filePath}"`, ctx);
+          diff = await run(`git diff --cached -- "${filePath}"`, ctx);
+          if (!diff) diff = await run(`git diff -- "${filePath}"`, ctx);
           if (!diff && status === 'added') {
-            try { diff = `(new file)\n${run(`head -100 "${filePath}"`, ctx)}`; }
+            try { diff = `(new file)\n${await run(`head -100 "${filePath}"`, ctx)}`; }
             catch { diff = '(new untracked file)'; }
           }
         } else {
-          diff = run(`git diff ${diffRange} -- "${filePath}"`, ctx);
+          diff = await run(`git diff ${diffRange} -- "${filePath}"`, ctx);
         }
         if (diff.length > MAX_DIFF_LENGTH) diff = diff.slice(0, MAX_DIFF_LENGTH) + '\n... [truncated]';
       } catch { diff = '(unable to retrieve diff)'; }
 
-      return { path: filePath, status, diff, directory: path.dirname(filePath), extension: path.extname(filePath) };
-    });
+      files.push({ path: filePath, status, diff, directory: path.dirname(filePath), extension: path.extname(filePath) });
+    }
 
     res.json({
       branch: currentBranch, mode,

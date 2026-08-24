@@ -38,9 +38,15 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  resolveSessionAssistantSettings({ tool: 'codex', model: 'gpt-5.3-codex-spark', effort: 'high' }),
+  { tool: 'codex', model: 'gpt-5.3-codex-spark', effort: 'high' },
+  'Codex should keep ChatGPT-supported Spark and high effort',
+);
+
+assert.deepEqual(
   resolveSessionAssistantSettings({ tool: 'codex', model: 'gpt-5.4', effort: 'max' }),
-  { tool: 'codex', model: 'gpt-5.4', effort: null },
-  'Codex should reject unsupported effort values',
+  { tool: 'codex', model: 'gpt-5.4', effort: 'max' },
+  'Codex should accept max effort used by GPT-5.6 models',
 );
 
 assert.deepEqual(

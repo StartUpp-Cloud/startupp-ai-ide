@@ -1,6 +1,12 @@
 import { v4 as uuidv4 } from "uuid";
 import db from "../db.js";
 import { normalizeEnvironments } from "../projectEnvironments.js";
+import {
+  nextSortOrder,
+  normalizeClient,
+  normalizeOrganization,
+  sortProjects,
+} from "../projectOrganization.js";
 
 // Project helper functions for LowDB
 
@@ -71,13 +77,12 @@ export function normalizeStackSettings(project) {
 }
 
 export function getAllProjects() {
-  return db.data.projects.map(normalizeStackSettings).sort(
-    (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
-  );
+  return sortProjects(db.data.projects.map(normalizeStackSettings).map(normalizeOrganization));
 }
 
 export function findProjectById(id) {
-  return normalizeStackSettings(db.data.projects.find((p) => p.id === id));
+  const project = db.data.projects.find((p) => p.id === id);
+  return normalizeOrganization(normalizeStackSettings(project));
 }
 
 export function findProjectByName(name) {
@@ -88,14 +93,16 @@ export function findProjectByName(name) {
 
 export function searchProjects(searchTerm) {
   const term = searchTerm.toLowerCase();
-  return db.data.projects
+  const matches = db.data.projects
     .map(normalizeStackSettings)
+    .map(normalizeOrganization)
     .filter(
       (p) =>
         p.name.toLowerCase().includes(term) ||
-        p.description.toLowerCase().includes(term),
-    )
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        (p.description || "").toLowerCase().includes(term) ||
+        normalizeClient(p.client).toLowerCase().includes(term),
+    );
+  return sortProjects(matches);
 }
 
 export async function createProject({
@@ -114,6 +121,8 @@ export async function createProject({
   stackDetection,
   salesforce,
   environments,
+  client,
+  sortOrder,
 }) {
   const now = new Date().toISOString();
   const project = {
@@ -134,6 +143,10 @@ export async function createProject({
     stackDetection: stackDetection || null,
     salesforce: salesforce && typeof salesforce === "object" ? salesforce : {},
     environments: normalizeEnvironments(environments, []),
+    client: normalizeClient(client),
+    sortOrder: Number.isFinite(Number(sortOrder))
+      ? Number(sortOrder)
+      : nextSortOrder(db.data.projects),
     promptCount: 0,
     createdAt: now,
     updatedAt: now,

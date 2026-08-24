@@ -825,16 +825,14 @@ class SkillManager {
 
     try {
       // Ensure .skills directory exists in the container
-      dockerHost(
+      await dockerHost(
         `docker exec ${containerName} mkdir -p /workspace/.skills`,
         { timeout: 15000 },
       );
 
-      // Copy skill folder to container
-      copyIntoContainer(skillDir, containerName, `/workspace/.skills/${skillId}`, { timeout: 30000 });
+      await copyIntoContainer(skillDir, containerName, `/workspace/.skills/${skillId}`, { timeout: 30000 });
 
-      // Fix permissions
-      dockerHost(
+      await dockerHost(
         `docker exec ${containerName} chown -R dev:dev /workspace/.skills/${skillId}`,
         { timeout: 15000 },
       );
@@ -883,7 +881,7 @@ class SkillManager {
    */
   async undeployFromContainer(skillId, containerName) {
     try {
-      dockerHost(
+      await dockerHost(
         `docker exec ${containerName} rm -rf /workspace/.skills/${skillId}`,
         { timeout: 15000 },
       );
@@ -921,9 +919,9 @@ class SkillManager {
    * @param {string} containerName - Docker container name
    * @returns {boolean} Whether the skill is deployed in the container
    */
-  getDeploymentStatus(skillId, containerName) {
+  async getDeploymentStatus(skillId, containerName) {
     try {
-      dockerHost(
+      await dockerHost(
         `docker exec ${containerName} test -d /workspace/.skills/${skillId}`,
         { timeout: 10000 },
       );

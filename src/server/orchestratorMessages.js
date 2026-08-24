@@ -1,3 +1,5 @@
+import { parseAgentReport } from './diligence.js';
+
 const RAW_TELEMETRY_PATTERNS = [
   /^\{.*"(?:type|sessionID|session_id|part|tokens)".*\}?$/i,
   /^"?sessionID"?\s*:\s*"[^"\n]+".*"?type"?\s*:/i,
@@ -192,21 +194,206 @@ export function buildRunFailureResponse({ status = 'failed', taskTitle = null, e
   ].join('\n');
 }
 
-function oneLineSummary(value, maxLength = 180) {
-  const text = sanitizeAgentFailureDetail(value, maxLength)
+const PROGRESS_VERB_RE = /(?:checking|starting|deploying|running|doing|looking|rerunning|confirming|keeping|trying|rechecking|inspecting|reviewing|making)\b/i;
+const PROGRESS_LEAD_RE = /^(?:[-*•]\s*)?(?:I(?:'ll| will)|Let me)\b/i;
+const PROGRESS_GERUND_RE = /^(?:[-*•]\s*)?I(?:'m| am)(?:\s+\w+){0,4}\s+/i;
+const PROGRESS_CLAUSE_RE = /\b(?:then |and )I(?:'ll| will)\b|\bonce (?:it|that|the)\s+\w+\s+(?:finishes|completes|succeeds)\b|\b(?:build|deploy(?:ment)?|release|script) is (?:now )?running\b|\bwill (?:publish|deploy|rerun|report|confirm|hand off)\b/i;
+
+function normalizeNarrativeApostrophes(value) {
+  return String(value || '').replace(/[\u2018\u2019]/g, "'");
+}
+
+function splitSentences(paragraph) {
+  const text = String(paragraph || '').trim();
+  if (!text) return [];
+  return text.split(/(?<=[.!?])\s+(?=[A-Z"'I])/).map((part) => part.trim()).filter(Boolean);
+}
+
+function isProgressSentence(sentence) {
+  const text = normalizeNarrativeApostrophes(sentence).trim();
+  if (!text) return false;
+  if (PROGRESS_LEAD_RE.test(text)) return true;
+  if (PROGRESS_GERUND_RE.test(text) && PROGRESS_VERB_RE.test(text)) return true;
+  return PROGRESS_CLAUSE_RE.test(text);
+}
+
+/**
+ * Drop "I'll check / I'm deploying" play-by-play from a finished report.
+ * Keeps completed facts, commands, versions, and decisions.
+ */
+export function stripInProgressNarration(content) {
+  const paragraphs = String(content || '')
+    .split(/\n\s*\n/)
+    .map((paragraph) => {
+      const kept = splitSentences(paragraph).filter((sentence) => !isProgressSentence(sentence));
+      if (kept.length) return kept.join(' ');
+      const leftover = String(paragraph || '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line && !isProgressSentence(line));
+      return leftover.join('\n').trim();
+    })
+    .filter(Boolean);
+  return paragraphs.join('\n\n').trim();
+}
+
+/** Prefer the last completed handoff over earlier "I'm about to…" updates. */
+export function selectFinalAgentMessage(parts = []) {
+  const cleaned = parts.map((part) => String(part || '').trim()).filter(Boolean);
+  if (cleaned.length === 0) return '';
+  if (cleaned.length === 1) return stripInProgressNarration(cleaned[0]) || cleaned[0];
+  for (let i = cleaned.length - 1; i >= 0; i -= 1) {
+    const stripped = stripInProgressNarration(cleaned[i]);
+    if (stripped) return stripped;
+  }
+  return cleaned[cleaned.length - 1];
+}
+
+function extractAgentSummary(content) {
+  const text = String(content || '').trim();
+  if (!text) return '';
+
+  const summaryMatch = text.match(/(?:^|\n)#{1,3}\s*(?:Outcome|Summary)\s*\n+([\s\S]*?)(?=\n#{1,3}\s|\s*$)/i);
+  const extracted = summaryMatch?.[1]?.trim()
+    ? summaryMatch[1].trim()
+    : text
+      .split('\n')
+      .filter((line) => !/^\s*#{1,6}\s/.test(line))
+      .join('\n')
+      .trim() || text;
+  return stripInProgressNarration(extracted) || extracted;
+}
+
+export function formatStoppedPartial(content) {
+  return extractAgentSummary(content).trim();
+}
+
+export function buildStoppedRunResponse({
+  profile = null,
+  partialContent = '',
+  completed = [],
+  changedFiles = [],
+  tool = null,
+} = {}) {
+  const body = formatStoppedPartial(partialContent);
+  const completedLines = (completed || [])
+    .map((item) => {
+      const title = String(item?.title || item?.task?.title || 'Task').trim() || 'Task';
+      const summary = oneLineSummary(item?.content || item?.result?.content || item?.result || '', 220);
+      return summary ? `- ${title}: ${summary}` : `- ${title}`;
+    })
+    .filter((line, index, all) => all.indexOf(line) === index);
+  const fileLines = (changedFiles || [])
+    .map((file) => {
+      const filePath = typeof file === 'string' ? file : file?.path;
+      if (!filePath) return '';
+      const status = typeof file === 'object' && file.status ? ` (${file.status})` : '';
+      return `- \`${filePath}\`${status}`;
+    })
+    .filter(Boolean)
+    .slice(0, 30);
+
+  const heading = withName(profile, 'I stopped this run. Here is what had already happened.');
+  const parts = ['## Outcome', '', heading, ''];
+  const detailBits = [];
+  if (body) detailBits.push(body);
+  if (completedLines.length) {
+    detailBits.push(['Already completed:', ...completedLines].join('\n'));
+  }
+  if (fileLines.length) {
+    detailBits.push(['Files already touched:', ...fileLines].join('\n'));
+  }
+  if (!body && completedLines.length === 0 && fileLines.length === 0) {
+    const agent = toolName(tool);
+    detailBits.push(`${agent} had not produced a usable report yet. The workspace may still have in-progress edits.`);
+  }
+  if (detailBits.length) {
+    parts.push('## Details', '', detailBits.join('\n\n'), '');
+  }
+  parts.push('You can keep going from this state — tell me what to do next.');
+  return parts.join('\n').trim();
+}
+
+const COMPACT_REPORT_MAX = 1200;
+
+function heuristicCompact(text, maxLength = COMPACT_REPORT_MAX) {
+  const lines = String(text || '').split('\n');
+  const kept = [];
+  let size = 0;
+  for (const line of lines) {
+    if (!kept.length && !line.trim()) continue;
+    const nextSize = size + line.length + 1;
+    if (kept.length >= 4 && nextSize > maxLength && !/^\s*(?:#{1,3}\s+|[-*•]|\d+[.)])/.test(line)) break;
+    kept.push(line);
+    size = nextSize;
+    if (size >= maxLength) break;
+  }
+  return kept.join('\n').trim();
+}
+
+/**
+ * Prefer a titled Outcome/Details report for the chat bubble. Stash the rest
+ * as `detail` so the UI can offer Explain without making the next turn reread
+ * a wall of play-by-play.
+ */
+export function compactChatReport(content) {
+  const raw = String(content || '').trim();
+  if (!raw) return { body: '', detail: '', compact: false };
+
+  const parsed = parseAgentReport(raw);
+  if (parsed.hasReport && parsed.body.trim()) {
+    const body = stripInProgressNarration(parsed.body) || parsed.body.trim();
+    const detail = parsed.activity && parsed.activity !== body ? parsed.activity : '';
+    return { body, detail, compact: true };
+  }
+
+  const stripped = stripInProgressNarration(raw) || raw;
+
+  if (stripped.length <= COMPACT_REPORT_MAX) {
+    return { body: stripped, detail: '', compact: false };
+  }
+
+  const body = heuristicCompact(stripped);
+  return {
+    body: body || stripped.slice(0, COMPACT_REPORT_MAX).trim(),
+    detail: stripped,
+    compact: true,
+  };
+}
+
+function oneLineSummary(value, maxLength = 280) {
+  const text = extractAgentSummary(sanitizeAgentFailureDetail(value, maxLength * 2))
     .split('\n')
     .map(line => line.trim())
-    .filter(Boolean)
-    .find(Boolean) || '';
+    .filter(line => line && !/^#{1,6}\s/.test(line))
+    .join(' ')
+    .trim();
+  if (!text) return '';
   return text.length > maxLength ? `${text.slice(0, maxLength).trim()}...` : text;
+}
+
+function pickPriorityCompletedTask(completed = []) {
+  for (const phase of ['validate', 'consolidate']) {
+    const item = [...completed].reverse().find(
+      (entry) => entry?.task?.data?.phase === phase && extractAgentSummary(entry?.result?.content),
+    );
+    if (item) return item;
+  }
+  return null;
 }
 
 export function buildThinFinalResponse({ completed = [], profile = null } = {}) {
   const successful = completed.filter(item => item?.result?.success !== false);
+  const priority = pickPriorityCompletedTask(successful);
+  if (priority) {
+    const content = extractAgentSummary(priority.result?.content);
+    if (content) return compactChatReport(content).body || content;
+  }
+
   if (successful.length === 1) {
     const item = successful[0];
-    const content = String(item.result?.content || item.task?.result || '').trim();
-    if (content) return content;
+    const content = extractAgentSummary(item.result?.content || item.task?.result || '');
+    if (content) return compactChatReport(content).body || content;
   }
 
   if (successful.length === 0) {
@@ -215,7 +402,8 @@ export function buildThinFinalResponse({ completed = [], profile = null } = {}) 
 
   const lines = successful.map(({ task, result }) => {
     const summary = oneLineSummary(result?.content || task?.result || 'Completed.');
-    return `- ${task?.title || 'Agent step'}: ${summary || 'Completed.'}`;
+    const title = task?.title || 'Agent step';
+    return `- ${title}: ${summary || 'Completed.'}`;
   });
   return [withName(profile, 'the coding agent completed the run.'), '', ...lines].join('\n');
 }

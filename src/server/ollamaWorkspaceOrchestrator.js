@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import Project from './models/Project.js';
+import { dockerCliEnv } from './dockerRoute.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '../../data/ollama-orchestrator');
@@ -309,7 +310,7 @@ class OllamaWorkspaceOrchestrator {
     if (!options.forceRefresh && existing && !this.isStale(existing, project)) {
       return existing;
     }
-    return this.buildIndex(project);
+    return await this.buildIndex(project);
   }
 
   createJob({ projectId, sessionId, prompt, model, taskKind, editRequested }) {
@@ -485,10 +486,10 @@ class OllamaWorkspaceOrchestrator {
     return { type: 'host', root: process.cwd() };
   }
 
-  buildIndex(project) {
+  async buildIndex(project) {
     const source = this.resolveSource(project);
     const rawFiles = source.type === 'container'
-      ? this.scanContainer(source)
+      ? await this.scanContainer(source)
       : this.scanHost(source.root);
 
     const files = rawFiles.map((file) => {
@@ -564,7 +565,7 @@ class OllamaWorkspaceOrchestrator {
     return results;
   }
 
-  scanContainer(source) {
+  async scanContainer(source) {
     const script = `
 const fs = require('fs');
 const path = require('path');
@@ -604,10 +605,33 @@ walk(root);
 process.stdout.write(JSON.stringify(out));`;
 
     try {
-      const output = execFileSync('docker', ['exec', source.containerName, 'node', '-e', script], {
-        encoding: 'utf-8',
-        timeout: 120000,
-        maxBuffer: 50 * 1024 * 1024,
+      const output = await new Promise((resolve, reject) => {
+        const child = spawn('docker', ['exec', source.containerName, 'node', '-e', script], {
+          env: dockerCliEnv(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        let settled = false;
+        const settle = (err, out = '') => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (err) reject(err);
+          else resolve(out);
+        };
+        const timer = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch { /* ignore */ }
+          try { child.unref(); } catch { /* ignore */ }
+          settle(new Error('docker exec timed out after 120000ms'));
+        }, 120000);
+        if (child.stdout) child.stdout.on('data', (chunk) => { stdout += chunk; });
+        if (child.stderr) child.stderr.on('data', (chunk) => { stderr += chunk; });
+        child.on('error', (err) => settle(err));
+        child.on('close', (code) => {
+          if (code === 0) settle(null, stdout);
+          else settle(new Error((stderr || stdout || `exit ${code}`).trim()));
+        });
       });
       return JSON.parse(output);
     } catch (error) {

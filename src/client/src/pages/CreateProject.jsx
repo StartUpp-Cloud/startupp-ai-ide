@@ -18,6 +18,7 @@ const CreateProject = () => {
   const [formData, setFormData] = useState({
     name: "",
     description: "",
+    client: "",
     rules: [""],
     selectedPresets: [],
   });
@@ -67,6 +68,7 @@ const CreateProject = () => {
       setFormData({
         name: `${project.name} (Copy)`,
         description: project.description,
+        client: project.client || "",
         rules: project.rules.length > 0 ? [...project.rules] : [""],
         selectedPresets: project.selectedPresets || [],
       });
@@ -97,6 +99,7 @@ const CreateProject = () => {
       const projectData = {
         name: formData.name,
         description: formData.description,
+        client: formData.client || "",
         rules: formData.rules.filter((r) => r.trim()),
         selectedPresets: formData.selectedPresets,
       };
@@ -246,12 +249,24 @@ const CreateProject = () => {
             className={`resize-none ${errors.description ? "input-error" : "input"}`}
             placeholder="Describe what this project is about and what kind of AI prompts you'll create..."
           />
-          {errors.description && (
-            <p className="text-error">{errors.description}</p>
-          )}
-        </div>
+        {errors.description && (
+          <p className="text-error">{errors.description}</p>
+        )}
+      </div>
 
-        {/* Rules */}
+      <div>
+        <label htmlFor="client" className="label">Client</label>
+        <input
+          type="text"
+          id="client"
+          value={formData.client || ""}
+          onChange={(e) => handleInputChange("client", e.target.value)}
+          className="input"
+          placeholder="e.g. Openava — groups matching names together"
+        />
+      </div>
+
+      {/* Rules */}
         <div>
           <label className="label">
             Project-Specific Rules{" "}

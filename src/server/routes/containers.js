@@ -215,9 +215,9 @@ router.post("/start-docker", async (req, res) => {
  * GET /api/containers
  * List all IDE-managed containers
  */
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const containers = containerManager.listContainers();
+    const containers = await containerManager.listContainers();
     res.json({ containers });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -270,9 +270,9 @@ router.post("/", async (req, res) => {
  * POST /api/containers/:name/start
  * Start a stopped container
  */
-router.post("/:name/start", (req, res) => {
+router.post("/:name/start", async (req, res) => {
   try {
-    const success = containerManager.startContainer(req.params.name);
+    const success = await containerManager.startContainer(req.params.name);
     if (success) {
       res.json({ status: "started", container: req.params.name });
     } else {
@@ -287,9 +287,9 @@ router.post("/:name/start", (req, res) => {
  * POST /api/containers/:name/stop
  * Stop a running container
  */
-router.post("/:name/stop", (req, res) => {
+router.post("/:name/stop", async (req, res) => {
   try {
-    const success = containerManager.stopContainer(req.params.name);
+    const success = await containerManager.stopContainer(req.params.name);
     if (success) {
       res.json({ status: "stopped", container: req.params.name });
     } else {
@@ -306,10 +306,10 @@ router.post("/:name/stop", (req, res) => {
  * POST /api/containers/:name/restart
  * Restart a container (stop + start)
  */
-router.post("/:name/restart", (req, res) => {
+router.post("/:name/restart", async (req, res) => {
   try {
     const { timeout } = req.body;
-    const success = containerManager.restartContainer(
+    const success = await containerManager.restartContainer(
       req.params.name,
       timeout || 10
     );
@@ -352,9 +352,9 @@ router.post("/:name/recreate", async (req, res) => {
  * DELETE /api/containers/:name
  * Remove a container and its volumes
  */
-router.delete("/:name", (req, res) => {
+router.delete("/:name", async (req, res) => {
   try {
-    const success = containerManager.removeContainer(req.params.name);
+    const success = await containerManager.removeContainer(req.params.name);
     if (success) {
       res.json({ status: "removed", container: req.params.name });
     } else {
@@ -371,9 +371,9 @@ router.delete("/:name", (req, res) => {
  * GET /api/containers/:name/status
  * Get a single container's status
  */
-router.get("/:name/status", (req, res) => {
+router.get("/:name/status", async (req, res) => {
   try {
-    const status = containerManager.getContainerStatus(req.params.name);
+    const status = await containerManager.getContainerStatusAsync(req.params.name);
     if (status) {
       res.json({ container: req.params.name, status });
     } else {
@@ -393,7 +393,7 @@ router.get("/:name/status", (req, res) => {
 // container's CLI tool configs (Claude Code / Codex / OpenCode).
 router.post("/:name/provision-mcp", async (req, res) => {
   try {
-    const status = containerManager.getContainerStatus(req.params.name);
+    const status = await containerManager.getContainerStatusAsync(req.params.name);
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") {
       return res.status(409).json({ error: `Container is not running (status: ${status})` });
@@ -406,7 +406,7 @@ router.post("/:name/provision-mcp", async (req, res) => {
   }
 });
 
-router.post("/:name/exec", (req, res) => {
+router.post("/:name/exec", async (req, res) => {
   try {
     const { command, timeout } = req.body;
 
@@ -414,8 +414,7 @@ router.post("/:name/exec", (req, res) => {
       return res.status(400).json({ error: "command is required" });
     }
 
-    // Verify container is running first
-    const status = containerManager.getContainerStatus(req.params.name);
+    const status = await containerManager.getContainerStatusAsync(req.params.name);
     if (!status) {
       return res.status(404).json({ error: "Container not found" });
     }
@@ -425,7 +424,7 @@ router.post("/:name/exec", (req, res) => {
         .json({ error: `Container is not running (status: ${status})` });
     }
 
-    const output = containerManager.execInContainer(
+    const output = await containerManager.execInContainerAsync(
       req.params.name,
       command,
       { timeout: timeout || 30000 },
@@ -582,19 +581,19 @@ router.get("/:name/branches", async (req, res) => {
  * Body: { branch, repoPath? }
  * Returns: { worktreePath, created, branch }
  */
-router.post("/:name/worktree", (req, res) => {
+router.post("/:name/worktree", async (req, res) => {
   try {
     const { name } = req.params;
     const { branch, repoPath } = req.body;
 
     if (!branch) return res.status(400).json({ error: "branch is required" });
 
-    const status = containerManager.getContainerStatus(name);
+    const status = await containerManager.getContainerStatusAsync(name);
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
-    const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
-    const effectiveRepoPath = repoPath || findGitRoot(name);
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainerAsync(name, cmd, { timeout });
+    const effectiveRepoPath = repoPath || await findGitRootAsync(name);
 
     // Sanitize branch name for directory path
     const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -602,7 +601,7 @@ router.post("/:name/worktree", (req, res) => {
 
     // ── Step 1: Check if the branch is already checked out anywhere ──
     // Collect all worktree paths, then verify the ACTUAL current branch at each
-    const wtListRaw = exec(`cd '${effectiveRepoPath}' && git worktree list --porcelain 2>/dev/null; true`);
+    const wtListRaw = await exec(`cd '${effectiveRepoPath}' && git worktree list --porcelain 2>/dev/null; true`);
     if (wtListRaw) {
       const wtPaths = [];
       for (const line of wtListRaw.split("\n")) {
@@ -612,7 +611,7 @@ router.post("/:name/worktree", (req, res) => {
       }
       // Check each worktree's actual current branch (not the registered ref)
       for (const wtPath of wtPaths) {
-        const actualBranch = exec(`cd '${wtPath}' && git branch --show-current 2>/dev/null`)?.trim();
+        const actualBranch = (await exec(`cd '${wtPath}' && git branch --show-current 2>/dev/null`))?.trim();
         if (actualBranch === branch) {
           return res.json({ worktreePath: wtPath, created: false, branch, reused: true, repoPath: effectiveRepoPath });
         }
@@ -620,27 +619,24 @@ router.post("/:name/worktree", (req, res) => {
     }
 
     // ── Step 2: Check if our expected worktree path already exists ──
-    const exists = exec(`test -d '${worktreePath}' && echo yes`)?.trim() === "yes";
+    const exists = (await exec(`test -d '${worktreePath}' && echo yes`))?.trim() === "yes";
     if (exists) {
-      const wtBranch = exec(`cd '${worktreePath}' && git branch --show-current 2>/dev/null`)?.trim();
+      const wtBranch = (await exec(`cd '${worktreePath}' && git branch --show-current 2>/dev/null`))?.trim();
       if (wtBranch === branch) {
         return res.json({ worktreePath, created: false, branch: wtBranch, repoPath: effectiveRepoPath });
       }
-      // Exists but wrong branch — remove and recreate
-      exec(`cd '${effectiveRepoPath}' && git worktree remove '${worktreePath}' --force 2>/dev/null`);
+      await exec(`cd '${effectiveRepoPath}' && git worktree remove '${worktreePath}' --force 2>/dev/null`);
     }
 
-    // ── Step 3: Create a new worktree ──
-    exec(`mkdir -p /workspace/.worktrees`, 5000);
+    await exec(`mkdir -p /workspace/.worktrees`, 5000);
 
-    // Check if branch exists locally or on remote
-    const localExists = exec(
+    const localExists = (await exec(
       `cd '${effectiveRepoPath}' && git show-ref --verify --quiet refs/heads/${branch} && echo yes`,
-    )?.trim() === "yes";
+    ))?.trim() === "yes";
 
-    const remoteExists = !localExists && exec(
+    const remoteExists = !localExists && (await exec(
       `cd '${effectiveRepoPath}' && git show-ref --verify --quiet refs/remotes/origin/${branch} && echo yes`,
-    )?.trim() === "yes";
+    ))?.trim() === "yes";
 
     let addCmd;
     if (localExists) {
@@ -651,10 +647,9 @@ router.post("/:name/worktree", (req, res) => {
       addCmd = `cd '${effectiveRepoPath}' && git worktree add -b '${branch}' '${worktreePath}' 2>&1; true`;
     }
 
-    const output = exec(addCmd, 30000) || "";
+    const output = (await exec(addCmd, 30000)) || "";
 
-    // Verify the worktree was actually created
-    const verified = exec(`test -d '${worktreePath}' && echo yes`)?.trim() === "yes";
+    const verified = (await exec(`test -d '${worktreePath}' && echo yes`))?.trim() === "yes";
 
     if (!verified) {
       let detail = output.trim();
@@ -671,7 +666,7 @@ router.post("/:name/worktree", (req, res) => {
     }
 
     // Fix ownership
-    containerManager.execInContainer(name,
+    await containerManager.execInContainerAsync(name,
       `chown -R dev:dev '${worktreePath}' 2>/dev/null`,
       { timeout: 10000 },
     );
@@ -691,35 +686,9 @@ router.post("/:name/worktree", (req, res) => {
  * Helper: find the actual git repo root inside the container.
  * Handles the common case where the repo is in a subdirectory of /workspace.
  */
-function findGitRoot(name) {
-  const cacheKey = containerCacheKey(name, "git-root");
-  const cached = getCache(cacheKey);
-  if (cached !== undefined) return cached;
-
-  const workDir = containerManager.getWorkDir(name) || "/workspace";
-  // Check if workDir itself is a git repo
-  const hasGit = containerManager.execInContainer(name,
-    `test -e '${workDir}/.git' && echo yes`,
-    { timeout: 5000 },
-  )?.trim();
-  if (hasGit === "yes") return setCache(cacheKey, workDir, CACHE_TTLS.gitRoot);
-
-  // workDir is /workspace but no .git there — scan subdirectories for a git repo
-  const gitDir = containerManager.execInContainer(name,
-    `find /workspace -maxdepth 2 -name .git -print -quit 2>/dev/null`,
-    { timeout: 5000 },
-  )?.trim();
-  if (gitDir) {
-    // Return the parent of .git (the repo root)
-    return setCache(cacheKey, gitDir.replace(/\/\.git$/, ""), CACHE_TTLS.gitRoot);
-  }
-
-  return setCache(cacheKey, workDir, CACHE_TTLS.gitRoot);
-}
-
 async function findGitRootAsync(name) {
   return getCached(containerCacheKey(name, "git-root"), CACHE_TTLS.gitRoot, async () => {
-    const workDir = containerManager.getWorkDir(name) || "/workspace";
+    const workDir = await containerManager.getWorkDirAsync(name) || "/workspace";
     const hasGit = (await containerManager.execInContainerAsync(name,
       `test -e '${workDir}/.git' && echo yes`,
       { timeout: 5000 },
@@ -737,12 +706,6 @@ async function findGitRootAsync(name) {
 }
 
 /** Helper: resolve effective repo path for git actions (worktree-aware) */
-function resolveGitPath(name, query) {
-  if (query.worktreePath) return query.worktreePath;
-  if (query.repoPath) return query.repoPath;
-  return findGitRoot(name);
-}
-
 async function resolveGitPathAsync(name, query) {
   if (query.worktreePath) return query.worktreePath;
   if (query.repoPath) return query.repoPath;
@@ -750,13 +713,6 @@ async function resolveGitPathAsync(name, query) {
 }
 
 /** Helper: validate container is running */
-function requireRunning(name) {
-  const status = containerManager.getContainerStatus(name);
-  if (!status) return { error: "Container not found", code: 404 };
-  if (status !== "running") return { error: "Container is not running", code: 409 };
-  return null;
-}
-
 async function requireRunningAsync(name) {
   const status = await containerManager.getContainerStatusAsync(name);
   if (!status) return { error: "Container not found", code: 404 };
@@ -832,14 +788,14 @@ router.get("/:name/git-status", async (req, res) => {
  * Pull latest changes.
  * Body: { worktreePath?, repoPath? }
  */
-router.post("/:name/git-pull", (req, res) => {
+router.post("/:name/git-pull", async (req, res) => {
   try {
     const { name } = req.params;
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
-    const gitPath = resolveGitPath(name, req.body);
-    const output = containerManager.execInContainer(name,
+    const gitPath = await resolveGitPathAsync(name, req.body);
+    const output = await containerManager.execInContainerAsync(name,
       `cd '${gitPath}' && git pull --ff-only 2>&1`,
       { timeout: 30000 },
     );
@@ -859,25 +815,22 @@ router.post("/:name/git-pull", (req, res) => {
 router.post("/:name/git-commit-push", async (req, res) => {
   try {
     const { name } = req.params;
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
-    const gitPath = resolveGitPath(name, req.body);
-    const exec = (cmd, timeout = 15000) => containerManager.execInContainer(name, cmd, { timeout });
+    const gitPath = await resolveGitPathAsync(name, req.body);
+    const exec = (cmd, timeout = 15000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
-    // Stage everything
-    exec(`cd '${gitPath}' && git add -A`);
+    await exec(`cd '${gitPath}' && git add -A`);
 
-    // Check if there's anything to commit
-    const staged = exec(`cd '${gitPath}' && git diff --cached --stat 2>/dev/null`)?.trim();
+    const staged = (await exec(`cd '${gitPath}' && git diff --cached --stat 2>/dev/null`))?.trim();
     if (!staged) return res.status(400).json({ error: "Nothing to commit" });
 
-    // Generate commit message if not provided
     let message = req.body.message?.trim();
     if (!message) {
-      const diffSummary = exec(`cd '${gitPath}' && git diff --cached --stat 2>/dev/null`)?.trim() || "";
-      const diffContent = exec(`cd '${gitPath}' && git diff --cached --no-color 2>/dev/null | head -200`)?.trim() || "";
-      const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim() || "unknown";
+      const diffSummary = (await exec(`cd '${gitPath}' && git diff --cached --stat 2>/dev/null`))?.trim() || "";
+      const diffContent = (await exec(`cd '${gitPath}' && git diff --cached --no-color 2>/dev/null | head -200`))?.trim() || "";
+      const branch = (await exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`))?.trim() || "unknown";
 
       // Try LLM-generated message
       try {
@@ -896,11 +849,10 @@ router.post("/:name/git-commit-push", async (req, res) => {
 
     // Commit
     const safeMsg = message.replace(/'/g, "'\\''");
-    exec(`cd '${gitPath}' && git commit -m '${safeMsg}'`, 15000);
+    await exec(`cd '${gitPath}' && git commit -m '${safeMsg}'`, 15000);
 
-    // Push
-    const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim();
-    const pushOutput = exec(`cd '${gitPath}' && git push -u origin '${branch}' 2>&1`, 30000) || "";
+    const branch = (await exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`))?.trim();
+    const pushOutput = (await exec(`cd '${gitPath}' && git push -u origin '${branch}' 2>&1`, 30000)) || "";
 
     invalidateContainerCache(name);
     res.json({ message, branch, pushOutput, staged });
@@ -917,26 +869,24 @@ router.post("/:name/git-commit-push", async (req, res) => {
 router.post("/:name/git-create-pr", async (req, res) => {
   try {
     const { name } = req.params;
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
-    const gitPath = resolveGitPath(name, req.body);
-    const exec = (cmd, timeout = 15000) => containerManager.execInContainer(name, cmd, { timeout });
+    const gitPath = await resolveGitPathAsync(name, req.body);
+    const exec = (cmd, timeout = 15000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
-    const branch = exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`)?.trim();
+    const branch = (await exec(`cd '${gitPath}' && git branch --show-current 2>/dev/null`))?.trim();
     if (!branch || ["main", "master"].includes(branch)) {
       return res.status(400).json({ error: "Cannot create PR from main/master" });
     }
 
-    // Generate title/body if not provided
     let title = req.body.title?.trim();
     let body = req.body.body?.trim();
 
     if (!title) {
-      // Get log of commits not on main
-      const baseBranch = exec(`cd '${gitPath}' && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`)?.trim() || "main";
-      const log = exec(`cd '${gitPath}' && git log '${baseBranch}..HEAD' --oneline 2>/dev/null`)?.trim() || "";
-      const diffStat = exec(`cd '${gitPath}' && git diff '${baseBranch}...HEAD' --stat 2>/dev/null`)?.trim() || "";
+      const baseBranch = (await exec(`cd '${gitPath}' && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`))?.trim() || "main";
+      const log = (await exec(`cd '${gitPath}' && git log '${baseBranch}..HEAD' --oneline 2>/dev/null`))?.trim() || "";
+      const diffStat = (await exec(`cd '${gitPath}' && git diff '${baseBranch}...HEAD' --stat 2>/dev/null`))?.trim() || "";
 
       try {
         const { default: llmProvider } = await import("../llmProvider.js");
@@ -955,7 +905,7 @@ router.post("/:name/git-create-pr", async (req, res) => {
     const safeTitle = title.replace(/'/g, "'\\''");
     const safeBody = (body || `Branch: ${branch}`).replace(/'/g, "'\\''");
 
-    const prOutput = exec(
+    const prOutput = await exec(
       `cd '${gitPath}' && gh pr create --title '${safeTitle}' --body '${safeBody}' 2>&1`,
       30000,
     );
@@ -975,19 +925,18 @@ router.post("/:name/git-create-pr", async (req, res) => {
  * Merge an open PR for the current branch using gh CLI.
  * Body: { worktreePath?, repoPath?, method? (merge|squash|rebase) }
  */
-router.post("/:name/git-merge-pr", (req, res) => {
+router.post("/:name/git-merge-pr", async (req, res) => {
   try {
     const { name } = req.params;
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
-    const gitPath = resolveGitPath(name, req.body);
+    const gitPath = await resolveGitPathAsync(name, req.body);
     const method = req.body.method || "squash";
-    const exec = (cmd, timeout = 15000) => containerManager.execInContainer(name, cmd, { timeout });
-
-    const output = exec(
+    const output = await containerManager.execInContainerAsync(
+      name,
       `cd '${gitPath}' && gh pr merge --${method} --delete-branch 2>&1`,
-      30000,
+      { timeout: 30000 },
     );
 
     invalidateContainerCache(name);
@@ -1002,28 +951,23 @@ router.post("/:name/git-merge-pr", (req, res) => {
  * Remove a git worktree and optionally delete the local branch.
  * Body: { branch }
  */
-router.post("/:name/worktree-cleanup", (req, res) => {
+router.post("/:name/worktree-cleanup", async (req, res) => {
   try {
     const { name } = req.params;
     const { branch } = req.body;
     if (!branch) return res.status(400).json({ error: "branch is required" });
 
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
     const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, "-");
     const wtPath = `/workspace/.worktrees/${safeBranch}`;
-    const repoPath = findGitRoot(name);
-    const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
+    const repoPath = await findGitRootAsync(name);
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
-    // Remove the worktree
-    exec(`cd '${repoPath}' && git worktree remove '${wtPath}' --force 2>/dev/null`);
-
-    // Delete the local branch (safe — git refuses if it has unmerged changes)
-    exec(`cd '${repoPath}' && git branch -d '${branch}' 2>/dev/null`);
-
-    // Prune worktree metadata
-    exec(`cd '${repoPath}' && git worktree prune 2>/dev/null`);
+    await exec(`cd '${repoPath}' && git worktree remove '${wtPath}' --force 2>/dev/null`);
+    await exec(`cd '${repoPath}' && git branch -d '${branch}' 2>/dev/null`);
+    await exec(`cd '${repoPath}' && git worktree prune 2>/dev/null`);
 
     invalidateContainerCache(name);
     res.json({ cleaned: true, branch, worktreePath: wtPath });
@@ -1038,19 +982,21 @@ router.post("/:name/worktree-cleanup", (req, res) => {
  * Query: ?path=/workspace/repo&depth=1
  * Returns: { path, files: [{ name, type, gitStatus, size }] }
  */
-router.get("/:name/files", (req, res) => {
+router.get("/:name/files", async (req, res) => {
   try {
     const { name } = req.params;
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
-    const dirPath = req.query.path ? assertContainerPath(req.query.path) : findGitRoot(name);
+    const dirPath = req.query.path ? assertContainerPath(req.query.path) : await findGitRootAsync(name);
     const depth = Math.min(parseInt(req.query.depth) || 1, 3);
 
-    const exec = (cmd, timeout = 10000) => containerManager.execInContainer(name, cmd, { timeout });
+    const exec = (cmd, timeout = 10000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
-    // List files/dirs at path (with type and size)
-    const lsOutput = exec(listDirectoryCommand(dirPath, depth));
+    const [lsOutput, gitStatusRaw] = await Promise.all([
+      exec(listDirectoryCommand(dirPath, depth)),
+      exec(`cd ${posixQuote(dirPath)} && git status --porcelain --untracked-files=normal 2>/dev/null`),
+    ]);
 
     const entries = [];
     if (lsOutput) {
@@ -1066,7 +1012,6 @@ router.get("/:name/files", (req, res) => {
     }
 
     // Get git status for the directory
-    const gitStatusRaw = exec(`cd ${posixQuote(dirPath)} && git status --porcelain --untracked-files=normal 2>/dev/null`);
     const gitMap = {};
     if (gitStatusRaw) {
       for (const line of gitStatusRaw.split("\n").filter(Boolean)) {
@@ -1104,8 +1049,8 @@ router.get("/:name/files", (req, res) => {
   }
 });
 
-function runContainerFs(name, command, timeout = 15000) {
-  const output = containerManager.execInContainer(name, command, { timeout });
+async function runContainerFs(name, command, timeout = 15000) {
+  const output = await containerManager.execInContainerAsync(name, command, { timeout });
   if (output === null) throw new Error('Container command failed');
   return output;
 }
@@ -1114,12 +1059,12 @@ function runContainerFs(name, command, timeout = 15000) {
  * GET /api/containers/:name/file?path=
  * Read a text file (base64 over docker exec).
  */
-router.get("/:name/file", (req, res) => {
+router.get("/:name/file", async (req, res) => {
   try {
-    const err = requireRunning(req.params.name);
+    const err = await requireRunningAsync(req.params.name);
     if (err) return res.status(err.code).json({ error: err.error });
     const dest = assertContainerPath(req.query.path);
-    const raw = runContainerFs(req.params.name, readFileCommand(dest), 20000);
+    const raw = await runContainerFs(req.params.name, readFileCommand(dest), 20000);
     if (raw.startsWith('MISSING')) return res.status(404).json({ error: 'File not found' });
     const sep = raw.indexOf('\n---\n');
     const header = sep === -1 ? raw : raw.slice(0, sep);
@@ -1143,13 +1088,13 @@ router.get("/:name/file", (req, res) => {
  * POST /api/containers/:name/file
  * Create an empty file or directory. Body: { path, type: 'file'|'directory' }
  */
-router.post("/:name/file", (req, res) => {
+router.post("/:name/file", async (req, res) => {
   try {
-    const err = requireRunning(req.params.name);
+    const err = await requireRunningAsync(req.params.name);
     if (err) return res.status(err.code).json({ error: err.error });
     const dest = assertContainerPath(req.body?.path);
     const isDir = req.body?.type === 'directory';
-    runContainerFs(req.params.name, isDir ? createDirectoryCommand(dest) : createFileCommand(dest));
+    await runContainerFs(req.params.name, isDir ? createDirectoryCommand(dest) : createFileCommand(dest));
     res.json({ ok: true, path: dest, type: isDir ? 'directory' : 'file' });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1160,9 +1105,9 @@ router.post("/:name/file", (req, res) => {
  * PUT /api/containers/:name/file
  * Write UTF-8 file content. Body: { path, content }
  */
-router.put("/:name/file", (req, res) => {
+router.put("/:name/file", async (req, res) => {
   try {
-    const err = requireRunning(req.params.name);
+    const err = await requireRunningAsync(req.params.name);
     if (err) return res.status(err.code).json({ error: err.error });
     const dest = assertContainerPath(req.body?.path);
     const content = String(req.body?.content ?? '');
@@ -1170,7 +1115,7 @@ router.put("/:name/file", (req, res) => {
     if (buffer.length > CONTAINER_FILE_MAX_BYTES) {
       return res.status(413).json({ error: `File is larger than ${CONTAINER_FILE_MAX_BYTES} bytes` });
     }
-    runContainerFs(req.params.name, writeFileCommand(dest, buffer.toString('base64')), 20000);
+    await runContainerFs(req.params.name, writeFileCommand(dest, buffer.toString('base64')), 20000);
     res.json({ ok: true, path: dest, size: buffer.length });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1180,13 +1125,13 @@ router.put("/:name/file", (req, res) => {
 /**
  * DELETE /api/containers/:name/file?path=&type=file|directory
  */
-router.delete("/:name/file", (req, res) => {
+router.delete("/:name/file", async (req, res) => {
   try {
-    const err = requireRunning(req.params.name);
+    const err = await requireRunningAsync(req.params.name);
     if (err) return res.status(err.code).json({ error: err.error });
     const dest = assertContainerPath(req.query.path);
     const isDir = req.query.type === 'directory';
-    runContainerFs(req.params.name, deletePathCommand(dest, isDir));
+    await runContainerFs(req.params.name, deletePathCommand(dest, isDir));
     res.json({ ok: true, path: dest });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1197,12 +1142,12 @@ router.delete("/:name/file", (req, res) => {
  * PATCH /api/containers/:name/file/chmod
  * Body: { path, mode }
  */
-router.patch("/:name/file/chmod", (req, res) => {
+router.patch("/:name/file/chmod", async (req, res) => {
   try {
-    const err = requireRunning(req.params.name);
+    const err = await requireRunningAsync(req.params.name);
     if (err) return res.status(err.code).json({ error: err.error });
     const dest = assertContainerPath(req.body?.path);
-    runContainerFs(req.params.name, chmodCommand(dest, req.body?.mode));
+    await runContainerFs(req.params.name, chmodCommand(dest, req.body?.mode));
     res.json({ ok: true, path: dest, mode: String(req.body?.mode).trim() });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1218,33 +1163,31 @@ router.patch("/:name/file/chmod", (req, res) => {
  * Upload SSH key files into the container's ~/.ssh directory with correct permissions.
  * Accepts multipart files (private key, public key, config, known_hosts, etc.).
  */
-router.post("/:name/ssh-keys", tmpUpload.array("files", 10), (req, res) => {
+router.post("/:name/ssh-keys", tmpUpload.array("files", 10), async (req, res) => {
   try {
     const { name } = req.params;
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: "No files uploaded" });
     }
 
-    const exec = (cmd, timeout = 5000) => containerManager.execInContainer(name, cmd, { timeout });
+    const exec = (cmd, timeout = 5000) => containerManager.execInContainerAsync(name, cmd, { timeout });
 
-    // Ensure ~/.ssh directory exists with correct permissions
-    exec(`mkdir -p /home/dev/.ssh && chmod 700 /home/dev/.ssh && chown dev:dev /home/dev/.ssh`);
+    await exec(`mkdir -p /home/dev/.ssh && chmod 700 /home/dev/.ssh && chown dev:dev /home/dev/.ssh`);
 
     const uploaded = [];
     for (const file of req.files) {
       const destPath = `/home/dev/.ssh/${file.originalname}`;
       try {
-        copyIntoContainer(file.path, name, destPath, { timeout: 10000 });
+        await copyIntoContainer(file.path, name, destPath, { timeout: 10000 });
 
-        // Set correct permissions based on file type
         const isPublicKey = file.originalname.endsWith('.pub');
         const isConfig = ['config', 'known_hosts', 'authorized_keys'].includes(file.originalname);
         const perms = isPublicKey || isConfig ? '644' : '600';
 
-        exec(`chmod ${perms} '${destPath}' && chown dev:dev '${destPath}'`);
+        await exec(`chmod ${perms} '${destPath}' && chown dev:dev '${destPath}'`);
         uploaded.push({ name: file.originalname, path: destPath, permissions: perms });
       } catch (e) {
         uploaded.push({ name: file.originalname, error: e.message });
@@ -1253,8 +1196,7 @@ router.post("/:name/ssh-keys", tmpUpload.array("files", 10), (req, res) => {
       }
     }
 
-    // Ensure known_hosts exists (prevents "Host key verification failed" prompts)
-    exec(`touch /home/dev/.ssh/known_hosts && chmod 644 /home/dev/.ssh/known_hosts && chown dev:dev /home/dev/.ssh/known_hosts`);
+    await exec(`touch /home/dev/.ssh/known_hosts && chmod 644 /home/dev/.ssh/known_hosts && chown dev:dev /home/dev/.ssh/known_hosts`);
 
     res.json({ uploaded, sshDir: "/home/dev/.ssh" });
   } catch (error) {
@@ -1266,13 +1208,13 @@ router.post("/:name/ssh-keys", tmpUpload.array("files", 10), (req, res) => {
  * GET /api/containers/:name/ssh-keys
  * List SSH key files in the container's ~/.ssh directory.
  */
-router.get("/:name/ssh-keys", (req, res) => {
+router.get("/:name/ssh-keys", async (req, res) => {
   try {
     const { name } = req.params;
-    const err = requireRunning(name);
+    const err = await requireRunningAsync(name);
     if (err) return res.status(err.code).json({ error: err.error });
 
-    const output = containerManager.execInContainer(name,
+    const output = await containerManager.execInContainerAsync(name,
       `ls -la /home/dev/.ssh/ 2>/dev/null | tail -n +2`,
       { timeout: 5000 },
     );
@@ -1307,23 +1249,21 @@ router.get("/:name/ssh-keys", (req, res) => {
  * List directories (and optionally files) at a path inside the container.
  * Query: ?path=/workspace (default: /workspace)
  */
-router.get("/:name/browse", (req, res) => {
+router.get("/:name/browse", async (req, res) => {
   try {
     const { name } = req.params;
     const browsePath = req.query.path || "/workspace";
 
-    const status = containerManager.getContainerStatus(name);
+    const status = await containerManager.getContainerStatusAsync(name);
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
-    // Security: prevent path traversal
     const resolved = path.posix.resolve(browsePath);
     if (!resolved.startsWith("/workspace") && !resolved.startsWith("/home/dev")) {
       return res.status(403).json({ error: "Browsing is restricted to /workspace and /home/dev" });
     }
 
-    // List entries with type indicator: d=directory, f=file
-    const output = containerManager.execInContainer(
+    const output = await containerManager.execInContainerAsync(
       name,
       `ls -1pA '${resolved}' 2>/dev/null`,
       { timeout: 5000 },
@@ -1356,16 +1296,15 @@ router.get("/:name/browse", (req, res) => {
  * Upload files directly into a container at a given destination path.
  * Form fields: files (multipart), destination (string, e.g. "/workspace/my-repo/src")
  */
-router.post("/:name/upload", tmpUpload.array("files", 20), (req, res) => {
+router.post("/:name/upload", tmpUpload.array("files", 20), async (req, res) => {
   try {
     const { name } = req.params;
     const destination = req.body.destination || "/workspace";
 
-    const status = containerManager.getContainerStatus(name);
+    const status = await containerManager.getContainerStatusAsync(name);
     if (!status) return res.status(404).json({ error: "Container not found" });
     if (status !== "running") return res.status(409).json({ error: "Container is not running" });
 
-    // Security: restrict destination
     const resolved = path.posix.resolve(destination);
     if (!resolved.startsWith("/workspace") && !resolved.startsWith("/home/dev")) {
       return res.status(403).json({ error: "Upload restricted to /workspace and /home/dev" });
@@ -1375,22 +1314,19 @@ router.post("/:name/upload", tmpUpload.array("files", 20), (req, res) => {
       return res.status(400).json({ error: "No files uploaded" });
     }
 
-    // Ensure destination directory exists in container
-    containerManager.execInContainer(name, `mkdir -p '${resolved}'`, { timeout: 5000 });
+    await containerManager.execInContainerAsync(name, `mkdir -p '${resolved}'`, { timeout: 5000 });
 
     const uploaded = [];
 
     for (const file of req.files) {
       const containerDest = `${resolved}/${file.originalname}`;
       try {
-        copyIntoContainer(file.path, name, containerDest, { timeout: 30000 });
-        // Fix ownership so the dev user can access the file
-        containerManager.execInContainer(name, `chown dev:dev '${containerDest}' 2>/dev/null`, { timeout: 5000 });
+        await copyIntoContainer(file.path, name, containerDest, { timeout: 30000 });
+        await containerManager.execInContainerAsync(name, `chown dev:dev '${containerDest}' 2>/dev/null`, { timeout: 5000 });
         uploaded.push({ name: file.originalname, path: containerDest, size: file.size });
       } catch (err) {
         uploaded.push({ name: file.originalname, error: err.message });
       } finally {
-        // Clean up temp file
         try { fs.unlinkSync(file.path); } catch { /* ignore */ }
       }
     }

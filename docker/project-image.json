@@ -1,6 +1,6 @@
 {
   "repository": "ghcr.io/startupp-cloud/ide-dev",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "localTag": "startupp-ai-ide-dev:latest",
   "versionLabel": "org.startupp.image.version"
 }

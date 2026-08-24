@@ -16,6 +16,8 @@ import {
   Upload,
   Terminal,
 } from "lucide-react";
+import { clientColor, groupProjectsByClient } from "../utils/projectOrganization";
+import ProjectMoveButtons from "../components/ProjectMoveButtons";
 
 const Dashboard = () => {
   const {
@@ -26,6 +28,7 @@ const Dashboard = () => {
     deleteProject,
     createProject,
     notify,
+    moveProject,
   } = useProjects();
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState("");
@@ -71,8 +74,20 @@ const Dashboard = () => {
   const filteredProjects = projects.filter(
     (project) =>
       project.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      project.description.toLowerCase().includes(searchTerm.toLowerCase()),
+      (project.description || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (project.client || "").toLowerCase().includes(searchTerm.toLowerCase()),
   );
+  const projectGroups = groupProjectsByClient(filteredProjects);
+
+  const handleMove = async (projectId, direction, scope, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await moveProject(projectId, direction, scope);
+    } catch (err) {
+      notify(err.message || "Failed to move project", "error");
+    }
+  };
 
   const totalPrompts = projects.reduce(
     (sum, p) => sum + (p.promptCount || 0),
@@ -252,8 +267,33 @@ const Dashboard = () => {
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filteredProjects.map((project, i) => (
+        <div className="space-y-6">
+          {projectGroups.map((group, groupIndex) => {
+            const color = clientColor(group.client);
+            const groupAnchor = group.projects[0];
+            return (
+              <section key={group.client || "__ungrouped"} className="space-y-3">
+                <div className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 ${color.bg} ${color.border}`}>
+                  <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${color.bar}`} aria-hidden />
+                  <h2 className={`text-xs font-semibold uppercase tracking-wider ${color.text}`}>
+                    {group.client || "Ungrouped"}
+                  </h2>
+                  <span className="text-[11px] text-surface-500">
+                    {group.projects.length} {group.projects.length === 1 ? "project" : "projects"}
+                  </span>
+                  <div className="ml-auto">
+                    <ProjectMoveButtons
+                      canMoveUp={groupIndex > 0}
+                      canMoveDown={groupIndex < projectGroups.length - 1}
+                      onMoveUp={(e) => handleMove(groupAnchor.id, "up", "client", e)}
+                      onMoveDown={(e) => handleMove(groupAnchor.id, "down", "client", e)}
+                      upLabel={`Move ${group.client || "Ungrouped"} group up`}
+                      downLabel={`Move ${group.client || "Ungrouped"} group down`}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {group.projects.map((project, i) => (
             <div
               key={project.id}
               className="animate-slide-up opacity-0 [animation-fill-mode:forwards]"
@@ -261,12 +301,12 @@ const Dashboard = () => {
             >
               <Link
                 to={`/project/${project.id}`}
-                className="card-interactive group block"
+                className={`card-interactive group block border-l-4 ${color.border}`}
               >
                 {/* Card Header */}
                 <div className="flex items-start gap-3 mb-3">
-                  <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-primary-500 to-primary-600 flex items-center justify-center flex-shrink-0 shadow-glow/50">
-                    <span className="text-surface-950 font-display font-bold text-sm">
+                  <div className={`w-9 h-9 rounded-lg ${color.bg} border ${color.border} flex items-center justify-center flex-shrink-0`}>
+                    <span className={`font-display font-bold text-sm ${color.text}`}>
                       {project.name.charAt(0).toUpperCase()}
                     </span>
                   </div>
@@ -275,6 +315,9 @@ const Dashboard = () => {
                       {project.name}
                     </h3>
                     <div className="flex items-center gap-3 mt-0.5">
+                      {group.client && (
+                        <span className={`text-[11px] font-medium ${color.text}`}>{group.client}</span>
+                      )}
                       <span className="badge-primary">
                         <BookOpen className="w-3 h-3" />
                         {project.rules?.length || 0} rules
@@ -285,6 +328,14 @@ const Dashboard = () => {
                       </span>
                     </div>
                   </div>
+                  <ProjectMoveButtons
+                    canMoveUp={i > 0}
+                    canMoveDown={i < group.projects.length - 1}
+                    onMoveUp={(e) => handleMove(project.id, "up", "project", e)}
+                    onMoveDown={(e) => handleMove(project.id, "down", "project", e)}
+                    upLabel={`Move ${project.name} up`}
+                    downLabel={`Move ${project.name} down`}
+                  />
                 </div>
 
                 {/* Description */}
@@ -338,6 +389,10 @@ const Dashboard = () => {
               </Link>
             </div>
           ))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       )}
 

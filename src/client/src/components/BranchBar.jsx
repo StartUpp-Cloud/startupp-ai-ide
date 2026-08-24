@@ -80,10 +80,10 @@ function SectionHeader({ icon: Icon, label, count }) {
 }
 
 /**
- * BranchBar — sits above ChatInput, shows current branch + working directory
- * and git quick actions.
+ * BranchBar — git workspace UI. `variant="full"` shows branch/path + actions;
+ * `variant="actions"` shows only git/SSH quick actions (for chat input toolbar).
  */
-export default function BranchBar({ containerName, session, projectId, onBranchChange, onSessionUpdate, containerRepos = [] }) {
+export default function BranchBar({ containerName, session, projectId, onBranchChange, onSessionUpdate, containerRepos = [], variant = 'full' }) {
   const sessionBranch = session?.branch || null;
   const sessionRepoPath = session?.repoPath || null;
   const sessionWorktreePath = session?.worktreePath || null;
@@ -509,6 +509,185 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
 
   const prBadge = pr ? PR_BADGE[pr.state] : null;
   const PrIcon = prBadge?.icon;
+  const actionsOnly = variant === 'actions';
+
+  const actionRow = (
+    <div className={`flex items-center gap-0.5 ${actionsOnly ? '' : 'mt-0.5'}`}>
+      <button
+        onClick={() => fetchStatus({ force: true })}
+        className="p-1 text-surface-500 hover:text-surface-200 rounded transition-colors"
+        title="Refresh status"
+      >
+        <RefreshCw size={11} />
+      </button>
+
+      <button
+        onClick={() => handleAction('pull')}
+        disabled={!!actionLoading}
+        className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-surface-400 hover:text-surface-200 hover:bg-surface-700/50 rounded transition-colors disabled:opacity-40"
+        title="Pull latest"
+      >
+        {actionLoading === 'pull' ? <Loader size={11} className="animate-spin" /> : <ArrowDownToLine size={11} />}
+        {!actionsOnly && 'Pull'}
+      </button>
+
+      {showCreateBranch ? (
+        <div className="flex items-center gap-1">
+          <input
+            type="text"
+            value={newBranchName}
+            onChange={(e) => setNewBranchName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleCreateBranch(); if (e.key === 'Escape') { setShowCreateBranch(false); setNewBranchName(''); } }}
+            placeholder="feature/my-branch"
+            className={`bg-surface-900 border border-surface-600 rounded px-1.5 py-0.5 text-[10px] font-mono text-surface-200 outline-none focus:border-primary-500/50 ${actionsOnly ? 'w-28' : 'w-40'}`}
+            autoFocus
+          />
+          <button
+            onClick={handleCreateBranch}
+            disabled={!newBranchName.trim()}
+            className="px-1.5 py-0.5 text-[10px] bg-primary-600 hover:bg-primary-500 text-white rounded disabled:opacity-40 transition-colors"
+          >
+            Create
+          </button>
+          <button
+            onClick={() => { setShowCreateBranch(false); setNewBranchName(''); }}
+            className="p-0.5 text-surface-500 hover:text-surface-300"
+          >
+            <X size={10} />
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => setShowCreateBranch(true)}
+          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-primary-400 hover:text-primary-300 hover:bg-primary-500/10 rounded transition-colors"
+          title="Create a new branch and switch to it"
+        >
+          <Plus size={11} />
+          {!actionsOnly && 'Branch'}
+        </button>
+      )}
+
+      {hasDirty && (
+        <button
+          onClick={() => handleAction('commit')}
+          disabled={!!actionLoading}
+          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-green-400 hover:text-green-300 hover:bg-green-500/10 rounded transition-colors disabled:opacity-40"
+          title="Auto-commit and push all changes"
+        >
+          {actionLoading === 'commit' ? <Loader size={11} className="animate-spin" /> : <ArrowUpFromLine size={11} />}
+          {!actionsOnly && 'Commit & Push'}
+        </button>
+      )}
+
+      {!isMain && !pr && (
+        <button
+          onClick={() => handleAction('pr')}
+          disabled={!!actionLoading}
+          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors disabled:opacity-40"
+          title="Create pull request"
+        >
+          {actionLoading === 'pr' ? <Loader size={11} className="animate-spin" /> : <GitPullRequest size={11} />}
+          {!actionsOnly && 'Create PR'}
+        </button>
+      )}
+
+      {availableCommands.length > 0 && !actionsOnly && (
+        <div className="relative">
+          <button
+            onClick={() => setShowCommands(v => !v)}
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-sky-400 hover:text-sky-300 hover:bg-sky-500/10 rounded transition-colors"
+            title="Run a package script in a new chat session"
+          >
+            <Terminal size={11} />
+            Commands
+          </button>
+          {showCommands && (
+            <div className="absolute bottom-full right-0 z-40 mb-1 max-h-64 w-64 overflow-y-auto rounded-lg border border-surface-700 bg-surface-850 py-1 shadow-modal">
+              {availableCommands.map(item => (
+                <button
+                  key={item.key}
+                  onClick={() => runCommandSession(item.command)}
+                  className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-300 transition-colors hover:bg-surface-750 hover:text-surface-100"
+                  title={item.command}
+                >
+                  <span className="block truncate">{item.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {pr?.state === 'OPEN' && (
+        <button
+          onClick={() => handleAction('merge')}
+          disabled={!!actionLoading}
+          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors disabled:opacity-40"
+          title="Squash and merge PR, then switch to default workspace"
+        >
+          {actionLoading === 'merge' ? <Loader size={11} className="animate-spin" /> : <GitMerge size={11} />}
+          {!actionsOnly && 'Merge PR'}
+        </button>
+      )}
+
+      {sessionBranch && pr?.state === 'MERGED' && (
+        <button
+          onClick={() => {
+            cleanupWorktree(sessionBranch);
+            onBranchChange?.(null);
+            showResult('cleanup', true, `Cleaned up worktree for ${sessionBranch}`);
+          }}
+          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded transition-colors"
+          title="Remove worktree and switch to default workspace"
+        >
+          <Trash2 size={11} />
+          {!actionsOnly && 'Clean up'}
+        </button>
+      )}
+
+      <input
+        ref={sshInputRef}
+        type="file"
+        multiple
+        onChange={handleSshUpload}
+        className="hidden"
+      />
+      <button
+        onClick={() => sshInputRef.current?.click()}
+        disabled={!!actionLoading}
+        className={`flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-surface-400 hover:text-surface-200 hover:bg-surface-700/50 rounded transition-colors disabled:opacity-40 ${actionsOnly ? '' : 'ml-auto'}`}
+        title="Upload SSH keys to container ~/.ssh"
+      >
+        {actionLoading === 'ssh' ? <Loader size={11} className="animate-spin" /> : <KeyRound size={11} />}
+        {!actionsOnly && 'SSH Keys'}
+      </button>
+    </div>
+  );
+
+  const actionToast = actionResult && (
+    <div className={`flex items-center gap-1.5 mt-1 px-2 py-1 rounded text-[10px] ${
+      actionResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+    }`}>
+      {actionResult.success ? <Check size={10} /> : <AlertCircle size={10} />}
+      <span className="truncate flex-1">{actionResult.message}</span>
+      <button onClick={() => setActionResult(null)} className="p-0.5 hover:text-surface-200">
+        <X size={10} />
+      </button>
+    </div>
+  );
+
+  if (actionsOnly) {
+    return (
+      <div className="relative flex flex-shrink-0 items-center border-l border-surface-700/50 pl-1.5">
+        {actionRow}
+        {actionResult && (
+          <div className="absolute bottom-full right-0 z-50 mb-1 min-w-[200px] max-w-xs">
+            {actionToast}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex-shrink-0 px-4 pt-1.5 pb-0.5 w-full">
@@ -773,172 +952,8 @@ export default function BranchBar({ containerName, session, projectId, onBranchC
         </div>
       </div>
 
-      {/* Row 2: Quick actions */}
-      <div className="flex items-center gap-0.5 mt-0.5">
-        <button
-          onClick={() => fetchStatus({ force: true })}
-          className="p-1 text-surface-500 hover:text-surface-200 rounded transition-colors"
-          title="Refresh status"
-        >
-          <RefreshCw size={11} />
-        </button>
-
-        <button
-          onClick={() => handleAction('pull')}
-          disabled={!!actionLoading}
-          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-surface-400 hover:text-surface-200 hover:bg-surface-700/50 rounded transition-colors disabled:opacity-40"
-          title="Pull latest"
-        >
-          {actionLoading === 'pull' ? <Loader size={11} className="animate-spin" /> : <ArrowDownToLine size={11} />}
-          Pull
-        </button>
-
-        {/* Create Branch — always visible in action bar */}
-        {showCreateBranch ? (
-          <div className="flex items-center gap-1">
-            <input
-              type="text"
-              value={newBranchName}
-              onChange={(e) => setNewBranchName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleCreateBranch(); if (e.key === 'Escape') { setShowCreateBranch(false); setNewBranchName(''); } }}
-              placeholder="feature/my-branch"
-              className="w-40 bg-surface-900 border border-surface-600 rounded px-1.5 py-0.5 text-[10px] font-mono text-surface-200 outline-none focus:border-primary-500/50"
-              autoFocus
-            />
-            <button
-              onClick={handleCreateBranch}
-              disabled={!newBranchName.trim()}
-              className="px-1.5 py-0.5 text-[10px] bg-primary-600 hover:bg-primary-500 text-white rounded disabled:opacity-40 transition-colors"
-            >
-              Create
-            </button>
-            <button
-              onClick={() => { setShowCreateBranch(false); setNewBranchName(''); }}
-              className="p-0.5 text-surface-500 hover:text-surface-300"
-            >
-              <X size={10} />
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={() => setShowCreateBranch(true)}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-primary-400 hover:text-primary-300 hover:bg-primary-500/10 rounded transition-colors"
-            title="Create a new branch and switch to it"
-          >
-            <Plus size={11} />
-            Branch
-          </button>
-        )}
-
-        {hasDirty && (
-          <button
-            onClick={() => handleAction('commit')}
-            disabled={!!actionLoading}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-green-400 hover:text-green-300 hover:bg-green-500/10 rounded transition-colors disabled:opacity-40"
-            title="Auto-commit and push all changes"
-          >
-            {actionLoading === 'commit' ? <Loader size={11} className="animate-spin" /> : <ArrowUpFromLine size={11} />}
-            Commit &amp; Push
-          </button>
-        )}
-
-        {!isMain && !pr && (
-          <button
-            onClick={() => handleAction('pr')}
-            disabled={!!actionLoading}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors disabled:opacity-40"
-            title="Create pull request"
-          >
-            {actionLoading === 'pr' ? <Loader size={11} className="animate-spin" /> : <GitPullRequest size={11} />}
-            Create PR
-          </button>
-        )}
-
-        {availableCommands.length > 0 && (
-          <div className="relative">
-            <button
-              onClick={() => setShowCommands(v => !v)}
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-sky-400 hover:text-sky-300 hover:bg-sky-500/10 rounded transition-colors"
-              title="Run a package script in a new chat session"
-            >
-              <Terminal size={11} />
-              Commands
-            </button>
-            {showCommands && (
-              <div className="absolute bottom-full right-0 z-40 mb-1 max-h-64 w-64 overflow-y-auto rounded-lg border border-surface-700 bg-surface-850 py-1 shadow-modal">
-                {availableCommands.map(item => (
-                  <button
-                    key={item.key}
-                    onClick={() => runCommandSession(item.command)}
-                    className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-300 transition-colors hover:bg-surface-750 hover:text-surface-100"
-                    title={item.command}
-                  >
-                    <span className="block truncate">{item.label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {pr?.state === 'OPEN' && (
-          <button
-            onClick={() => handleAction('merge')}
-            disabled={!!actionLoading}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors disabled:opacity-40"
-            title="Squash and merge PR, then switch to default workspace"
-          >
-            {actionLoading === 'merge' ? <Loader size={11} className="animate-spin" /> : <GitMerge size={11} />}
-            Merge PR
-          </button>
-        )}
-
-        {sessionBranch && pr?.state === 'MERGED' && (
-          <button
-            onClick={() => {
-              cleanupWorktree(sessionBranch);
-              onBranchChange?.(null);
-              showResult('cleanup', true, `Cleaned up worktree for ${sessionBranch}`);
-            }}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded transition-colors"
-            title="Remove worktree and switch to default workspace"
-          >
-            <Trash2 size={11} />
-            Clean up
-          </button>
-        )}
-
-        {/* SSH key upload */}
-        <input
-          ref={sshInputRef}
-          type="file"
-          multiple
-          onChange={handleSshUpload}
-          className="hidden"
-        />
-        <button
-          onClick={() => sshInputRef.current?.click()}
-          disabled={!!actionLoading}
-          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-surface-400 hover:text-surface-200 hover:bg-surface-700/50 rounded transition-colors disabled:opacity-40 ml-auto"
-          title="Upload SSH keys to container ~/.ssh"
-        >
-          {actionLoading === 'ssh' ? <Loader size={11} className="animate-spin" /> : <KeyRound size={11} />}
-          SSH Keys
-        </button>
-      </div>
-
-      {/* Action result toast */}
-      {actionResult && (
-        <div className={`flex items-center gap-1.5 mt-1 px-2 py-1 rounded text-[10px] ${
-          actionResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
-        }`}>
-          {actionResult.success ? <Check size={10} /> : <AlertCircle size={10} />}
-          <span className="truncate flex-1">{actionResult.message}</span>
-          <button onClick={() => setActionResult(null)} className="p-0.5 hover:text-surface-200">
-            <X size={10} />
-          </button>
-        </div>
-      )}
+      {actionRow}
+      {actionToast}
     </div>
   );
 }

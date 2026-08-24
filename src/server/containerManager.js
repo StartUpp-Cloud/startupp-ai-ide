@@ -7,7 +7,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { resolveRuntimeEnvironment } from "./connections/runtimeEnvResolver.js";
 import {
-  execDockerCmd,
   execDockerCmdAsync,
   isDockerAvailable as isDockerRouteAvailable,
   getDockerRouteStatus,
@@ -15,17 +14,65 @@ import {
   pullDockerImage,
   tagDockerImage,
   clearDockerRouteCache,
+  refreshDockerAvailability,
 } from "./dockerRoute.js";
 import { decideProjectImageAction, getProjectDevImageSpec } from "./projectDevImage.js";
+import {
+  buildEnsureDevToolsCommand,
+  buildOauthPublishCommand,
+  oauthSidecarName,
+} from "./containerDevTools.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DEV_IMAGE = getProjectDevImageSpec().localTag;
 const CONTAINER_PREFIX = "sai-";
 
+export function classifyContainerInspectError(error) {
+  const msg = String(error?.message || error || '');
+  if (/no such (object|container)/i.test(msg)) return 'missing';
+  if (/timed out|queued too long/i.test(msg)) return 'timeout';
+  return 'error';
+}
+
 /** Named volumes mount as root; project shells run as `dev`. */
 export function workspaceChownCommand(containerName) {
   return `docker exec -u root ${containerName} chown -R dev:dev /workspace /home/dev`;
+}
+
+export const PROJECT_CONTAINER_RESTART_POLICY = "unless-stopped";
+
+/**
+ * `docker create` argv for a project container. Restart policy keeps the
+ * workspace up after Docker Desktop restarts (engine up != project running).
+ */
+export function buildCreateContainerCommand({
+  containerName,
+  homeVolume,
+  workspaceVolume,
+  envFlags = "",
+  portFlags = "",
+  projectId,
+  gitUrl = "",
+  image,
+}) {
+  return [
+    "docker create",
+    `--name ${containerName}`,
+    `--restart ${PROJECT_CONTAINER_RESTART_POLICY}`,
+    `-v ${homeVolume}:/home/dev`,
+    `-v ${workspaceVolume}:/workspace`,
+    "--add-host=host.docker.internal:host-gateway",
+    "-e OLLAMA_HOST=http://host.docker.internal:11434",
+    "-e OLLAMA_API_BASE=http://host.docker.internal:11434",
+    envFlags,
+    portFlags,
+    `--label sai.projectId=${projectId}`,
+    `--label sai.gitUrl=${gitUrl || ""}`,
+    image,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 // Ensure Docker is in PATH — Docker Desktop on macOS and Homebrew install
@@ -55,7 +102,7 @@ const EXEC_OPTS_BASE = {
  * Run a docker CLI command against the host engine socket.
  */
 function dockerExec(cmd, opts = {}) {
-  return execDockerCmd(cmd, opts);
+  return execDockerCmdAsync(cmd, opts);
 }
 
 async function dockerExecAsync(cmd, opts = {}) {
@@ -93,8 +140,7 @@ class ContainerManager extends EventEmitter {
   async waitForDockerAvailable(maxWaitMs = 120000, intervalMs = 2000) {
     const deadline = Date.now() + maxWaitMs;
     while (Date.now() < deadline) {
-      clearDockerRouteCache();
-      if (this.isDockerAvailable()) return true;
+      if (await refreshDockerAvailability({ force: true })) return true;
       await new Promise((r) => setTimeout(r, intervalMs));
     }
     return false;
@@ -102,20 +148,22 @@ class ContainerManager extends EventEmitter {
 
   isImageReady() {
     if (!this.isDockerAvailable()) return false;
-    if (this._imageReadyCachedAt && Date.now() - this._imageReadyCachedAt < 30000) {
-      return this._imageReadyCache === true;
+    const stale = !this._imageReadyCachedAt || Date.now() - this._imageReadyCachedAt > 30000;
+    if (stale && !this._imageReadyProbing) {
+      this._imageReadyProbing = true;
+      dockerExecAsync(`docker images -q ${DEV_IMAGE}`, { timeout: 8000 })
+        .then((images) => {
+          this._imageReadyCache = String(images || "").trim().length > 0;
+        })
+        .catch(() => {
+          this._imageReadyCache = false;
+        })
+        .finally(() => {
+          this._imageReadyProbing = false;
+          this._imageReadyCachedAt = Date.now();
+        });
     }
-    try {
-      const images = dockerExec(`docker images -q ${DEV_IMAGE}`, {
-        encoding: "utf-8",
-        stdio: "pipe",
-      }).trim();
-      this._imageReadyCache = images.length > 0;
-    } catch {
-      this._imageReadyCache = false;
-    }
-    this._imageReadyCachedAt = Date.now();
-    return this._imageReadyCache;
+    return this._imageReadyCache === true;
   }
 
   /**
@@ -165,7 +213,7 @@ class ContainerManager extends EventEmitter {
       try {
         console.log(`[containerManager] Pulling ${spec.remoteTag}…`);
         await pullDockerImage(spec.remoteTag);
-        tagDockerImage(spec.remoteTag, spec.localTag);
+        await tagDockerImage(spec.remoteTag, spec.localTag);
         this._imageReadyCache = true;
         this._imageReadyCachedAt = Date.now();
         return { pulled: true, image: spec.localTag, ref: spec.remoteTag, version: spec.version };
@@ -210,10 +258,10 @@ class ContainerManager extends EventEmitter {
 
     // Check if container already exists
     try {
-      const existing = dockerExec(
+      const existing = String(await dockerExec(
         `docker inspect ${containerName} --format '{{.State.Status}}'`,
-        { encoding: "utf-8", stdio: "pipe" },
-      ).trim();
+        { timeout: 8000 },
+      )).trim();
       return {
         containerId: containerName,
         containerName,
@@ -242,67 +290,51 @@ class ContainerManager extends EventEmitter {
     const homeVolume = `${containerName}-home`;
     const workspaceVolume = `${containerName}-workspace`;
 
-    const cmd = [
-      "docker create",
-      `--name ${containerName}`,
-      `-v ${homeVolume}:/home/dev`,
-      `-v ${workspaceVolume}:/workspace`,
-      // Allow containers to reach Ollama running on the host
-      "--add-host=host.docker.internal:host-gateway",
-      "-e OLLAMA_HOST=http://host.docker.internal:11434",
-      "-e OLLAMA_API_BASE=http://host.docker.internal:11434",
+    const cmd = buildCreateContainerCommand({
+      containerName,
+      homeVolume,
+      workspaceVolume,
       envFlags,
       portFlags,
-      `--label sai.projectId=${projectId}`,
-      `--label sai.gitUrl=${gitUrl || ""}`,
-      DEV_IMAGE,
-    ]
-      .filter(Boolean)
-      .join(" ");
+      projectId,
+      gitUrl,
+      image: DEV_IMAGE,
+    });
 
     try {
-      dockerExec(cmd, { encoding: "utf-8", stdio: "pipe" });
+      await dockerExec(cmd, { timeout: 60000 });
 
-      // Start the container
-      dockerExec(`docker start ${containerName}`, {
-        encoding: "utf-8",
-        stdio: "pipe",
-      });
+      await dockerExec(`docker start ${containerName}`, { timeout: 30000 });
 
-      this.ensureWorkspaceOwnership(containerName);
+      await this.ensureWorkspaceOwnership(containerName);
+      await this.ensureDevEnvironment(containerName);
 
-      // Configure OpenCode for Ollama with high context
-      this.configureOpenCodeOllama(containerName);
-      // Provision curated MCP servers into the CLI tool configs (best-effort).
+      await this.configureOpenCodeOllama(containerName);
       import('./mcpProvisioner.js')
         .then((m) => m.provisionContainerMcp(containerName))
         .catch(() => {});
 
-      // Clone repos — supports multiple repos for monorepo/multi-service workspaces
       const repoList = repos.length > 0
         ? repos
-        : gitUrl ? [{ url: gitUrl, folder: '' }] : []; // Backward compat
+        : gitUrl ? [{ url: gitUrl, folder: '' }] : [];
 
-      for (const repo of repoList) {
-        if (!repo.url) continue;
-        // Derive folder name from URL if not specified
+      await Promise.all(repoList.filter((repo) => repo.url).map(async (repo) => {
         const folder = repo.folder?.trim() || repo.url.split('/').pop().replace(/\.git$/, '');
         const targetPath = `/workspace/${folder}`;
         try {
-          dockerExec(
+          await dockerExec(
             `docker exec ${containerName} git clone "${repo.url}" "${targetPath}"`,
-            { encoding: "utf-8", stdio: "pipe", timeout: 120000 },
+            { timeout: 120000 },
           );
         } catch {
-          // Already cloned or failed — try pulling
           try {
-            dockerExec(
+            await dockerExec(
               `docker exec ${containerName} bash -c "cd ${targetPath} && git pull"`,
-              { encoding: "utf-8", stdio: "pipe", timeout: 30000 },
+              { timeout: 30000 },
             );
           } catch { /* user can handle in terminal */ }
         }
-      }
+      }));
 
       return { containerId: containerName, containerName, status: "running" };
     } catch (error) {
@@ -313,38 +345,124 @@ class ContainerManager extends EventEmitter {
   /**
    * Start a stopped container
    */
-  startContainer(containerName) {
+  async startContainer(containerName) {
     try {
-      dockerExec(`docker start ${containerName}`, {
-        encoding: "utf-8",
-        stdio: "pipe",
-      });
-      this.ensureWorkspaceOwnership(containerName);
-      // Ensure OpenCode is configured for Ollama on each start
-      this.configureOpenCodeOllama(containerName);
-      // Provision curated MCP servers into the CLI tools (best-effort; keeps
-      // existing containers up to date on their next start). Dynamic import
-      // avoids a circular dependency.
+      await dockerExec(`docker start ${containerName}`, { timeout: 30000 });
+      await this.applyRestartPolicy(containerName);
+      await this.ensureWorkspaceOwnership(containerName);
+      await this.ensureDevEnvironment(containerName);
+      await this.configureOpenCodeOllama(containerName);
       import('./mcpProvisioner.js')
         .then((m) => m.provisionContainerMcp(containerName))
         .catch(() => {});
+      if (this._statusCache) this._statusCache.set(containerName, "running");
+      if (this._statusAt) this._statusAt.set(containerName, Date.now());
       return true;
     } catch {
       return false;
     }
   }
 
+  async applyRestartPolicy(containerName) {
+    if (!containerName) return;
+    try {
+      await dockerExec(
+        `docker update --restart ${PROJECT_CONTAINER_RESTART_POLICY} ${containerName}`,
+        { timeout: 8000 },
+      );
+    } catch (error) {
+      console.warn(`[containerManager] restart policy skipped for ${containerName}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Start any stopped project containers. Docker being up is not the same as
+   * a project's workspace running — Desktop restarts leave them exited.
+   */
+  async startManagedContainers() {
+    const listed = await this.listContainers();
+    const stopped = listed.filter((item) => item.name && !item.running);
+    const results = await Promise.all(stopped.map(async (item) => {
+      const ok = await this.startContainer(item.name);
+      return { name: item.name, started: ok };
+    }));
+    return results;
+  }
+
+  async ensureContainerRunning(containerName) {
+    if (!containerName) return null;
+    const status = await this.getContainerStatusAsync(containerName, { fresh: true });
+    if (!status) return null;
+    if (status === "running") {
+      await this.applyRestartPolicy(containerName);
+      return status;
+    }
+    const started = await this.startContainer(containerName);
+    if (!started) return status;
+    return this.getContainerStatusAsync(containerName, { fresh: true });
+  }
+
   /**
    * Empty named volumes are root-owned. The image USER is `dev`, so clone/write
    * fails until /workspace and /home/dev belong to that user.
    */
-  ensureWorkspaceOwnership(containerName) {
+  /**
+   * Install headless-dev tools (xdg-open, unzip, procps, …) into running
+   * project containers and publish Wrangler's OAuth callback port when free.
+   * Safe to call on every start — no-ops when already provisioned.
+   */
+  async ensureDevEnvironment(containerName) {
+    if (!containerName) return;
     try {
-      dockerExec(workspaceChownCommand(containerName), {
-        encoding: "utf-8",
-        stdio: "pipe",
-        timeout: 30000,
-      });
+      await dockerExec(
+        `docker exec -u root ${containerName} bash -lc ${JSON.stringify(buildEnsureDevToolsCommand())}`,
+        { timeout: 120000 },
+      );
+    } catch (error) {
+      console.warn(`[containerManager] ensureDevTools failed: ${error.message}`);
+    }
+    await this.ensureOauthCallbackPublish(containerName);
+  }
+
+  async ensureOauthCallbackPublish(containerName) {
+    const sidecar = oauthSidecarName(containerName);
+    try {
+      const status = String(await dockerExec(
+        `docker inspect ${sidecar} --format '{{.State.Status}}'`,
+        { timeout: 8000 },
+      )).trim();
+      if (status === 'running') return true;
+    } catch {
+      // Sidecar does not exist yet.
+    }
+    let targetIp = '';
+    try {
+      targetIp = String(await dockerExec(
+        `docker inspect ${containerName} --format "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"`,
+        { timeout: 8000 },
+      )).trim();
+    } catch {
+      targetIp = '';
+    }
+    if (!targetIp) {
+      console.warn(`[containerManager] OAuth callback publish skipped: no IP for ${containerName}`);
+      return false;
+    }
+    try {
+      await dockerExec(
+        buildOauthPublishCommand(containerName, { image: DEV_IMAGE, targetIp }),
+        { timeout: 30000 },
+      );
+      return true;
+    } catch (error) {
+      console.warn(`[containerManager] OAuth callback publish skipped: ${error.message}`);
+      return false;
+    }
+  }
+
+  async ensureWorkspaceOwnership(containerName) {
+    try {
+      await dockerExec(workspaceChownCommand(containerName), { timeout: 30000 });
     } catch (error) {
       console.warn(`[containerManager] chown workspace failed: ${error.message}`);
     }
@@ -353,12 +471,9 @@ class ContainerManager extends EventEmitter {
   /**
    * Stop a running container (doesn't destroy it)
    */
-  stopContainer(containerName) {
+  async stopContainer(containerName) {
     try {
-      dockerExec(`docker stop ${containerName}`, {
-        encoding: "utf-8",
-        stdio: "pipe",
-      });
+      await dockerExec(`docker stop ${containerName}`, { timeout: 30000 });
       return true;
     } catch {
       return false;
@@ -371,13 +486,13 @@ class ContainerManager extends EventEmitter {
    * @param {number} [timeout=10] - Seconds to wait for graceful stop
    * @returns {boolean} - true if restart succeeded
    */
-  restartContainer(containerName, timeout = 10) {
+  async restartContainer(containerName, timeout = 10) {
     try {
-      dockerExec(`docker restart -t ${timeout} ${containerName}`, {
-        encoding: "utf-8",
-        stdio: "pipe",
+      await dockerExec(`docker restart -t ${timeout} ${containerName}`, {
         timeout: (timeout + 30) * 1000,
       });
+      await this.ensureWorkspaceOwnership(containerName);
+      await this.ensureDevEnvironment(containerName);
       return true;
     } catch {
       return false;
@@ -397,10 +512,10 @@ class ContainerManager extends EventEmitter {
 
     // Stop and remove ONLY the container — volumes are left intact
     try {
-      dockerExec(`docker stop ${containerName}`, { encoding: 'utf-8', stdio: 'pipe' });
+      await dockerExec(`docker stop ${containerName}`, { timeout: 30000 });
     } catch { /* already stopped */ }
 
-    dockerExec(`docker rm -f ${containerName}`, { encoding: 'utf-8', stdio: 'pipe' });
+    await dockerExec(`docker rm -f ${containerName}`, { timeout: 30000 });
 
     // Recreate with the same params — volumes will be reattached by name
     const ports = Array.isArray(containerPorts) ? containerPorts : [];
@@ -411,17 +526,13 @@ class ContainerManager extends EventEmitter {
   /**
    * Remove a container and its volumes
    */
-  removeContainer(containerName) {
+  async removeContainer(containerName) {
     try {
-      dockerExec(`docker rm -f ${containerName}`, {
-        encoding: "utf-8",
-        stdio: "pipe",
-      });
-      // Also remove volumes
+      await dockerExec(`docker rm -f ${containerName}`, { timeout: 30000 });
       try {
-        dockerExec(
+        await dockerExec(
           `docker volume rm ${containerName}-home ${containerName}-workspace`,
-          { encoding: "utf-8", stdio: "pipe" },
+          { timeout: 15000 },
         );
       } catch {
         /* volumes may not exist */
@@ -433,41 +544,71 @@ class ContainerManager extends EventEmitter {
   }
 
   /**
-   * Get container status
+   * Instant cached status. A background inspect refreshes the cache.
+   * Use getContainerStatusAsync when the handler can await.
    */
   getContainerStatus(containerName) {
-    try {
-      const status = dockerExec(
-        `docker inspect ${containerName} --format '{{.State.Status}}'`,
-        { encoding: "utf-8", stdio: "pipe" },
-      ).trim();
-      return status; // 'running', 'exited', 'created', etc.
-    } catch {
-      return null; // Container doesn't exist
+    if (!containerName) return null;
+    if (!this._statusCache) this._statusCache = new Map();
+    if (!this._statusAt) this._statusAt = new Map();
+    if (!this._statusInflight) this._statusInflight = new Set();
+    if (!this._statusInflight.has(containerName)) {
+      this._statusInflight.add(containerName);
+      this.getContainerStatusAsync(containerName, { fresh: true }).finally(() => {
+        this._statusInflight.delete(containerName);
+      });
     }
+    return this._statusCache.get(containerName) ?? null;
   }
 
-  async getContainerStatusAsync(containerName) {
+  async getContainerStatusAsync(containerName, { fresh = false } = {}) {
+    if (!containerName) return null;
+    if (!this._statusCache) this._statusCache = new Map();
+    if (!this._statusAt) this._statusAt = new Map();
+    const cached = this._statusCache.get(containerName);
+    const cachedAt = this._statusAt.get(containerName) || 0;
+    if (!fresh && cached && Date.now() - cachedAt < 4000) return cached;
+    if (!this.isDockerAvailable()) return cached ?? null;
     try {
-      const status = await dockerExecAsync(
+      const status = String(await dockerExecAsync(
         `docker inspect ${containerName} --format '{{.State.Status}}'`,
-        { encoding: "utf-8" },
-      );
-      return status.trim();
+        { timeout: 8000 },
+      )).trim();
+      this._statusCache.set(containerName, status);
+      this._statusAt.set(containerName, Date.now());
+      return status;
     } catch {
+      this._statusCache.delete(containerName);
+      this._statusAt.delete(containerName);
       return null;
     }
   }
 
-  /**
-   * List all IDE-managed containers
-   */
-  listContainers() {
+  async inspectContainerStateAsync(containerName) {
+    if (!containerName) return { status: null, missing: true, kind: 'missing', error: 'No container name' };
     try {
-      const output = dockerExec(
+      const status = String(await dockerExecAsync(
+        `docker inspect ${containerName} --format '{{.State.Status}}'`,
+        { timeout: 8000 },
+      )).trim();
+      if (this._statusCache) this._statusCache.set(containerName, status);
+      if (this._statusAt) this._statusAt.set(containerName, Date.now());
+      return { status, missing: false, kind: 'ok', error: null };
+    } catch (err) {
+      const error = String(err?.message || err || '').trim();
+      const kind = classifyContainerInspectError(error);
+      if (this._statusCache) this._statusCache.delete(containerName);
+      if (this._statusAt) this._statusAt.delete(containerName);
+      return { status: null, missing: kind === 'missing', kind, error };
+    }
+  }
+
+  async listContainers() {
+    try {
+      const output = String(await dockerExec(
         `docker ps -a --filter "label=sai.projectId" --format '{{.Names}}||{{.Status}}||{{.Labels}}'`,
-        { encoding: "utf-8", stdio: "pipe" },
-      ).trim();
+        { timeout: 8000 },
+      )).trim();
 
       if (!output) return [];
 
@@ -489,22 +630,8 @@ class ContainerManager extends EventEmitter {
     }
   }
 
-  /**
-   * Execute a command inside a container (returns output)
-   */
   execInContainer(containerName, command, options = {}) {
-    try {
-      return dockerExec(
-        `docker exec ${containerName} bash -c "${command.replace(/"/g, '\\"')}"`,
-        {
-          encoding: "utf-8",
-          stdio: "pipe",
-          timeout: options.timeout || 30000,
-        },
-      ).trim();
-    } catch {
-      return null;
-    }
+    return this.execInContainerAsync(containerName, command, options);
   }
 
   async execInContainerAsync(containerName, command, options = {}) {
@@ -528,7 +655,7 @@ class ContainerManager extends EventEmitter {
    * Creates ~/.config/opencode/opencode.json with Ollama provider pointing to host.
    * Also sets OLLAMA_NUM_CTX env var as fallback for direct ollama CLI usage.
    */
-  configureOpenCodeOllama(containerName) {
+  async configureOpenCodeOllama(containerName) {
     // Query installed Ollama models from host (sync curl) so OpenCode can accept
     // --model ollama/<name> for any model the user actually has installed.
     let installedModels = {};
@@ -562,12 +689,12 @@ class ContainerManager extends EventEmitter {
     // base64 avoids all shell quoting issues ($schema expansion, double-escaping in execInContainer)
     const b64 = Buffer.from(JSON.stringify(config, null, 2)).toString('base64');
     try {
-      this.execInContainer(
+      await this.execInContainerAsync(
         containerName,
         `mkdir -p ~/.config/opencode && echo '${b64}' | base64 -d > ~/.config/opencode/opencode.json`,
         { timeout: 5000 },
       );
-      this.execInContainer(
+      await this.execInContainerAsync(
         containerName,
         `grep -q OLLAMA_NUM_CTX ~/.bashrc 2>/dev/null || echo 'export OLLAMA_NUM_CTX=32768' >> ~/.bashrc`,
         { timeout: 5000 },
@@ -579,23 +706,35 @@ class ContainerManager extends EventEmitter {
   }
 
   /**
-   * Get the working directory inside the container
-   * (either /workspace/repo if cloned, or /workspace)
+   * Working directory inside the container (cached). Use getWorkDirAsync when
+   * the caller can wait for docker exec.
    */
   getWorkDir(containerName) {
-    // Count subdirectories in /workspace
-    const dirs = this.execInContainer(
+    if (!this._workDirCache) this._workDirCache = new Map();
+    if (!this._workDirInflight) this._workDirInflight = new Set();
+    if (containerName && !this._workDirInflight.has(containerName)) {
+      this._workDirInflight.add(containerName);
+      this.getWorkDirAsync(containerName).finally(() => {
+        this._workDirInflight.delete(containerName);
+      });
+    }
+    return this._workDirCache.get(containerName) || "/workspace";
+  }
+
+  async getWorkDirAsync(containerName) {
+    const dirs = await this.execInContainerAsync(
       containerName,
       "ls -d /workspace/*/ 2>/dev/null | wc -l",
     );
-    const count = parseInt(dirs) || 0;
+    const count = parseInt(dirs, 10) || 0;
+    let workDir = "/workspace";
     if (count === 1) {
-      // Single repo — use it directly as cwd
-      const dir = this.execInContainer(containerName, "ls -d /workspace/*/");
-      return dir?.trim() || "/workspace";
+      const dir = await this.execInContainerAsync(containerName, "ls -d /workspace/*/");
+      workDir = dir?.trim() || "/workspace";
     }
-    // Multiple repos or none — use /workspace root
-    return "/workspace";
+    if (!this._workDirCache) this._workDirCache = new Map();
+    this._workDirCache.set(containerName, workDir);
+    return workDir;
   }
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal, Share2, RotateCcw } from 'lucide-react';
+import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal, Share2, RotateCcw, KeyRound } from 'lucide-react';
 import { stripTerminalQueryResponses } from '../utils/terminalControlFilter';
 import '@xterm/xterm/css/xterm.css';
 
@@ -39,7 +39,7 @@ const SANITIZE_CODEX_TOML = `node -e "const fs=require('fs');const f=require('os
 const QUICK_COMMANDS = [
   { label: 'Quick commands...', command: '' },
   // ── GitHub ──
-  { label: 'Login to GitHub', command: "GH_PROMPT_DISABLED=1 BROWSER=false gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git" },
+  { label: 'Login to GitHub', command: "BROWSER=false gh auth login --hostname github.com --git-protocol https --insecure-storage --skip-ssh-key && gh auth setup-git" },
   { label: 'GitHub auth status', command: 'gh auth status' },
   // ── AI coding assistants: install ──
   { label: 'Install Claude Code', command: npmGlobalInstall('@anthropic-ai/claude-code', 'claude') },
@@ -59,6 +59,7 @@ const QUICK_COMMANDS = [
   // ── Salesforce ──
   { label: 'Install Salesforce CLI', command: npmGlobalInstall('@salesforce/cli', 'sf') },
   { label: 'Login to Salesforce', command: withNpmGlobalPath('sf org login web') },
+  { label: 'Login to Cloudflare (Wrangler)', command: 'npx wrangler login' },
   // ── Utilities ──
   { label: 'Install pnpm', command: npmGlobalInstall('pnpm', 'pnpm') },
   { label: 'Check tool versions', command: `${withNpmGlobalPath('node -v; npm -v; gh --version 2>/dev/null; claude --version 2>/dev/null; opencode --version 2>/dev/null; copilot --version 2>/dev/null; codex --version 2>/dev/null; gemini --version 2>/dev/null; aider --version 2>/dev/null; sf --version 2>/dev/null; true')}` },
@@ -652,6 +653,7 @@ export default function InternalConsole({
 
           {/* AI command builder */}
           <CommandBuilder
+            projectId={hostShell ? null : projectId}
             onRun={(cmd) => {
               if (sessionIdRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({ type: 'input', sessionId: sessionIdRef.current, data: cmd + '\n' }));
@@ -664,11 +666,108 @@ export default function InternalConsole({
   );
 }
 
+const HOST_AUTH_BUTTONS = [
+  { id: 'gh', label: 'GitHub' },
+  { id: 'wrangler', label: 'Wrangler' },
+  { id: 'codex', label: 'Codex' },
+  { id: 'opencode', label: 'OpenCode' },
+  { id: 'claude', label: 'Claude' },
+];
+
+/**
+ * Copy host / IDE CLI logins into this project container.
+ */
+function HostAuthButtons({ projectId }) {
+  const [tools, setTools] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const [statusById, setStatusById] = useState({});
+
+  const loadStatus = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(`/api/projects/${projectId}/host-auth`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setRunning(Boolean(data.running));
+      setTools(Array.isArray(data.tools) ? data.tools : []);
+    } catch { /* endpoint missing on older server */ }
+  }, [projectId]);
+
+  useEffect(() => {
+    loadStatus();
+  }, [loadStatus]);
+
+  const importTool = useCallback(async (toolId) => {
+    if (!projectId || busyId) return;
+    setBusyId(toolId);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/host-auth`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tools: [toolId] }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const item = Array.isArray(data.imported) ? data.imported.find((row) => row.id === toolId) : null;
+      const ok = Boolean(res.ok && (item?.ok || data.ok));
+      setStatusById((prev) => ({
+        ...prev,
+        [toolId]: ok ? 'ok' : (item?.warning || item?.error || data.error || 'failed'),
+      }));
+      if (ok) setTimeout(() => {
+        setStatusById((prev) => (prev[toolId] === 'ok' ? { ...prev, [toolId]: null } : prev));
+      }, 2500);
+    } catch {
+      setStatusById((prev) => ({ ...prev, [toolId]: 'failed' }));
+    } finally {
+      setBusyId(null);
+      loadStatus();
+    }
+  }, [projectId, busyId, loadStatus]);
+
+  if (!projectId) return null;
+
+  return (
+    <div className="flex items-center gap-0.5 flex-shrink-0">
+      <KeyRound size={11} className="text-amber-400/80" />
+      {HOST_AUTH_BUTTONS.map((btn) => {
+        const info = tools.find((tool) => tool.id === btn.id);
+        const available = info ? info.available : tools.length === 0;
+        const result = statusById[btn.id];
+        const disabled = !running || !available || Boolean(busyId);
+        const title = !running
+          ? 'This project\'s container is stopped. Docker can be up while the workspace is not — it will start automatically, or use System Health → Start container.'
+          : result && result !== 'ok'
+            ? result
+            : info?.warning || `Copy host ${btn.label} login into this project`;
+        return (
+          <button
+            key={btn.id}
+            type="button"
+            onClick={() => importTool(btn.id)}
+            disabled={disabled}
+            className={`px-1.5 py-0.5 rounded text-[10px] border ${
+              result === 'ok'
+                ? 'text-green-300 border-green-500/30 bg-green-500/10'
+                : disabled
+                  ? 'text-surface-600 border-transparent'
+                  : 'text-amber-200/90 border-surface-700 hover:text-amber-100 hover:bg-amber-500/10'
+            }`}
+            title={title}
+          >
+            {busyId === btn.id ? '…' : result === 'ok' ? '✓' : btn.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * Natural language → shell command builder.
  * Uses the local LLM to generate commands from descriptions.
  */
-function CommandBuilder({ onRun }) {
+function CommandBuilder({ onRun, projectId }) {
   const [query, setQuery] = useState('');
   const [quickCommand, setQuickCommand] = useState('');
   const [generating, setGenerating] = useState(false);
@@ -730,6 +829,7 @@ function CommandBuilder({ onRun }) {
       >
         Run
       </button>
+      {projectId && <HostAuthButtons projectId={projectId} />}
       <input
         type="text"
         value={query}

@@ -22,6 +22,8 @@ import {
   Clock,
   Terminal,
 } from "lucide-react";
+import { clientColor, groupProjectsByClient } from "../utils/projectOrganization";
+import ProjectMoveButtons from "./ProjectMoveButtons";
 
 const Spinner = () => (
   <div className="w-4 h-4 border-2 border-current/30 border-t-current rounded-full animate-spin" />
@@ -63,6 +65,7 @@ export default function ProjectManagerPanel({
     cloneProject,
     getProject,
     notify,
+    moveProject,
   } = useProjects();
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -85,8 +88,20 @@ export default function ProjectManagerPanel({
   const filteredProjects = projects.filter(
     (p) =>
       p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.description?.toLowerCase().includes(searchTerm.toLowerCase()),
+      p.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (p.client || "").toLowerCase().includes(searchTerm.toLowerCase()),
   );
+  const projectGroups = groupProjectsByClient(filteredProjects);
+
+  const handleMove = async (projectId, direction, scope, e) => {
+    e?.preventDefault();
+    e?.stopPropagation();
+    try {
+      await moveProject(projectId, direction, scope);
+    } catch (err) {
+      notify(err.message || "Failed to move project", "error");
+    }
+  };
 
   // ── Handlers ──
 
@@ -393,7 +408,29 @@ export default function ProjectManagerPanel({
 
       {/* Project list */}
       <div className="flex-1 overflow-y-auto py-1">
-        {filteredProjects.map((project) => {
+        {projectGroups.map((group, groupIndex) => {
+          const color = clientColor(group.client);
+          const groupAnchor = group.projects[0];
+          return (
+          <div key={group.client || "__ungrouped"} className="mb-1">
+            <div className={`flex items-center gap-1.5 px-2 py-1 mx-1 rounded border ${color.bg} ${color.border}`}>
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${color.bar}`} aria-hidden />
+              <span className={`text-[10px] font-semibold uppercase tracking-wider truncate ${color.text}`}>
+                {group.client || "Ungrouped"}
+              </span>
+              <div className="ml-auto flex-shrink-0">
+                <ProjectMoveButtons
+                  compact
+                  canMoveUp={groupIndex > 0}
+                  canMoveDown={groupIndex < projectGroups.length - 1}
+                  onMoveUp={(e) => handleMove(groupAnchor.id, "up", "client", e)}
+                  onMoveDown={(e) => handleMove(groupAnchor.id, "down", "client", e)}
+                  upLabel={`Move ${group.client || "Ungrouped"} group up`}
+                  downLabel={`Move ${group.client || "Ungrouped"} group down`}
+                />
+              </div>
+            </div>
+        {group.projects.map((project, projectIndex) => {
           const unreadCount = getUnreadCount(unreadCounts, project.id);
 
           return (
@@ -427,7 +464,7 @@ export default function ProjectManagerPanel({
                   <ChevronRight className="w-3 h-3" />
                 )}
               </button>
-              <FolderOpen className="w-4 h-4 text-surface-400 flex-shrink-0" />
+              <FolderOpen className={`w-4 h-4 flex-shrink-0 ${color.text}`} />
               <span className="min-w-0 flex-1">
                 <span className="text-sm truncate block">{project.name}</span>
                 {project.provision?.status && ['queued', 'building', 'creating'].includes(project.provision.status) && (
@@ -442,6 +479,16 @@ export default function ProjectManagerPanel({
               {unreadCount > 0 && (
                 <span className="flex-shrink-0 w-2 h-2 rounded-full bg-primary-500 animate-pulse" title={`${unreadCount} unread`} />
               )}
+
+              <ProjectMoveButtons
+                compact
+                canMoveUp={projectIndex > 0}
+                canMoveDown={projectIndex < group.projects.length - 1}
+                onMoveUp={(e) => handleMove(project.id, "up", "project", e)}
+                onMoveDown={(e) => handleMove(project.id, "down", "project", e)}
+                upLabel={`Move ${project.name} up`}
+                downLabel={`Move ${project.name} down`}
+              />
 
               {/* Hover actions */}
               <div className="hidden group-hover:flex items-center gap-0.5 flex-shrink-0">
@@ -570,6 +617,9 @@ export default function ProjectManagerPanel({
           </div>
           );
         })}
+          </div>
+          );
+        })}
 
         {filteredProjects.length === 0 && (
           <div className="px-3 py-8 text-center">
@@ -627,6 +677,7 @@ function CreateModal({ onClose, onCreated }) {
       const projectData = {
         name: form.formData.name.trim(),
         description: form.formData.description.trim(),
+        client: form.formData.client || "",
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
         excludedPresetRules: form.formData.excludedPresetRules || [],
@@ -717,6 +768,7 @@ function EditModal({ project, onClose, onSaved }) {
   const form = useProjectForm({
     name: project.name,
     description: project.description,
+    client: project.client || "",
     rules: project.rules?.length > 0 ? [...project.rules] : [""],
     selectedPresets: project.selectedPresets || [],
     excludedPresetRules: project.excludedPresetRules || [],
@@ -740,6 +792,7 @@ function EditModal({ project, onClose, onSaved }) {
       await updateProject(project.id, {
         name: form.formData.name.trim(),
         description: form.formData.description.trim(),
+        client: form.formData.client || "",
         rules: form.formData.rules.filter((r) => r.trim()),
         selectedPresets: form.formData.selectedPresets,
         excludedPresetRules: form.formData.excludedPresetRules || [],

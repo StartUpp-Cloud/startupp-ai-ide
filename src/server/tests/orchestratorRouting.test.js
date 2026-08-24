@@ -56,8 +56,8 @@ assert.equal(
 
 assert.equal(
   shouldOrchestrateRequest({ mode: 'autonomous', content: 'hello' }),
-  true,
-  'Autonomous mode should always route through the orchestrator'
+  false,
+  'Legacy autonomous mode is now the same as agent: simple chat should not orchestrate'
 );
 
 assert.equal(

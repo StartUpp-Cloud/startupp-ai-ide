@@ -39,6 +39,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
     /Content of \$\{att\.name\} \(\$\{resolved\}\)/,
     'Inline text attachments should include the resolved container path for continuity',
   );
+  assert.match(
+    agentGatewaySource,
+    /## Outcome/,
+    'Agent mode should require a compact Outcome/Details final report',
+  );
 }
 
 {

@@ -215,6 +215,7 @@ export default function IDE() {
 
   // Git branch state (legacy local projects)
   const [currentBranch, setCurrentBranch] = useState(null);
+  const [activeChatSessionName, setActiveChatSessionName] = useState(null);
   // Container repos state
   const [containerRepos, setContainerRepos] = useState([]);
 
@@ -601,6 +602,7 @@ export default function IDE() {
       <TopBar
         selectedProject={selectedProject}
         currentBranch={currentBranch}
+        activeChatSessionName={activeChatSessionName}
         planRunning={planRunning}
         planSteps={planSteps}
         planCurrentStep={planCurrentStep}
@@ -743,6 +745,11 @@ export default function IDE() {
                     isActive={projectId === selectedProjectId}
                     onUnreadChange={handleUnreadChange}
                     onProjectRead={handleProjectRead}
+                    onActiveSessionChange={(_, __, sessionName) => {
+                      if (projectId === selectedProjectId) {
+                        setActiveChatSessionName(sessionName || null);
+                      }
+                    }}
                     project={chatProject}
                     containerRepos={chatContainerRepos}
                     mobileLayout={isMobileLayout}

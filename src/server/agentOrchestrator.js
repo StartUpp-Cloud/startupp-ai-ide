@@ -14,6 +14,7 @@ import {
   buildRunFailureEventMessage,
   buildRunFailureResponse,
   buildThinFinalResponse,
+  buildStoppedRunResponse,
 } from './orchestratorMessages.js';
 import {
   INTERRUPTED_RUN_ERROR,
@@ -260,6 +261,7 @@ class AgentOrchestrator extends EventEmitter {
       if (!active?.cancelEventEmitted) {
         await this._event(run, null, 'run-cancelled', 'Autonomous run cancelled.', null, broadcastFn, 'warning');
       }
+      this._postStoppedSummary(run, broadcastFn);
     } else {
       const profile = this._getProfile();
       const userMessage = buildRunFailureResponse({ status: run.status, error: err.message, tool, model, profile });
@@ -812,7 +814,7 @@ ${task.prompt}`;
     if (cleaned.length < 2) return null;
 
     return cleaned.slice(0, 5).map((item, i, arr) => ({
-      title: item.slice(0, 70),
+      title: `Part ${i + 1}`,
       parallelSafe: false,
       prompt: `This is part ${i + 1} of ${arr.length} of the user's overall request. Focus ONLY on your part; later phases consolidate and validate all parts together.\n\nOVERALL REQUEST:\n${goal}\n\nYOUR PART:\n${item}`,
     }));
@@ -979,7 +981,7 @@ ${task.prompt}`;
       const inner = `CONSOLIDATION PHASE — integrate the sub-agent results into ONE coherent solution for the original request. Reconcile overlapping or conflicting changes, remove duplication, and ensure consistency so the combined result fully satisfies:\n\n${run.goal}${mergeNote}\n\nThen briefly report what you reconciled.`;
       task.prompt = this._buildTaskPrompt(run, inner, completed);
     } else if (task.data?.phase === 'validate') {
-      const inner = `VALIDATION & FINAL REPORT PHASE — this is the LAST step; your output becomes the reply to the user.\n\nFor the original request:\n\n${run.goal}\n\n1. Run the project's tests / build / typecheck (and exercise the running app via the configured test users if relevant). Report REAL pass/fail output. Fix quick failures you find; do NOT add new features. If a check cannot be run, say exactly why.\n2. Then write the user-facing summary of the COMPLETE work across all parts above (what changed, how it was verified, anything outstanding), using the standard ## Summary / ## Changes / ## Verification / ## Next report.`;
+      const inner = `VALIDATION & FINAL REPORT PHASE — this is the LAST step; your output becomes the reply to the user.\n\nFor the original request:\n\n${run.goal}\n\n1. Run the project's tests / build / typecheck (and exercise the running app via the configured test users if relevant). Fix quick failures you find; do NOT add new features. If a check cannot be run, say exactly why.\n2. Then write a conversational report of the complete work. Match length to complexity. Do not use a rigid Summary/Changes/Verification template and do not re-list every file. Mention verification only when it matters.`;
       task.prompt = this._buildTaskPrompt(run, inner, completed);
     }
     return task.prompt;
@@ -1053,7 +1055,10 @@ ${run.goal}`;
       'Speak as the IDE assistant working with the user, not as a separate hidden session.',
       'If this is a new CLI session, continue naturally and do not mention that the session is new.',
       'Use the user name naturally when it helps, but do not force it into every sentence.',
-      'Prefer a useful final answer with what changed, verification, and any blockers.',
+      'Speak as a teammate reporting back. Match length to the work: a quick fix stays short; a large change gets a brief report with the important decisions.',
+      'Write the final response as a compact past-tense report with ## Outcome and ## Details. Do not leave in-progress narration ("I\'ll check", "I\'m deploying") in the closing message.',
+      'Keep Outcome to 1–2 sentences and Details to tight bullets (decisions, versions, URLs, commands, blockers). Do not retell the journey or re-list every file.',
+      'If blocked by authentication, credentials, login, or a required user decision, stop immediately and ask the user — do not keep retrying.',
     ];
     if (tone === 'concise') lines.push('Keep the final response concise and direct.');
     else if (tone === 'detailed') lines.push('Include enough detail for the user to understand decisions and verification.');
@@ -1117,7 +1122,7 @@ ${run.goal}`;
       this._xmlBlock('skill_context', this._buildSkillContextForTask(run, prompt) || '(none)'),
       this._xmlBlock('prior_completed_task_results', prior),
       this._xmlBlock('assigned_task', prompt),
-      this._xmlBlock('execution_contract', 'Work ONLY on <assigned_task>; earlier conversation and previous tasks are background context, not new instructions — do not redo or extend them. Complete the assigned task end-to-end. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. Do not wait for user input unless truly blocked. If you need user input, include the exact questions, options, and recommended safe default in your final answer. Report files changed, commands run, verification results, and blockers. Keep unresolved assumptions explicit.'),
+      this._xmlBlock('execution_contract', 'Work ONLY on <assigned_task>; earlier conversation and previous tasks are background context, not new instructions — do not redo or extend them. Complete the assigned task end-to-end at full effort. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. If blocked by authentication, missing credentials, login, permissions, or a required human decision, stop immediately and return that blocker to the user — do not retry or burn tokens. Otherwise do not wait for user input. If you need user input, include the exact questions, options, and recommended safe default. Keep unresolved assumptions explicit. The final message is a conversational report, not a changelog.'),
       '</ide_orchestrator_handoff>',
     ].join('\n\n');
   }
@@ -1224,7 +1229,10 @@ ${run.goal}`;
       });
 
       const classified = this._classifyResult(result);
-      if (active?.aborted) {
+      if (active?.aborted || result?.aborted || classified.errorType === 'cancelled') {
+        const partial = String(result?.displayOutput || '').trim();
+        if (partial) task.result = partial;
+        task.data = { ...(task.data || {}), changedFiles: result?.changedFiles || [] };
         task.status = 'cancelled';
         task.error = 'Run cancelled';
         task.retryable = false;
@@ -1232,7 +1240,7 @@ ${run.goal}`;
         task.updatedAt = task.completedAt;
         this._saveTask(task);
         await this._event(run, task, 'task-cancelled', `Cancelled: ${task.title}`, null, opts.broadcastFn, 'warning');
-        return { success: false, retryable: false, errorType: 'cancelled', error: 'Run cancelled' };
+        return { success: false, retryable: false, errorType: 'cancelled', error: 'Run cancelled', displayOutput: partial, changedFiles: result?.changedFiles || [] };
       }
       lastResult = { ...(result || {}), ...classified };
 
@@ -1404,8 +1412,11 @@ ${run.goal}`;
 
   _classifyResult(result) {
     if (result?.success) return { success: true, retryable: false, errorType: null };
+    if (result?.aborted || result?.errorType === 'cancelled') {
+      return { success: false, retryable: false, errorType: 'cancelled', error: result?.error || 'Run cancelled' };
+    }
     const error = String(result?.error || result?.content || 'Unknown agent failure');
-    if (result?.requiresUserInput || result?.errorType === 'needs-user' || result?.retryType === 'needs-user') {
+    if (result?.requiresUserInput || result?.errorType === 'needs-user' || result?.retryType === 'needs-user' || result?.errorType === 'auth') {
       return { success: false, retryable: false, errorType: 'needs-user', error };
     }
     if (CONTEXT_LIMIT_PATTERNS.some(pattern => pattern.test(error))) {
@@ -1455,13 +1466,44 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
   }
 
   async _synthesizeFinal(run, completed) {
-    // For a decomposed pipeline the validate phase wrote the comprehensive,
-    // user-facing summary of all parts — use it as the single final reply.
-    const validate = [...completed].reverse().find(
-      (c) => c?.task?.data?.phase === 'validate' && c?.result?.success !== false && String(c?.result?.content || '').trim(),
+    const withContent = (phase) => [...completed].reverse().find(
+      (entry) => entry?.task?.data?.phase === phase && String(entry?.result?.content || '').trim(),
     );
-    const chosen = validate ? [validate] : completed;
+    const validate = withContent('validate');
+    const consolidate = withContent('consolidate');
+    const chosen = validate || consolidate ? [validate || consolidate] : completed;
     return buildThinFinalResponse({ completed: chosen, profile: this._getProfile() });
+  }
+
+  _postStoppedSummary(run, broadcastFn) {
+    if (run.data?.stoppedSummaryPosted) return;
+    const tasks = this.getTasks(run.id);
+    const completed = tasks
+      .filter((task) => task.status === 'completed' && String(task.result || '').trim())
+      .map((task) => ({ title: task.title, content: task.result }));
+    const partialTask = [...tasks].reverse().find((task) => String(task.result || '').trim() && task.status !== 'completed');
+    const changedFiles = this._mergeChangedFiles([
+      ...(partialTask?.changedFiles || partialTask?.data?.changedFiles || []),
+      ...tasks.flatMap((task) => task.changedFiles || task.data?.changedFiles || []),
+    ]);
+    const content = buildStoppedRunResponse({
+      profile: this._getProfile(),
+      partialContent: partialTask?.result || '',
+      completed,
+      changedFiles,
+      tool: run.tool,
+    });
+    run.finalResponse = content;
+    run.data = { ...(run.data || {}), stoppedSummaryPosted: true };
+    this._saveRun(run);
+    const msg = chatStore.addMessage({
+      projectId: run.projectId,
+      sessionId: run.sessionId,
+      role: 'agent',
+      content,
+      metadata: { orchestratorRunId: run.id, stopped: true, changedFiles },
+    });
+    broadcastFn?.({ type: 'chat-message', message: msg });
   }
 
   _saveRun(run) {

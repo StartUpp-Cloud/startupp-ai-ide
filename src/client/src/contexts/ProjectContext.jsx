@@ -122,6 +122,18 @@ export const ProjectProvider = ({ children }) => {
     }
   };
 
+  const moveProject = async (id, direction, scope = "project") => {
+    const response = await fetch(`/api/projects/${id}/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ direction, scope }),
+    });
+    if (!response.ok) throw new Error("Failed to move project");
+    const data = await response.json();
+    if (Array.isArray(data.projects)) setProjects(data.projects);
+    return data;
+  };
+
   const cloneProject = async (id, projectData = {}) => {
     try {
       setLoading(true);
@@ -309,6 +321,7 @@ export const ProjectProvider = ({ children }) => {
     updateProject,
     deleteProject,
     cloneProject,
+    moveProject,
     createPrompt,
     getPrompts,
     updatePrompt,

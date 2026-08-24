@@ -20,6 +20,7 @@ import { CLI_TOOLS } from '../utils/sessionAssistantOptions';
 export default function TopBar({
   selectedProject,
   currentBranch,
+  activeChatSessionName,
   planRunning,
   planSteps,
   planCurrentStep,
@@ -154,16 +155,6 @@ export default function TopBar({
 
         <div className={`${compactLayout ? 'hidden' : 'hidden sm:block'} w-px h-4 bg-surface-700`} />
 
-        {/* Slack */}
-        <button
-          onClick={() => setShowSlack(true)}
-          className={`${compactLayout ? 'flex px-1.5' : 'hidden px-2 sm:flex'} items-center gap-1.5 py-1 rounded-md text-[11px] font-medium text-surface-400 hover:text-surface-200 hover:bg-surface-750 transition-colors`}
-          title="Connect Slack"
-        >
-          <MessageSquare size={12} className="text-[#4A154B]" />
-          <span className={compactLayout ? 'sr-only' : 'hidden sm:inline'}>Slack</span>
-        </button>
-
         <button
           onClick={() => onForceMobileLayoutChange?.(!forceMobileLayout)}
           className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
@@ -178,8 +169,17 @@ export default function TopBar({
           <span className={compactLayout ? 'sr-only' : 'hidden sm:inline'}>Mobile</span>
         </button>
 
-        {/* Spacer */}
-        <div className="flex-1 min-w-2" />
+        {activeChatSessionName && (
+          <div className={`flex min-w-0 flex-1 items-center gap-1.5 ${compactLayout ? 'max-w-[140px]' : ''}`}>
+            <MessageSquare size={12} className="flex-shrink-0 text-primary-400/80" />
+            <span className="truncate text-[11px] font-medium text-surface-300" title={activeChatSessionName}>
+              {activeChatSessionName}
+            </span>
+          </div>
+        )}
+
+        {/* Spacer when no active session name */}
+        {!activeChatSessionName && <div className="flex-1 min-w-2" />}
 
         {/* Tools */}
         <div className="flex items-center gap-0.5 flex-shrink-0 sm:gap-1">
@@ -237,7 +237,15 @@ export default function TopBar({
       </div>
 
       {/* Modals */}
-      <LLMSettingsPanel isOpen={showLLMSettings} onClose={() => setShowLLMSettings(false)} project={selectedProject} />
+      <LLMSettingsPanel
+        isOpen={showLLMSettings}
+        onClose={() => setShowLLMSettings(false)}
+        project={selectedProject}
+        onOpenSlack={() => {
+          setShowLLMSettings(false);
+          setShowSlack(true);
+        }}
+      />
       <WelcomeGuide
         isOpen={showGuide}
         onClose={() => {

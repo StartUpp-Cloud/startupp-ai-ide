@@ -205,7 +205,8 @@ router.patch('/:projectId/chat/sessions/:sessionId', (req, res) => {
 
     if (wantsMode) {
       const nextMode = String(req.body.mode).toLowerCase();
-      if (['plan', 'agent', 'autonomous'].includes(nextMode)) updates.mode = nextMode;
+      if (nextMode === 'autonomous') updates.mode = 'agent';
+      else if (['plan', 'agent'].includes(nextMode)) updates.mode = nextMode;
     }
 
     if (wantsValidateVisually) {

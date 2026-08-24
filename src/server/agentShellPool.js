@@ -48,40 +48,35 @@ class AgentShellPool extends EventEmitter {
     if (project?.runtime !== 'host' && project?.containerName) {
       containerName = project.containerName;
       const { containerManager } = await import('./containerManager.js');
-      const status = containerManager.getContainerStatus(containerName);
+      const status = await containerManager.getContainerStatusAsync(containerName);
       if (!status) throw new Error(`Container ${containerName} does not exist`);
       if (status !== 'running') {
-        const started = containerManager.startContainer(containerName);
+        const started = await containerManager.startContainer(containerName);
         if (!started) throw new Error(`Failed to start container ${containerName}`);
       }
-      // Use an explicit session path when provided; otherwise stay at the
-      // workspace root so multi-repo projects do not pick an arbitrary repo.
       workingDir = cwdOverride || '/workspace';
-      // Verify the CWD exists in the container — attempt to re-create worktree if missing
       if (workingDir !== '/workspace') {
-        const exists = containerManager.execInContainer(containerName,
+        const exists = (await containerManager.execInContainerAsync(containerName,
           `test -d '${workingDir}' && echo yes`,
           { timeout: 3000 },
-        )?.trim();
+        ))?.trim();
         if (exists !== 'yes') {
           console.log(`[agentShellPool] CWD '${workingDir}' does not exist, attempting to re-create worktree...`);
-          // Try to re-create: extract branch name from path (/workspace/.worktrees/<branch>)
           const branchName = workingDir.split('/').pop();
           if (branchName && workingDir.includes('.worktrees')) {
             try {
-              const repoRoot = containerManager.execInContainer(containerName,
+              const repoRoot = (await containerManager.execInContainerAsync(containerName,
                 `find /workspace -maxdepth 2 -name .git -print -quit 2>/dev/null`,
                 { timeout: 5000 },
-              )?.trim()?.replace(/\/.git$/, '') || '/workspace';
-              containerManager.execInContainer(containerName, `mkdir -p /workspace/.worktrees`, { timeout: 3000 });
-              // Try local branch first, then remote
-              const addResult = containerManager.execInContainer(containerName,
+              ))?.trim()?.replace(/\/.git$/, '') || '/workspace';
+              await containerManager.execInContainerAsync(containerName, `mkdir -p /workspace/.worktrees`, { timeout: 3000 });
+              await containerManager.execInContainerAsync(containerName,
                 `cd '${repoRoot}' && (git worktree add '${workingDir}' '${branchName}' 2>/dev/null || git worktree add '${workingDir}' -b '${branchName}' 'origin/${branchName}' 2>/dev/null)`,
                 { timeout: 15000 },
               );
-              const recreated = containerManager.execInContainer(containerName,
+              const recreated = (await containerManager.execInContainerAsync(containerName,
                 `test -d '${workingDir}' && echo yes`, { timeout: 3000 },
-              )?.trim() === 'yes';
+              ))?.trim() === 'yes';
               if (recreated) {
                 console.log(`[agentShellPool] Successfully re-created worktree at ${workingDir}`);
               } else {
