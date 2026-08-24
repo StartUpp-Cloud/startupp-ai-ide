@@ -15,7 +15,7 @@ import {
   startDockerWatchdog,
   refreshDockerAvailability,
 } from './dockerBroker.js';
-import { containerNodeShellPrelude } from './containerNode.js';
+import { containerNodeShellPrelude, NODE_ENV_SCRIPT } from './containerNode.js';
 
 export const CONTAINER_DEV_HOME = '/home/dev';
 export const CONTAINER_CLOUDFLARE_ENV = '/home/dev/.config/cloudflare.env';
@@ -32,6 +32,7 @@ export function interactiveDockerExecArgs({
   return [
     'exec', '-it',
     '-e', `HOME=${CONTAINER_DEV_HOME}`,
+    '-e', `BASH_ENV=${NODE_ENV_SCRIPT}`,
     '-e', 'TERM=xterm-256color',
     '-e', 'COLORTERM=truecolor',
     '-e', 'BROWSER=false',
@@ -44,9 +45,9 @@ export function interactiveDockerExecArgs({
 
 /**
  * Non-PTY agent `docker exec` (stdin script). Interactive terminals use
- * `bash -l`, which sources ~/.bashrc including cloudflare.env. Agent runs
- * non-interactive `bash -s`; ~/.bashrc returns immediately, so Wrangler
- * never sees CLOUDFLARE_API_TOKEN and falls back to stale OAuth.
+ * `bash -l`, which sources ~/.bashrc. Agent runs non-interactive `bash -s`,
+ * so BASH_ENV + a node-env.sh sourced at the top of bashrc load nvm before
+ * Debian's interactive-only `return`. The prelude still sources Cloudflare.
  */
 export function agentDockerExecArgs({
   workDir = '/workspace',
@@ -55,6 +56,7 @@ export function agentDockerExecArgs({
   return [
     'exec', '-i',
     '-e', `HOME=${CONTAINER_DEV_HOME}`,
+    '-e', `BASH_ENV=${NODE_ENV_SCRIPT}`,
     '-w', workDir,
     containerName,
     'setsid', '-w', 'bash', '-s',

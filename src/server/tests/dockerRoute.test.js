@@ -21,7 +21,7 @@ const execArgs = interactiveDockerExecArgs({
   command: ['bash', '-l'],
 });
 assert.deepEqual(execArgs.slice(0, 2), ['exec', '-it']);
-assert.equal(execArgs[execArgs.indexOf('-e') + 1], 'HOME=/home/dev');
+assert.ok(execArgs.includes('BASH_ENV=/home/dev/.sai/node-env.sh'));
 assert.ok(execArgs.includes('bash'));
 assert.ok(!execArgs.includes('script'));
 assert.equal(execArgs[execArgs.indexOf('-w') + 1], '/workspace');
@@ -33,7 +33,7 @@ const agentArgs = agentDockerExecArgs({
 });
 assert.deepEqual(agentArgs.slice(0, 2), ['exec', '-i']);
 assert.ok(!agentArgs.includes('-it'));
-assert.equal(agentArgs[agentArgs.indexOf('-e') + 1], 'HOME=/home/dev');
+assert.ok(agentArgs.includes('BASH_ENV=/home/dev/.sai/node-env.sh'));
 assert.equal(agentArgs[agentArgs.indexOf('-w') + 1], '/workspace/openava.app');
 assert.equal(agentArgs[agentArgs.indexOf('-w') + 2], 'sai-openava');
 assert.deepEqual(agentArgs.slice(-4), ['setsid', '-w', 'bash', '-s']);

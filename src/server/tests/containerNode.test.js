@@ -29,6 +29,8 @@ assert.match(ensure, /npm-global\\\/bin/);
 assert.match(ensure, /prefix=.*npm-global/);
 assert.match(ensure, /base64 -d/);
 assert.match(ensure, new RegExp(SAI_NVM_MARKER));
+assert.match(ensure, /node-env\.sh/);
+assert.match(ensure, /bashrc\.sai-nvm/);
 assert.doesNotMatch(ensure, /export NPM_CONFIG_PREFIX=/);
 
 const alreadyDefault = buildEnsureNvmCommand();
