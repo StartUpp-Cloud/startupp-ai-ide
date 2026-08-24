@@ -501,7 +501,7 @@ export default function BranchReview() {
         {phase === "idle" && <IdleState />}
         {phase === "loading" && <LoadingState />}
         {phase === "error" && <ErrorState error={globalError} onRetry={runAnalysis} />}
-        {phase === "done" && files.length === 0 && <EmptyState mode={mode} />}
+        {phase === "done" && files.length === 0 && <EmptyState mode={reviewMode} />}
 
         {(phase === "analyzing" || (phase === "done" && files.length > 0)) && (
           <>

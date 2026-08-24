@@ -59,6 +59,8 @@ import { DEFAULT_CHATGPT_CODEX_MODEL, unwrapCodexErrorMessage } from './codexMod
 import { createCodexStatusTracker, extractJsonlEvents } from './codexStatus.js';
 import { refreshAndBroadcastCodexAccountStatus } from './codexAccountStatus.js';
 import { createInnerPidMarker, extractInnerPid, killRegisteredAgentProcesses, stripInnerPidLines } from './agentProcessKill.js';
+import { formatGoalContract, normalizeGoalContract } from './goalContract.js';
+import { normalizeRunPolicy } from './runPolicy.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -291,6 +293,8 @@ class AgentGateway extends EventEmitter {
     tool = 'claude',
     model = null,
     effort = null,
+    policy = {},
+    goalContract = {},
     broadcastFn,
     skipUnread = false,
     orchestrated = false,
@@ -299,19 +303,19 @@ class AgentGateway extends EventEmitter {
     if (existing && existing.queue) {
       existing.queue = existing.queue.then(() => {
         if (existing.aborted) return null;
-        return this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn, skipUnread, orchestrated });
+        return this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, policy, goalContract, broadcastFn, skipUnread, orchestrated });
       });
       return existing.queue;
     }
 
     this._running.set(sessionId, { aborted: false, startedAt: Date.now(), queue: null });
-    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, broadcastFn, skipUnread, orchestrated });
+    const promise = this._executeTask({ projectId, sessionId, content, attachments, mode, tool, model, effort, policy, goalContract, broadcastFn, skipUnread, orchestrated });
     const entry = this._running.get(sessionId);
     if (entry) entry.queue = promise;
     return promise;
   }
 
-  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, model, effort, broadcastFn, skipUnread = false, orchestrated = false }) {
+  async _executeTask({ projectId, sessionId, content, attachments = [], mode, tool, model, effort, policy = {}, goalContract = {}, broadcastFn, skipUnread = false, orchestrated = false }) {
     const ctx = this._running.get(sessionId) || { aborted: false, queue: null };
     ctx.orchestrated = orchestrated;
     ctx.startedAt = Date.now();
@@ -325,13 +329,15 @@ class AgentGateway extends EventEmitter {
 
       const provider = llmProvider.getSettings().provider;
       const isCapable = provider !== 'ollama';
-      const assistantSettings = { model, effort };
+      const effectivePolicy = normalizeRunPolicy(policy, { tool, projectRuntime: policy?.projectRuntime || 'container' });
+      const effectiveGoalContract = normalizeGoalContract({ content: fullContent, ...goalContract });
+      const assistantSettings = { model, effort, policy: effectivePolicy, goalContract: effectiveGoalContract };
       const isOllamaAssistant = ollamaWorkspaceOrchestrator.isOllamaAssistant(tool);
 
       // Auto mode: two-stage draft→finalize pipeline. Intercept before the normal
       // routing so an auto turn is never re-routed through smart-route/plan/ollama.
       if (tool === 'auto') {
-        return await this._executeAutoPipeline({ projectId, sessionId, content: fullContent, mode, broadcastFn, ctx, skipUnread });
+        return await this._executeAutoPipeline({ projectId, sessionId, content: fullContent, mode, broadcastFn, ctx, skipUnread, assistantSettings });
       }
 
       if (mode !== 'plan' && this._requiresRepoInspection(fullContent)) {
@@ -491,13 +497,13 @@ class AgentGateway extends EventEmitter {
   }
 
   /** Try premium finalizers in priority order, falling back on rate-limit/failure. */
-  async _runFinalizerFallback({ projectId, sessionId, prompt, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase }) {
+  async _runFinalizerFallback({ projectId, sessionId, prompt, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase, assistantSettings = {} }) {
     for (let i = 0; i < finalizers.length; i++) {
       const fin = finalizers[i];
       this._addProgressMessage(projectId, sessionId, `🔎 Auto · ${phase} — ${LABEL[fin]} reviewing & verifying…`, broadcastFn);
       // leanContext: the finalizer reviews the actual diff, so skip the heavy
       // skills/memory blocks — big token savings on the premium (rate-limited) call.
-      const res = await this._sendToCliTool(projectId, sessionId, prompt, fin, { leanContext: true }, broadcastFn, ctx, mode, skipUnread);
+      const res = await this._sendToCliTool(projectId, sessionId, prompt, fin, { ...assistantSettings, leanContext: true }, broadcastFn, ctx, mode, skipUnread);
       if (res?.success) return res;
       if (ctx?.aborted) return null;
       const reason = `${res?.error || ''} ${res?.retryReason || ''}`;
@@ -540,7 +546,7 @@ class AgentGateway extends EventEmitter {
    * available / draft is the deliverable / all finalizers fail), the last free
    * result is posted explicitly via _postAutoFinal.
    */
-  async _executeAutoPipeline({ projectId, sessionId, content, mode, broadcastFn, ctx, skipUnread }) {
+  async _executeAutoPipeline({ projectId, sessionId, content, mode, broadcastFn, ctx, skipUnread, assistantSettings = {} }) {
     const available = await this._probeAvailableTools(projectId);
     const LABEL = { cursor: 'Cursor', ollama: 'local Ollama', claude: 'Claude Code', opencode: 'OpenCode', codex: 'Codex' };
 
@@ -557,7 +563,7 @@ class AgentGateway extends EventEmitter {
     // No free drafter → run the best premium directly (with fallback).
     if (!drafter) {
       this._addProgressMessage(projectId, sessionId, 'Auto: no free drafter (Cursor/local) found — using a premium agent directly.', broadcastFn);
-      const r = await this._runFinalizerFallback({ projectId, sessionId, prompt: content, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'direct' });
+      const r = await this._runFinalizerFallback({ projectId, sessionId, prompt: content, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'direct', assistantSettings });
       return r || { success: false, error: 'All available assistants failed.' };
     }
 
@@ -566,7 +572,7 @@ class AgentGateway extends EventEmitter {
     // draft); visible when the draft itself is the final deliverable.
     const draftSilent = finalizers.length > 0;
     this._addProgressMessage(projectId, sessionId, `🖊️ Auto · Phase 1 — drafting with ${LABEL[drafter]} (free)…`, broadcastFn);
-    const draft = await this._sendToCliTool(projectId, sessionId, content, drafter, {}, broadcastFn, ctx, mode, draftSilent ? true : skipUnread, draftSilent);
+    const draft = await this._sendToCliTool(projectId, sessionId, content, drafter, assistantSettings, broadcastFn, ctx, mode, draftSilent ? true : skipUnread, draftSilent);
     if (ctx?.aborted) {
       if (draftSilent) this._postAutoFinal(projectId, sessionId, draft, broadcastFn, skipUnread);
       return draft;
@@ -575,7 +581,7 @@ class AgentGateway extends EventEmitter {
     if (!draft?.success) {
       if (finalizers.length) {
         this._addProgressMessage(projectId, sessionId, `Auto: ${LABEL[drafter]} draft did not complete — handing the full task to a premium agent.`, broadcastFn);
-        const r = await this._runFinalizerFallback({ projectId, sessionId, prompt: content, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'recovery' });
+        const r = await this._runFinalizerFallback({ projectId, sessionId, prompt: content, finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'recovery', assistantSettings });
         if (r) return r;
         // Every finalizer failed — surface the (silent) draft failure instead of nothing.
         this._postAutoFinal(projectId, sessionId, draft, broadcastFn, skipUnread);
@@ -600,7 +606,7 @@ class AgentGateway extends EventEmitter {
     //    dumb mistakes (and we make fewer/cheaper premium calls). Resumes session. ──
     let latest = draft;
     this._addProgressMessage(projectId, sessionId, `🔧 Auto · Phase 2 — ${LABEL[drafter]} self-reviewing (build / type / lint)…`, broadcastFn);
-    const selfReview = await this._sendToCliTool(projectId, sessionId, this._buildSelfReviewPrompt(), drafter, {}, broadcastFn, ctx, mode, true, true);
+    const selfReview = await this._sendToCliTool(projectId, sessionId, this._buildSelfReviewPrompt(), drafter, assistantSettings, broadcastFn, ctx, mode, true, true);
     if (selfReview?.success) latest = selfReview;
     if (ctx?.aborted) {
       this._postAutoFinal(projectId, sessionId, latest, broadcastFn, skipUnread);
@@ -612,6 +618,7 @@ class AgentGateway extends EventEmitter {
     let finalized = await this._runFinalizerFallback({
       projectId, sessionId, prompt: finalizerPrompt,
       finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'Phase 3',
+      assistantSettings,
     });
 
     // The whole premium chain can fail together on a transient Windows/PM2 spawn
@@ -624,6 +631,7 @@ class AgentGateway extends EventEmitter {
         finalized = await this._runFinalizerFallback({
           projectId, sessionId, prompt: finalizerPrompt,
           finalizers, broadcastFn, ctx, mode, skipUnread, LABEL, phase: 'Phase 3 (retry)',
+          assistantSettings,
         });
       }
     }
@@ -634,7 +642,7 @@ class AgentGateway extends EventEmitter {
     // user never gets a raw self-review QA dump. Resumes the drafter's session.
     if (!ctx?.aborted) {
       this._addProgressMessage(projectId, sessionId, `Auto: premium review unavailable — ${LABEL[drafter]} is finishing up and writing the summary…`, broadcastFn);
-      const wrapup = await this._sendToCliTool(projectId, sessionId, this._buildWrapupPrompt(content, projectId), drafter, {}, broadcastFn, ctx, mode, skipUnread);
+      const wrapup = await this._sendToCliTool(projectId, sessionId, this._buildWrapupPrompt(content, projectId), drafter, assistantSettings, broadcastFn, ctx, mode, skipUnread);
       if (wrapup?.success) return wrapup;
     }
 
@@ -3638,6 +3646,23 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
     if (salesforceContext) {
       fullMessage = `${salesforceContext}\n\n---\n\n${fullMessage}`;
+    }
+
+    const goalContext = assistantSettings?.goalContract
+      ? formatGoalContract(assistantSettings.goalContract)
+      : '';
+    const policyContext = assistantSettings?.policy
+      ? JSON.stringify(assistantSettings.policy, null, 2)
+      : '';
+    if (goalContext || policyContext) {
+      fullMessage = [
+        '[IDE Execution Contract — follow this for the current turn]',
+        goalContext ? goalContext : '',
+        policyContext ? `Effective policy:\n${policyContext}` : '',
+        'Do not claim a criterion passed unless you have evidence from the workspace or a command result. If a criterion is unspecified, state the assumption and verify the smallest relevant behavior.',
+        '---',
+        fullMessage,
+      ].filter(Boolean).join('\n\n');
     }
 
     // Project memory is soft background context; skip it for leanContext calls

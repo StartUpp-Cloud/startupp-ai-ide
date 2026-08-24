@@ -31,6 +31,7 @@ import {
   needsRunApproval,
   normalizeRunPolicy,
 } from './runPolicy.js';
+import { formatGoalContract, normalizeGoalContract } from './goalContract.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_RUN_RETRIES = 2; // Run-level auto-retries after all task attempts are exhausted
@@ -206,13 +207,15 @@ class AgentOrchestrator extends EventEmitter {
     }
   }
 
-  shouldOrchestrate({ mode, content, executeReviewedPlan = false }) {
+  shouldOrchestrate({ mode, content, executeReviewedPlan = false, policy = {}, tool = 'claude', projectRuntime = 'container' }) {
+    if (needsRunApproval({ content, policy: normalizeRunPolicy(policy, { tool, projectRuntime }) }).requiresApproval) return true;
     return shouldOrchestrateRequest({ mode, content, executeReviewedPlan });
   }
 
-  async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, policy = {}, projectRuntime = 'container', broadcastFn, skipUnread = false, executeReviewedPlan = false }) {
+  async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, policy = {}, projectRuntime = 'container', goalContract = {}, broadcastFn, skipUnread = false, executeReviewedPlan = false }) {
     const recoveredContinuation = this._findRecoverableContinuationContext(projectId, sessionId, content);
     const effectivePolicy = normalizeRunPolicy(policy, { tool, projectRuntime });
+    const effectiveGoalContract = normalizeGoalContract({ content, ...goalContract });
     const run = {
       id: uuidv4(),
       projectId,
@@ -231,7 +234,8 @@ class AgentOrchestrator extends EventEmitter {
         mode,
         executeReviewedPlan,
         policy: effectivePolicy,
-        executionOptions: { attachments, mode, tool, model, effort, projectRuntime, skipUnread, executeReviewedPlan },
+        goalContract: effectiveGoalContract,
+        executionOptions: { attachments, mode, tool, model, effort, projectRuntime, goalContract: effectiveGoalContract, skipUnread, executeReviewedPlan },
         ...(recoveredContinuation ? {
           continuationContext: recoveredContinuation.context,
           continuationFromRunId: recoveredContinuation.runId,
@@ -275,7 +279,17 @@ class AgentOrchestrator extends EventEmitter {
 
     this._startLivenessMonitor(run, broadcastFn);
 
-    this._executeRun(run, { attachments, mode, tool, model, effort, broadcastFn, skipUnread })
+    this._executeRun(run, {
+      attachments,
+      mode,
+      tool,
+      model,
+      effort,
+      policy: effectivePolicy,
+      goalContract: effectiveGoalContract,
+      broadcastFn,
+      skipUnread,
+    })
       .catch((err) => this._handleRunCrash(run, err, { broadcastFn, tool, model }));
 
     return run;
@@ -449,6 +463,8 @@ class AgentOrchestrator extends EventEmitter {
       attachments: run.data?.attachments || [],
       mode: run.data?.mode || 'agent',
       tool: run.tool, model: run.model, effort: run.effort,
+      policy: run.data?.policy || {},
+      goalContract: run.data?.goalContract || { content: run.goal },
       broadcastFn: broadcastFn || (() => {}),
       skipUnread: false,
       // Only use resume mode if there are persisted tasks; otherwise let
@@ -700,7 +716,12 @@ ${task.prompt}`;
 
         if (batch.parallel) {
           const promises = batch.tasks.map(task =>
-            this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread })
+            this._runTaskWithRetries(run, task, {
+              attachments, mode, tool, model, effort,
+              policy: run.data?.policy || opts.policy || {},
+              goalContract: run.data?.goalContract || opts.goalContract || { content: run.goal },
+              broadcastFn, skipUnread,
+            })
               .then(result => ({ task, result }))
           );
           const results = await Promise.all(promises);
@@ -716,7 +737,12 @@ ${task.prompt}`;
           // Pipeline tasks (consolidate/validate) build their prompt now, from
           // the results produced so far.
           this._prepareTaskPrompt(run, task, completed);
-          const result = await this._runTaskWithRetries(run, task, { attachments, mode, tool, model, effort, broadcastFn, skipUnread });
+          const result = await this._runTaskWithRetries(run, task, {
+            attachments, mode, tool, model, effort,
+            policy: run.data?.policy || opts.policy || {},
+            goalContract: run.data?.goalContract || opts.goalContract || { content: run.goal },
+            broadcastFn, skipUnread,
+          });
           if (active?.aborted || result?.errorType === 'cancelled') throw new Error('Run cancelled');
           completed.push({ task, result });
           if (!result.success) break;
@@ -1122,6 +1148,7 @@ ${run.goal}`;
       this._xmlBlock('recovered_previous_run_context', recoveredContinuation),
       this._xmlBlock('recent_parent_conversation', recentConversation),
       this._xmlBlock('original_user_goal', run.goal),
+      this._xmlBlock('goal_contract', formatGoalContract(run.data?.goalContract || { content: run.goal })),
       this._xmlBlock('ide_selected_workspace', workContext),
       this._xmlBlock('attached_files', attachments),
       this._xmlBlock('durable_project_memory', memory || '(none)'),
@@ -1228,6 +1255,8 @@ ${run.goal}`;
         tool: opts.tool,
         model: opts.model,
         effort: opts.effort,
+        policy: opts.policy || run.data?.policy || {},
+        goalContract: opts.goalContract || run.data?.goalContract || { content: run.goal },
         skipUnread: true,
         orchestrated: true,
         mode: opts.mode || 'agent',

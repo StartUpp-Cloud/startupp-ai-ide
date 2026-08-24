@@ -22,6 +22,7 @@ import { isIdeShellProject } from './ideShell.js';
 import { normalizeYnPromptInput } from './interactivePromptInput.js';
 import { buildRunObservation } from './runDiagnostics.js';
 import { normalizeRunPolicy } from './runPolicy.js';
+import { normalizeGoalContract } from './goalContract.js';
 import {
   attachWsToChatSession,
   detachWsFromAllChatSessions,
@@ -752,9 +753,19 @@ class TerminalServer {
           tool: assistantSettings.tool,
           projectRuntime: payload.projectRuntime || 'container',
         });
+        const goalContract = normalizeGoalContract({
+          content: payload.content,
+          ...(payload.goalContract || {}),
+          targetWorkspace: payload.goalContract?.targetWorkspace
+            || sessionMeta?.workDir
+            || sessionMeta?.cwd
+            || sessionMeta?.worktreePath
+            || sessionMeta?.repoPath
+            || null,
+        });
         const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
         const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
-        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, policy: effectivePolicy, mode: payload.mode || sessionMeta?.mode || 'agent', activeRolePromptIds });
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, policy: effectivePolicy, goalContract, mode: payload.mode || sessionMeta?.mode || 'agent', activeRolePromptIds });
 
         // Attach client to this chat session for isolated communication
         this.attachToChatSession(ws, chatSessionId);
@@ -792,7 +803,7 @@ class TerminalServer {
           sessionId: chatSessionId,
           role: 'user',
           content: displayContent,
-          metadata: { mode: payload.mode, attachments, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, clientMessageId, policy: effectivePolicy, ...assistantSettings },
+          metadata: { mode: payload.mode, attachments, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, clientMessageId, policy: effectivePolicy, goalContract, ...assistantSettings },
         });
 
         // Broadcast to all clients attached to this chat session
@@ -852,7 +863,13 @@ class TerminalServer {
           }
         }
 
-        const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({ mode: payload.mode, content: payload.content });
+        const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({
+          mode: payload.mode,
+          content: payload.content,
+          policy: effectivePolicy,
+          tool: assistantSettings.tool,
+          projectRuntime: payload.projectRuntime || 'container',
+        });
         const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
 
         runner({
@@ -866,6 +883,7 @@ class TerminalServer {
           effort: assistantSettings.effort,
           policy: effectivePolicy,
           projectRuntime: payload.projectRuntime || 'container',
+          goalContract,
           broadcastFn: sharedBroadcast,
         }).catch(err => {
           const errMsg = chatStore.addMessage({
@@ -943,16 +961,26 @@ class TerminalServer {
           tool: assistantSettings.tool,
           projectRuntime: payload.projectRuntime || 'container',
         });
-        const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
-        const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
-        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, policy: effectivePolicy, activeRolePromptIds });
-        this.attachToChatSession(ws, chatSessionId);
-
         const retryContent = (payload.content || '').trim();
         if (!retryContent) {
           this.sendError(ws, 'Retry content is required');
           break;
         }
+        const goalContract = normalizeGoalContract({
+          content: retryContent,
+          ...(payload.goalContract || {}),
+          targetWorkspace: payload.goalContract?.targetWorkspace
+            || sessionMeta?.workDir
+            || sessionMeta?.cwd
+            || sessionMeta?.worktreePath
+            || sessionMeta?.repoPath
+            || null,
+        });
+        const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
+        const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, policy: effectivePolicy, goalContract, activeRolePromptIds });
+        this.attachToChatSession(ws, chatSessionId);
+
         const agentRetryContent = appendRolePromptInstructions(retryContent, rolePromptInstructions);
 
         // Optional marker message to show user-initiated regeneration
@@ -976,6 +1004,9 @@ class TerminalServer {
           mode: payload.mode,
           content: retryContent,
           executeReviewedPlan: !!payload.executeReviewedPlan,
+          policy: effectivePolicy,
+          tool: assistantSettings.tool,
+          projectRuntime: payload.projectRuntime || 'container',
         });
         const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
 
@@ -991,6 +1022,7 @@ class TerminalServer {
           policy: effectivePolicy,
           projectRuntime: payload.projectRuntime || 'container',
           executeReviewedPlan: !!payload.executeReviewedPlan,
+          goalContract,
           broadcastFn: sharedBroadcast,
         }).catch(err => {
           const errMsg = chatStore.addMessage({
@@ -2547,9 +2579,23 @@ class TerminalServer {
       model: payload.model ?? sessionMeta?.model,
       effort: payload.effort ?? sessionMeta?.effort,
     });
+    const effectivePolicy = normalizeRunPolicy(payload.policy || sessionMeta?.policy || {}, {
+      tool: assistantSettings.tool,
+      projectRuntime: payload.projectRuntime || 'container',
+    });
+    const goalContract = normalizeGoalContract({
+      content,
+      ...(payload.goalContract || {}),
+      targetWorkspace: payload.goalContract?.targetWorkspace
+        || sessionMeta?.workDir
+        || sessionMeta?.cwd
+        || sessionMeta?.worktreePath
+        || sessionMeta?.repoPath
+        || null,
+    });
     const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
     const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
-    chatStore.updateSessionMeta(projectId, chatSessionId, { ...assistantSettings, activeRolePromptIds });
+    chatStore.updateSessionMeta(projectId, chatSessionId, { ...assistantSettings, policy: effectivePolicy, goalContract, activeRolePromptIds });
 
     const marker = chatStore.addMessage({
       projectId,
@@ -2573,6 +2619,9 @@ class TerminalServer {
       mode,
       content,
       executeReviewedPlan: !!payload.executeReviewedPlan,
+      policy: effectivePolicy,
+      tool: assistantSettings.tool,
+      projectRuntime: payload.projectRuntime || 'container',
     });
     const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
 
@@ -2585,7 +2634,10 @@ class TerminalServer {
       tool: assistantSettings.tool,
       model: assistantSettings.model,
       effort: assistantSettings.effort,
+      policy: effectivePolicy,
+      projectRuntime: payload.projectRuntime || 'container',
       executeReviewedPlan: !!payload.executeReviewedPlan,
+      goalContract,
       broadcastFn: sharedBroadcast,
     }).catch(err => {
       const errMsg = chatStore.addMessage({
@@ -2832,6 +2884,20 @@ class TerminalServer {
       model: lastUser.metadata?.model ?? sessionMeta?.model,
       effort: lastUser.metadata?.effort ?? sessionMeta?.effort,
     });
+    const effectivePolicy = normalizeRunPolicy(lastUser.metadata?.policy || sessionMeta?.policy || {}, {
+      tool: assistantSettings.tool,
+      projectRuntime: lastUser.metadata?.projectRuntime || sessionMeta?.projectRuntime || 'container',
+    });
+    const goalContract = normalizeGoalContract({
+      content: lastUser.content,
+      ...(lastUser.metadata?.goalContract || sessionMeta?.goalContract || {}),
+      targetWorkspace: lastUser.metadata?.goalContract?.targetWorkspace
+        || sessionMeta?.workDir
+        || sessionMeta?.cwd
+        || sessionMeta?.worktreePath
+        || sessionMeta?.repoPath
+        || null,
+    });
     const mode = lastUser.metadata?.mode || 'agent';
     const attachments = Array.isArray(lastUser.metadata?.attachments) ? lastUser.metadata.attachments : [];
 
@@ -2840,7 +2906,13 @@ class TerminalServer {
       this.broadcast(data);
     };
 
-    const runner = agentOrchestrator.shouldOrchestrate({ mode, content: lastUser.content })
+    const runner = agentOrchestrator.shouldOrchestrate({
+      mode,
+      content: lastUser.content,
+      policy: effectivePolicy,
+      tool: assistantSettings.tool,
+      projectRuntime: effectivePolicy.projectRuntime,
+    })
       ? agentOrchestrator.startRun.bind(agentOrchestrator)
       : agentGateway.handleTask.bind(agentGateway);
 
@@ -2854,6 +2926,9 @@ class TerminalServer {
         tool: assistantSettings.tool,
         model: assistantSettings.model,
         effort: assistantSettings.effort,
+        policy: effectivePolicy,
+        projectRuntime: effectivePolicy.projectRuntime,
+        goalContract,
         broadcastFn: sharedBroadcast,
       });
     } catch (err) {

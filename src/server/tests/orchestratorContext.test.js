@@ -8,8 +8,8 @@ const source = readFileSync(resolve(__dirname, '../agentOrchestrator.js'), 'utf8
 
 assert.match(
   source,
-  /const workContext = this\._runWorkContext\(run\);[\s\S]*?IDE-selected workspace context:\\n\$\{workContext\}/,
-  'Child task prompts should include a standalone IDE-selected workspace context block',
+  /const workContext = this\._runWorkContext\(run\);[\s\S]*?_xmlBlock\('ide_selected_workspace', workContext\)/,
+  'Child task prompts should include an XML-delimited IDE-selected workspace context block',
 );
 
 assert.match(
@@ -32,7 +32,7 @@ assert.match(
 
 assert.match(
   source,
-  /const sessionWorkDir = inheritedContext\.workDir \|\| inheritedContext\.cwd \|\| this\._sessionWorkDirFromMeta\(inheritedContext\);/,
+  /const sessionWorkDir = task\.data\?\.workDir[\s\S]*?inheritedContext\.workDir \|\| inheritedContext\.cwd \|\| this\._sessionWorkDirFromMeta\(inheritedContext\);/,
   'Child session workDir should prefer inherited workDir/cwd before worktree/repo fallback',
 );
 

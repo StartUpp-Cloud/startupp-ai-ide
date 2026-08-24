@@ -37,7 +37,7 @@ Each project = its own Docker container with:
 
 ## Quick Start
 
-The IDE itself runs in Ubuntu. Project containers are siblings on the same Docker engine. Use the `pm2:*` host commands — do not run `docker compose` on Windows, and do not run `npm run dev` on host Node.
+The IDE itself runs in Ubuntu inside Docker. Project containers are siblings on the same Docker engine. Use the host launcher below; it mounts the Docker socket, preserves the named volumes, and selects the correct Docker Desktop path on Windows. Do not run `npm run dev` or `npm start` directly on the host.
 
 ```bash
 git clone https://github.com/StartUpp-Cloud/startupp-ai-ide.git
@@ -45,7 +45,7 @@ cd startupp-ai-ide
 npm run pm2:start -- --dev
 ```
 
-`pm2:start` and `pm2:restart` always `git pull --ff-only`, then build/install the IDE image if needed and start the container. Cached layers make incremental starts cheap.
+`pm2:start` and `pm2:restart` always attempt `git pull --ff-only`, then build/install the IDE image and start the container. A pull failure is reported and does not discard local work. Cached layers make incremental starts cheap.
 
 | Command | What it does |
 | --- | --- |
@@ -81,6 +81,7 @@ Onboarding shows the **IDE container shell** next to the welcome form. Install a
 ### Prerequisites
 
 - **Docker** (Docker Desktop or a Linux engine) — required for the IDE and for every project container
+- **Node.js 22.5+** — required for the host launcher and local repository validation; the IDE image supplies Node 22 at runtime
 - **Ollama** (recommended) — or OpenAI/DeepSeek API key for the LLM
 
 Project containers use the versioned image in `docker/project-image.json` (`ghcr.io/startupp-cloud/ide-dev`). The IDE pulls it when you create a project, and only builds `docker/Dockerfile.dev` locally if the pull fails. CI publishes that image on changes to the Dockerfile. Aider is optional — install it from the IDE shell if you need it.
@@ -164,7 +165,7 @@ Project: "Honeygrid"
 - **Zero credentials stored** — no API keys or tokens in our database
 - Auth handled by each CLI tool's native OAuth (Claude, GitHub, npm)
 - Credentials live in Docker volumes, managed by the tools themselves
-- `data/db.json` is gitignored and contains only project metadata
+- Runtime state is stored in the `sai-ide-data` volume as SQLite; the legacy compatibility layer is not the source of truth
 
 ## Key Features
 
@@ -258,12 +259,12 @@ Installable rule packs that extend the AI's capabilities per project:
 | Layer      | Tech                                    |
 | ---------- | --------------------------------------- |
 | Frontend   | React 18, Vite, Tailwind CSS            |
-| Backend    | Express.js, LowDB (flat JSON file)      |
+| Backend    | Express.js, SQLite (`node:sqlite`)     |
 | Terminal   | node-pty, xterm.js, WebSocket           |
 | Containers | Docker, named volumes                   |
 | LLM        | Ollama / OpenAI / DeepSeek              |
 | UI icons   | Lucide React                            |
-| Runtime    | Node.js 18+, Docker                     |
+| Runtime    | Node.js 22.5+, Docker                   |
 
 ## API Endpoints
 
@@ -291,6 +292,8 @@ Installable rule packs that extend the AI's capabilities per project:
 | `npm run compose` | Foreground production launcher |
 | `npm run compose:down` | Same as uninstall: remove the container, keep images and volumes |
 | `npm run build` | Build React app (used inside the production image) |
+| `npm test` | Run every server and client utility test discovered in the repository |
+| `npm run lint` | Lint the client with the checked-in ESLint configuration |
 | `npm run install:all` | Install dependencies for root and client (inside the container) |
 
 See [PM2-DEPLOYMENT.md](PM2-DEPLOYMENT.md) for the lifecycle details.
@@ -298,6 +301,12 @@ See [PM2-DEPLOYMENT.md](PM2-DEPLOYMENT.md) for the lifecycle details.
 ## Data
 
 App state lives in the `sai-ide-data` volume (`/app/data/app.sqlite` inside the IDE container). Orchestrator installs and auth live in `sai-ide-home` (`/root`). Rebuilds replace the container, not these volumes.
+
+### Development troubleshooting
+
+- If the entrypoint reports that `/var/run/docker.sock` is missing, start through `npm run pm2:start -- --dev` or `npm run compose:dev`; do not invoke the base Compose file directly.
+- On Linux/macOS, `npm run compose:dev` bind-mounts the repository for hot reload. On Windows, the launcher uses Docker Desktop's native engine path; rebuild with `npm run pm2:restart -- --dev` after source changes when a bind mount is unavailable.
+- The IDE and project containers require Docker to be running before onboarding can create a project.
 
 ## License
 
