@@ -448,18 +448,23 @@ function pickPriorityCompletedTask(completed = []) {
   return null;
 }
 
+function finalReportBody(raw) {
+  const compact = compactChatReport(raw);
+  return compact.body || stripInProgressNarration(raw) || String(raw || '').trim();
+}
+
 export function buildThinFinalResponse({ completed = [], profile = null } = {}) {
   const successful = completed.filter(item => item?.result?.success !== false);
   const priority = pickPriorityCompletedTask(successful);
   if (priority) {
-    const content = extractAgentSummary(priority.result?.content);
-    if (content) return compactChatReport(content).body || content;
+    const content = finalReportBody(priority.result?.content);
+    if (content) return content;
   }
 
   if (successful.length === 1) {
     const item = successful[0];
-    const content = extractAgentSummary(item.result?.content || item.task?.result || '');
-    if (content) return compactChatReport(content).body || content;
+    const content = finalReportBody(item.result?.content || item.task?.result || '');
+    if (content) return content;
   }
 
   if (successful.length === 0) {

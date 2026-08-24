@@ -64,7 +64,28 @@ const summaryHeadingFinal = buildThinFinalResponse({
   }],
 });
 assert.match(summaryHeadingFinal, /Invitation flow is implemented/i);
-assert.doesNotMatch(summaryHeadingFinal, /## Summary/);
+assert.match(summaryHeadingFinal, /## Summary/);
+
+const parentKeepsDetails = buildThinFinalResponse({
+  completed: [{
+    task: { title: 'Complete user request', status: 'completed' },
+    result: {
+      success: true,
+      content: [
+        '## Outcome',
+        'Removed visual debug and bumped to 1.1.0.5.',
+        '',
+        '## Details',
+        '- Deleted CDP debug-element pages and nav.',
+        '- OpenClaw gap: no durable tool-loop memory or restart-safe sessions.',
+        '- Wrote the roadmap to docs/openclaw-harness-comparison.md.',
+      ].join('\n'),
+    },
+  }],
+});
+assert.match(parentKeepsDetails, /## Details/);
+assert.match(parentKeepsDetails, /openclaw-harness-comparison/);
+assert.match(parentKeepsDetails, /durable tool-loop memory/);
 
 const emptyFinal = buildThinFinalResponse({ completed: [], profile: { name: 'Renzo Dupont' } });
 assert.match(emptyFinal, /^Renzo, the coding agent finished/i);
