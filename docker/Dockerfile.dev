@@ -60,16 +60,14 @@ setw -g xterm-keys on\n\
 set -g set-clipboard on\n\
 ' > /home/dev/.tmux.conf && chown dev:dev /home/dev/.tmux.conf
 
-ENV NPM_CONFIG_PREFIX=/home/dev/.npm-global
 ENV BROWSER=false
-ENV PATH="/home/dev/.npm-global/bin:${PATH}"
+
+# Kickstart Node for first-boot nvm. Users may `nvm install` / `nvm alias default`
+# later; that version lives on the persistent /home/dev volume.
+RUN node -e "process.stdout.write(process.versions.node)" > /etc/sai-node-kickstart
 
 USER dev
 WORKDIR /home/dev
-
-RUN mkdir -p "$NPM_CONFIG_PREFIX" \
-    && npm config set prefix "$NPM_CONFIG_PREFIX"
-
 WORKDIR /workspace
 
 FROM base AS ai

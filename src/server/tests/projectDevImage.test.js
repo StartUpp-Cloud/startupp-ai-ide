@@ -33,6 +33,9 @@ const projectDockerfile = readFileSync(
   'utf8',
 );
 assert.match(projectDockerfile, /^FROM node:22-bookworm AS base$/m, 'project containers must ship Node 22 for current Wrangler');
+assert.match(projectDockerfile, /sai-node-kickstart/, 'image must record the kickstart Node version for nvm');
+assert.doesNotMatch(projectDockerfile, /ENV NPM_CONFIG_PREFIX/, 'image must not pin npm prefix; nvm owns upgrades');
+assert.doesNotMatch(projectDockerfile, /npm-global\/bin/, 'image PATH must not put ~/.npm-global ahead of nvm');
 
 const spec = getProjectDevImageSpec({});
 assert.equal(spec.remoteTag, `${manifest.repository}:${manifest.version}`);

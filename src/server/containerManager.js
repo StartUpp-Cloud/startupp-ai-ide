@@ -22,6 +22,7 @@ import {
   buildOauthPublishCommand,
   oauthSidecarName,
 } from "./containerDevTools.js";
+import { buildEnsureNvmCommand } from "./containerNode.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -420,6 +421,14 @@ class ContainerManager extends EventEmitter {
       );
     } catch (error) {
       console.warn(`[containerManager] ensureDevTools failed: ${error.message}`);
+    }
+    try {
+      await dockerExec(
+        `docker exec -u dev -e HOME=/home/dev ${containerName} bash -lc ${JSON.stringify(buildEnsureNvmCommand())}`,
+        { timeout: 180000 },
+      );
+    } catch (error) {
+      console.warn(`[containerManager] ensureNvm failed: ${error.message}`);
     }
     await this.ensureOauthCallbackPublish(containerName);
   }

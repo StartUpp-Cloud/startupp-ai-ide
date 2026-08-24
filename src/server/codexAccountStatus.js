@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getDockerSpawnSpec } from './dockerRoute.js';
+import { buildCodexAppServerCommand } from './containerNode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const CODEX_ACCOUNT_STATUS_PATH = path.join(__dirname, '../../data/codex-account-status.json');
@@ -256,12 +257,10 @@ function spawnCodexAppServer({ containerName } = {}) {
     const spec = getDockerSpawnSpec([
       'exec', '-i', '-u', 'dev',
       '-e', 'HOME=/home/dev',
-      '-e', `PATH=/home/dev/.npm-global/bin:/usr/local/bin:/usr/bin:/bin`,
       '-w', '/workspace',
       containerName,
-      CODEX_BIN_IN_CONTAINER,
-      'app-server',
-      '--stdio',
+      'bash', '-lc',
+      buildCodexAppServerCommand(),
     ]);
     return spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   }

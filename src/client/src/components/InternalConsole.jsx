@@ -3,6 +3,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ChevronDown, ChevronUp, Terminal as TerminalIcon, Sparkles, Loader, GripHorizontal, Share2, RotateCcw, KeyRound } from 'lucide-react';
 import { stripTerminalQueryResponses } from '../utils/terminalControlFilter';
+import { npmGlobalInstall, withNodePath } from '../utils/npmShell';
 import '@xterm/xterm/css/xterm.css';
 
 // WebSocket reconnection configuration
@@ -17,21 +18,6 @@ const WS_CONFIG = {
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
 const DEFAULT_HEIGHT = 180;
-
-/** Put user-global npm bins on PATH. Login bash often misses ~/.npm-global/bin. */
-const ENSURE_NPM_GLOBAL_PATH = [
-  'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"',
-  'mkdir -p "$NPM_CONFIG_PREFIX/bin"',
-  'npm config set prefix "$NPM_CONFIG_PREFIX"',
-  'export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"',
-  'grep -qF "$NPM_CONFIG_PREFIX/bin" ~/.bashrc 2>/dev/null || echo \'export PATH="$HOME/.npm-global/bin:$PATH"\' >> ~/.bashrc',
-].join(' && ');
-
-const npmGlobalInstall = (pkg, bin) =>
-  `${ENSURE_NPM_GLOBAL_PATH} && npm install -g ${pkg} && hash -r && command -v ${bin} && ${bin} --version`;
-
-const withNpmGlobalPath = (cmd) =>
-  `export PATH="\${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/bin:$PATH"; hash -r; ${cmd}`;
 
 /** Codex dies on a binary/corrupt ~/.codex/config.toml (often leftover from MCP merge). */
 const SANITIZE_CODEX_TOML = `node -e "const fs=require('fs');const f=require('os').homedir()+'/.codex/config.toml';try{const s=fs.readFileSync(f,'utf8');if(/[\\x00-\\x08\\x0e-\\x1f]/.test(s)||s.includes('\\uFFFD')){fs.renameSync(f,f+'.corrupt');console.log('Moved corrupt ~/.codex/config.toml aside');}}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\\\\n');}"`;
@@ -52,17 +38,17 @@ const QUICK_COMMANDS = [
   { label: 'Install Cursor CLI', command: 'curl https://cursor.com/install -fsS | bash' },
   { label: 'Install Ollama', command: 'curl -fsSL https://ollama.com/install.sh | sh' },
   // ── AI coding assistants: login / auth ──
-  { label: 'Login to Claude Code', command: withNpmGlobalPath('claude') },
-  { label: 'Login to Codex', command: withNpmGlobalPath(`${SANITIZE_CODEX_TOML}; codex login`) },
-  { label: 'Login to Gemini', command: withNpmGlobalPath('gemini') },
+  { label: 'Login to Claude Code', command: withNodePath('claude') },
+  { label: 'Login to Codex', command: withNodePath(`${SANITIZE_CODEX_TOML}; codex login`) },
+  { label: 'Login to Gemini', command: withNodePath('gemini') },
   { label: 'Login to Cursor', command: 'cursor-agent login' },
   // ── Salesforce ──
   { label: 'Install Salesforce CLI', command: npmGlobalInstall('@salesforce/cli', 'sf') },
-  { label: 'Login to Salesforce', command: withNpmGlobalPath('sf org login web') },
+  { label: 'Login to Salesforce', command: withNodePath('sf org login web') },
   { label: 'Login to Cloudflare (Wrangler)', command: 'npx wrangler login' },
   // ── Utilities ──
   { label: 'Install pnpm', command: npmGlobalInstall('pnpm', 'pnpm') },
-  { label: 'Check tool versions', command: `${withNpmGlobalPath('node -v; npm -v; gh --version 2>/dev/null; claude --version 2>/dev/null; opencode --version 2>/dev/null; copilot --version 2>/dev/null; codex --version 2>/dev/null; gemini --version 2>/dev/null; aider --version 2>/dev/null; sf --version 2>/dev/null; true')}` },
+  { label: 'Check tool versions', command: `${withNodePath('node -v; npm -v; gh --version 2>/dev/null; claude --version 2>/dev/null; opencode --version 2>/dev/null; copilot --version 2>/dev/null; codex --version 2>/dev/null; gemini --version 2>/dev/null; aider --version 2>/dev/null; sf --version 2>/dev/null; true')}` },
 ];
 
 function getStoredHeight() {

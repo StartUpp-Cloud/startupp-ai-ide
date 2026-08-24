@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   interactiveDockerExecArgs,
   agentDockerExecArgs,
@@ -9,6 +12,8 @@ import {
   isDockerAvailable,
   getDockerRouteStatus,
 } from '../dockerRoute.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const execArgs = interactiveDockerExecArgs({
   containerName: 'sai-demo',
@@ -36,6 +41,12 @@ assert.deepEqual(agentArgs.slice(-4), ['setsid', '-w', 'bash', '-s']);
 const prelude = containerAgentShellPrelude();
 assert.match(prelude, new RegExp(CONTAINER_CLOUDFLARE_ENV.replace(/\./g, '\\.')));
 assert.match(prelude, /\[ -f .* \] && \./);
+assert.match(prelude, /unset NPM_CONFIG_PREFIX/);
+assert.match(prelude, /nvm\.sh/);
+
+const managerSource = readFileSync(resolve(__dirname, '../containerManager.js'), 'utf8');
+assert.match(managerSource, /buildEnsureNvmCommand/);
+assert.match(managerSource, /ensureNvm failed/);
 
 assert.equal(dockerCliPath('/app/docker/Dockerfile.dev'), '/app/docker/Dockerfile.dev');
 assert.equal(dockerCliEnv({ PATH: '/usr/bin' }).DOCKER_CLI_HINTS, 'false');

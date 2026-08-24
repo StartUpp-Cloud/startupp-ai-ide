@@ -15,6 +15,7 @@ import {
   startDockerWatchdog,
   refreshDockerAvailability,
 } from './dockerBroker.js';
+import { containerNodeShellPrelude } from './containerNode.js';
 
 export const CONTAINER_DEV_HOME = '/home/dev';
 export const CONTAINER_CLOUDFLARE_ENV = '/home/dev/.config/cloudflare.env';
@@ -60,9 +61,9 @@ export function agentDockerExecArgs({
   ];
 }
 
-/** Source the same Cloudflare token file the user's login shell loads. */
+/** Source nvm + Cloudflare token the same way a login shell would. */
 export function containerAgentShellPrelude() {
-  return `[ -f ${CONTAINER_CLOUDFLARE_ENV} ] && . ${CONTAINER_CLOUDFLARE_ENV}\n`;
+  return `${containerNodeShellPrelude()}[ -f ${CONTAINER_CLOUDFLARE_ENV} ] && . ${CONTAINER_CLOUDFLARE_ENV}\n`;
 }
 
 export function isDockerAvailable(_force = false) {
