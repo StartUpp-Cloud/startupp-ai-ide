@@ -11,6 +11,7 @@ import Project from './models/Project.js';
 import { autoResponder } from './autoResponder.js';
 import { sessionContext } from './sessionContext.js';
 import { orchestrator } from './orchestrator.js';
+import { agentOrchestrator } from './agentOrchestrator.js';
 import { activityFeed } from './activityFeed.js';
 import { agentShellPool } from './agentShellPool.js';
 import { slackService } from './slackService.js';
@@ -19,6 +20,8 @@ import { shellProxy } from './shellProxy.js';
 import { startProvision, waitForProvision } from './containerProvision.js';
 import { isIdeShellProject } from './ideShell.js';
 import { normalizeYnPromptInput } from './interactivePromptInput.js';
+import { buildRunObservation } from './runDiagnostics.js';
+import { normalizeRunPolicy } from './runPolicy.js';
 import {
   attachWsToChatSession,
   detachWsFromAllChatSessions,
@@ -31,6 +34,15 @@ import {
   STREAM_RECOVERY_STALE_MS,
   VISIBLE_STREAM_RECOVERY_STALE_MS,
 } from './sessionRecovery.js';
+import {
+  createHello,
+  createResponse,
+  isSideEffectingRequest,
+  normalizeRequest,
+  ProtocolState,
+  WS_PROTOCOL_NAME,
+  WS_PROTOCOL_VERSION,
+} from '../shared/wsProtocol.js';
 
 const ROLE_PROMPT_IDS = new Set([
   'principal-engineer',
@@ -75,6 +87,8 @@ class TerminalServer {
     // must keep previous sessions attached so progress keeps flowing.
     this.chatSessionClients = new Map(); // chatSessionId -> Set of ws clients
     this.clientChatSessions = new Map(); // ws -> Set<chatSessionId>
+    this.protocolState = new ProtocolState({ maxEvents: 500 });
+    this.requestLedger = new Map(); // idempotency key -> accepted response metadata
   }
 
   /**
@@ -98,12 +112,12 @@ class TerminalServer {
       // Even with no UI clients, still mirror to Slack
     }
 
-    const data = JSON.stringify(message);
+    const envelope = this._eventEnvelope(message, chatSessionId);
     if (clients) {
       for (const client of clients) {
         if (client.readyState === 1) { // WebSocket.OPEN
           try {
-            client.send(data);
+            this.sendRaw(client, envelope);
           } catch (err) {
             console.warn(`[TerminalServer] Failed to send to chat session client:`, err.message);
           }
@@ -231,8 +245,12 @@ class TerminalServer {
         this.handleDisconnect(ws);
       });
 
-      // Send initial connection success
-      this.send(ws, { type: 'connected', timestamp: Date.now() });
+      // Send the versioned handshake while retaining the old connected event.
+      this.sendRaw(ws, createHello({
+        serverCapabilities: ['request-response', 'event-sequence', 'state-reconcile', 'idempotency', 'run-observation'],
+        ...this.protocolState.snapshot(),
+      }));
+      this.send(ws, { type: 'connected', timestamp: Date.now(), protocol: WS_PROTOCOL_NAME, protocolVersion: WS_PROTOCOL_VERSION });
     });
 
     // Listen to PTY manager events.
@@ -356,6 +374,22 @@ class TerminalServer {
     orchestrator.on('completed', (data) => {
       const sessionId = data.sessionId || orchestrator.getStatus(data.executionId)?.sessionId || '';
       this.broadcastToSession(sessionId, { type: 'orchestrator-completed', ...data });
+    });
+
+    agentOrchestrator.on('run', (run) => {
+      if (!run?.projectId || !run?.sessionId) return;
+      this.broadcastToChatSession(run.sessionId, { type: 'run-state', projectId: run.projectId, sessionId: run.sessionId, run });
+      if (['completed', 'failed', 'blocked', 'cancelled'].includes(run.status)) {
+        this.broadcastToChatSession(run.sessionId, {
+          type: 'run-result',
+          projectId: run.projectId,
+          sessionId: run.sessionId,
+          runId: run.id,
+          status: run.status,
+          finalResponse: run.finalResponse || null,
+          error: run.error || null,
+        });
+      }
     });
 
     // Forward activity feed entries to all connected clients
@@ -484,7 +518,41 @@ class TerminalServer {
    * Handle incoming WebSocket messages
    */
   async handleMessage(ws, msg) {
-    const { type, ...payload } = msg;
+    const request = normalizeRequest(msg);
+    const { type, payload, requestId, idempotencyKey } = request;
+
+    if (type === 'hello' || type === 'protocol-hello') {
+      this.handleProtocolHello(ws, payload);
+      return;
+    }
+
+    const clientInfo = this.clients.get(ws);
+    const operationKey = idempotencyKey || requestId || (
+      type === 'chat-send' && payload.clientMessageId ? `chat:${payload.clientMessageId}` : null
+    );
+    if (operationKey && isSideEffectingRequest(type)) {
+      const previous = this.requestLedger.get(operationKey);
+      if (previous && Date.now() - previous.createdAt < 10 * 60 * 1000) {
+        this.send(ws, createResponse('request-accepted', {
+          duplicate: true,
+          idempotencyKey: operationKey,
+          originalType: type,
+        }, { requestId, status: 'duplicate' }));
+        return;
+      }
+      this.requestLedger.set(operationKey, { createdAt: Date.now(), type, requestId });
+      if (this.requestLedger.size > 1200) {
+        const cutoff = Date.now() - 10 * 60 * 1000;
+        for (const [key, value] of this.requestLedger) {
+          if (value.createdAt < cutoff) this.requestLedger.delete(key);
+        }
+      }
+      if (requestId || idempotencyKey) {
+        this.send(ws, createResponse('request-accepted', { idempotencyKey: operationKey, originalType: type }, { requestId, status: 'accepted' }));
+      }
+    }
+
+    if (clientInfo) clientInfo.lastRequestId = requestId;
 
     switch (type) {
       case 'create-session':
@@ -582,6 +650,22 @@ class TerminalServer {
         this.send(ws, { type: 'pong' });
         break;
 
+      case 'reconcile':
+        await this.handleProtocolReconcile(ws, payload);
+        break;
+
+      case 'run-observe':
+        await this.handleRunObservation(ws, payload, requestId);
+        break;
+
+      case 'run-approve':
+        await this.handleRunApproval(ws, payload, requestId);
+        break;
+
+      case 'run-reject':
+        await this.handleRunRejection(ws, payload, requestId);
+        break;
+
       case 'kill-switch':
         this.handleKillSwitch(ws, payload);
         break;
@@ -664,9 +748,13 @@ class TerminalServer {
           model: payload.model,
           effort: payload.effort,
         });
+        const effectivePolicy = normalizeRunPolicy(payload.policy || sessionMeta?.policy || {}, {
+          tool: assistantSettings.tool,
+          projectRuntime: payload.projectRuntime || 'container',
+        });
         const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
         const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
-        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, mode: payload.mode || sessionMeta?.mode || 'agent', activeRolePromptIds });
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, policy: effectivePolicy, mode: payload.mode || sessionMeta?.mode || 'agent', activeRolePromptIds });
 
         // Attach client to this chat session for isolated communication
         this.attachToChatSession(ws, chatSessionId);
@@ -704,7 +792,7 @@ class TerminalServer {
           sessionId: chatSessionId,
           role: 'user',
           content: displayContent,
-          metadata: { mode: payload.mode, attachments, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, clientMessageId, ...assistantSettings },
+          metadata: { mode: payload.mode, attachments, activeRolePromptIds, rolePromptInstructionsApplied: !!rolePromptInstructions, clientMessageId, policy: effectivePolicy, ...assistantSettings },
         });
 
         // Broadcast to all clients attached to this chat session
@@ -764,10 +852,7 @@ class TerminalServer {
           }
         }
 
-        // "Validate visually" needs the orchestrator's post-run validation phase,
-        // so force orchestration when it's toggled on (even for a single command).
-        const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({ mode: payload.mode, content: payload.content })
-          || !!assistantSettings.validateVisually;
+        const shouldOrchestrate = agentOrchestrator.shouldOrchestrate({ mode: payload.mode, content: payload.content });
         const runner = shouldOrchestrate ? agentOrchestrator.startRun.bind(agentOrchestrator) : agentGateway.handleTask.bind(agentGateway);
 
         runner({
@@ -779,7 +864,8 @@ class TerminalServer {
           tool: assistantSettings.tool,
           model: assistantSettings.model,
           effort: assistantSettings.effort,
-          validateVisually: assistantSettings.validateVisually,
+          policy: effectivePolicy,
+          projectRuntime: payload.projectRuntime || 'container',
           broadcastFn: sharedBroadcast,
         }).catch(err => {
           const errMsg = chatStore.addMessage({
@@ -853,9 +939,13 @@ class TerminalServer {
           model: payload.model,
           effort: payload.effort,
         });
+        const effectivePolicy = normalizeRunPolicy(payload.policy || sessionMeta?.policy || {}, {
+          tool: assistantSettings.tool,
+          projectRuntime: payload.projectRuntime || 'container',
+        });
         const activeRolePromptIds = normalizeRolePromptIds(payload.activeRolePromptIds);
         const rolePromptInstructions = sanitizeRolePromptInstructions(payload.rolePromptInstructions);
-        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, activeRolePromptIds });
+        chatStore.updateSessionMeta(payload.projectId, chatSessionId, { ...assistantSettings, policy: effectivePolicy, activeRolePromptIds });
         this.attachToChatSession(ws, chatSessionId);
 
         const retryContent = (payload.content || '').trim();
@@ -898,7 +988,8 @@ class TerminalServer {
           tool: assistantSettings.tool,
           model: assistantSettings.model,
           effort: assistantSettings.effort,
-          validateVisually: assistantSettings.validateVisually,
+          policy: effectivePolicy,
+          projectRuntime: payload.projectRuntime || 'container',
           executeReviewedPlan: !!payload.executeReviewedPlan,
           broadcastFn: sharedBroadcast,
         }).catch(err => {
@@ -1752,9 +1843,40 @@ class TerminalServer {
    * Send message to a specific client
    */
   send(ws, message) {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify(message));
+    if (ws.readyState === ws.OPEN) this.sendRaw(ws, this._eventEnvelope(message));
+  }
+
+  sendRaw(ws, message) {
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
+  }
+
+  _eventEnvelope(message, scope = null) {
+    if (message?.kind === 'event' || message?.kind === 'response') return message;
+    return this.protocolState.nextEvent(message, scope);
+  }
+
+  handleProtocolHello(ws, payload = {}) {
+    const replay = this.protocolState.replaySince(payload.lastEventSeq);
+    this.sendRaw(ws, createHello({
+      serverCapabilities: ['request-response', 'event-sequence', 'state-reconcile', 'idempotency', 'run-observation'],
+      ...this.protocolState.snapshot(),
+    }));
+    if (!replay.complete) {
+      this.send(ws, { type: 'reconcile-required', reason: 'event-sequence-gap', lastEventSeq: payload.lastEventSeq || 0 });
+      return;
     }
+    for (const event of replay.events) this.sendRaw(ws, event);
+  }
+
+  async handleProtocolReconcile(ws, payload = {}) {
+    const { projectId, sessionId, lastEventSeq } = payload;
+    const replay = this.protocolState.replaySince(lastEventSeq);
+    if (replay.complete) {
+      for (const event of replay.events) this.sendRaw(ws, event);
+    } else if (projectId && sessionId) {
+      await this._inspectChatSession(ws, { projectId, chatSessionId: sessionId, acknowledgeAttach: false, reason: 'protocol-reconcile', recover: false });
+    }
+    this.send(ws, { type: 'state-reconciled', projectId, sessionId, ...this.protocolState.snapshot(), replayed: replay.complete });
   }
 
   /**
@@ -1764,14 +1886,49 @@ class TerminalServer {
     this.send(ws, { type: 'error', error });
   }
 
+  async handleRunObservation(ws, { runId, question = '', projectId, sessionId } = {}, requestId = null) {
+    const run = agentOrchestrator.getRun(runId);
+    if (!run || (projectId && run.projectId !== projectId) || (sessionId && run.sessionId !== sessionId)) {
+      this.send(ws, createResponse('run-observation', { error: 'Run not found' }, { requestId, status: 'error' }));
+      return;
+    }
+    const observation = buildRunObservation(run, agentOrchestrator.getTasks(run.id), agentOrchestrator.getEvents(run.id));
+    const cleanQuestion = String(question || '').trim().slice(0, 500);
+    let answer = null;
+    if (cleanQuestion) {
+      try {
+        const { llmProvider } = await import('./llmProvider.js');
+        const result = await llmProvider.generateResponse(
+          `Answer the developer's question using ONLY this read-only run snapshot. Do not suggest actions that modify the workspace unless asked. If the snapshot does not contain the answer, say so.\n\nQuestion: ${cleanQuestion}\n\nSnapshot:\n${JSON.stringify(observation)}`,
+          { systemPrompt: 'You are a read-only coding-run observer. You have no tools and must not claim to have changed or inspected anything beyond the supplied snapshot.', maxTokens: 300, temperature: 0.2 },
+        );
+        answer = String(result?.response || '').trim() || null;
+      } catch (error) {
+        answer = `The observer could not answer right now: ${error.message}`;
+      }
+    }
+    this.send(ws, createResponse('run-observation', { runId, observation, answer }, { requestId }));
+  }
+
+  async handleRunApproval(ws, { runId, approvalId } = {}, requestId = null) {
+    const run = agentOrchestrator.approveRun(runId, approvalId);
+    this.send(ws, createResponse('run-approval-result', { runId, approved: Boolean(run), run }, { requestId, status: run ? 'ok' : 'error' }));
+  }
+
+  async handleRunRejection(ws, { runId, approvalId } = {}, requestId = null) {
+    const run = agentOrchestrator.rejectRun(runId, approvalId);
+    this.send(ws, createResponse('run-approval-result', { runId, approved: false, rejected: Boolean(run), run }, { requestId, status: run ? 'ok' : 'error' }));
+  }
+
   /**
    * Broadcast to all clients attached to a session
    */
   broadcastToSession(sessionId, message) {
     const clients = this.sessionClients.get(sessionId);
     if (clients) {
+      const envelope = this._eventEnvelope(message, `terminal:${sessionId}`);
       for (const ws of clients) {
-        this.send(ws, message);
+        this.sendRaw(ws, envelope);
       }
     }
   }
@@ -1780,8 +1937,9 @@ class TerminalServer {
    * Broadcast to all connected clients
    */
   broadcast(message) {
+    const envelope = this._eventEnvelope(message);
     for (const ws of this.clients.keys()) {
-      this.send(ws, message);
+      this.sendRaw(ws, envelope);
     }
   }
 

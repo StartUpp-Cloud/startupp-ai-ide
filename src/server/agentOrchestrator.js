@@ -5,6 +5,7 @@ import { sqliteStore } from './sqliteStore.js';
 import { chatStore } from './chatStore.js';
 import { agentGateway } from './agentGateway.js';
 import { memoryStore } from './memoryStore.js';
+import { activityFeed } from './activityFeed.js';
 import skillManager from './skillManager.js';
 import { shouldOrchestrateRequest } from './orchestratorRouting.js';
 import { batchTasks } from './orchestratorBatching.js';
@@ -25,6 +26,11 @@ import {
   shouldPersistProgressMessage,
   shouldSuppressAgentProgress,
 } from './orchestratorLiveness.js';
+import {
+  buildApprovalRequest,
+  needsRunApproval,
+  normalizeRunPolicy,
+} from './runPolicy.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_RUN_RETRIES = 2; // Run-level auto-retries after all task attempts are exhausted
@@ -204,8 +210,9 @@ class AgentOrchestrator extends EventEmitter {
     return shouldOrchestrateRequest({ mode, content, executeReviewedPlan });
   }
 
-  async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, validateVisually = false, broadcastFn, skipUnread = false, executeReviewedPlan = false }) {
+  async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, policy = {}, projectRuntime = 'container', broadcastFn, skipUnread = false, executeReviewedPlan = false }) {
     const recoveredContinuation = this._findRecoverableContinuationContext(projectId, sessionId, content);
+    const effectivePolicy = normalizeRunPolicy(policy, { tool, projectRuntime });
     const run = {
       id: uuidv4(),
       projectId,
@@ -216,7 +223,6 @@ class AgentOrchestrator extends EventEmitter {
       tool,
       model,
       effort,
-      validateVisually: !!validateVisually,
       maxAttempts: DEFAULT_MAX_ATTEMPTS,
       startedAt: nowIso(),
       updatedAt: nowIso(),
@@ -224,7 +230,8 @@ class AgentOrchestrator extends EventEmitter {
         attachments,
         mode,
         executeReviewedPlan,
-        validateVisually: !!validateVisually,
+        policy: effectivePolicy,
+        executionOptions: { attachments, mode, tool, model, effort, projectRuntime, skipUnread, executeReviewedPlan },
         ...(recoveredContinuation ? {
           continuationContext: recoveredContinuation.context,
           continuationFromRunId: recoveredContinuation.runId,
@@ -235,13 +242,99 @@ class AgentOrchestrator extends EventEmitter {
 
     this._saveRun(run);
     this.activeRuns.set(run.id, { aborted: false, broadcastFn, lastActivityAt: Date.now(), lastMeaningfulActivityAt: Date.now() });
-    this._startLivenessMonitor(run, broadcastFn);
     this._emitRun(run, broadcastFn);
     await this._event(run, null, 'run-started', `Started autonomous run with ${tool}.`, { tool, model, effort }, broadcastFn);
+
+    const approval = needsRunApproval({ content, policy: effectivePolicy });
+    if (approval.requiresApproval) {
+      const pendingApproval = buildApprovalRequest({
+        runId: run.id,
+        operation: content,
+        policy: effectivePolicy,
+        risk: approval.risk,
+        reasons: approval.reasons,
+      });
+      run.status = 'waiting-approval';
+      run.phase = 'awaiting-approval';
+      run.updatedAt = nowIso();
+      run.data = { ...(run.data || {}), pendingApproval };
+      this._saveRun(run);
+      activityFeed.log({
+        projectId: run.projectId,
+        sessionId: run.sessionId,
+        executionId: run.id,
+        type: 'safety-warning',
+        title: 'Run approval requested',
+        detail: `Waiting for approval before ${approval.risk}-risk work.`,
+        metadata: { approvalId: pendingApproval.id, risk: approval.risk, policy: effectivePolicy },
+      });
+      await this._event(run, null, 'approval-requested', 'This run is waiting for explicit approval before a risky operation.', { approval: pendingApproval }, broadcastFn, 'warning');
+      this._emitRun(run, broadcastFn);
+      return run;
+    }
+
+    this._startLivenessMonitor(run, broadcastFn);
 
     this._executeRun(run, { attachments, mode, tool, model, effort, broadcastFn, skipUnread })
       .catch((err) => this._handleRunCrash(run, err, { broadcastFn, tool, model }));
 
+    return run;
+  }
+
+  approveRun(runId, approvalId = null) {
+    const run = this.getRun(runId);
+    const pending = run?.data?.pendingApproval;
+    if (!run || run.status !== 'waiting-approval' || !pending || (approvalId && pending.id !== approvalId)) return null;
+    const active = this.activeRuns.get(run.id);
+    if (!active) return null;
+    const opts = run.data?.executionOptions || {};
+    run.status = 'running';
+    run.phase = 'planning';
+    run.updatedAt = nowIso();
+    run.data = { ...(run.data || {}), pendingApproval: null, approval: { id: pending.id, status: 'approved', approvedAt: nowIso() } };
+    this._saveRun(run);
+    activityFeed.log({
+      projectId: run.projectId,
+      sessionId: run.sessionId,
+      executionId: run.id,
+      type: 'user-intervention',
+      title: 'Run approval granted',
+      detail: 'The developer approved the pending policy escalation.',
+      metadata: { approvalId: pending.id, policy: run.data?.policy || null },
+    });
+    this._startLivenessMonitor(run, active.broadcastFn);
+    this._event(run, null, 'approval-granted', 'Risky operation approved; the run is continuing.', { approvalId: pending.id }, active.broadcastFn, 'info').catch(() => {});
+    this._emitRun(run, active.broadcastFn);
+    this._executeRun(run, { ...opts, broadcastFn: active.broadcastFn })
+      .catch(err => this._handleRunCrash(run, err, { broadcastFn: active.broadcastFn, tool: run.tool, model: run.model }));
+    return run;
+  }
+
+  rejectRun(runId, approvalId = null) {
+    const run = this.getRun(runId);
+    const pending = run?.data?.pendingApproval;
+    if (!run || run.status !== 'waiting-approval' || !pending || (approvalId && pending.id !== approvalId)) return null;
+    const active = this.activeRuns.get(run.id);
+    run.status = 'blocked';
+    run.phase = 'blocked';
+    run.error = 'Run rejected by developer approval policy.';
+    run.completedAt = nowIso();
+    run.updatedAt = run.completedAt;
+    run.data = { ...(run.data || {}), pendingApproval: null, approval: { id: pending.id, status: 'rejected', rejectedAt: run.completedAt } };
+    this._saveRun(run);
+    activityFeed.log({
+      projectId: run.projectId,
+      sessionId: run.sessionId,
+      executionId: run.id,
+      type: 'user-intervention',
+      title: 'Run approval rejected',
+      detail: 'The developer rejected the pending policy escalation.',
+      metadata: { approvalId: pending.id, policy: run.data?.policy || null },
+    });
+    const broadcastFn = active?.broadcastFn;
+    this._event(run, null, 'approval-rejected', 'The run was stopped because approval was declined.', { approvalId: pending.id }, broadcastFn, 'warning').catch(() => {});
+    this._emitRun(run, broadcastFn);
+    this._deactivateRun(run.id);
     return run;
   }
 
@@ -416,7 +509,7 @@ ${task.prompt}`;
   hasActiveSession(projectId, sessionId) {
     for (const [runId] of this.activeRuns) {
       const run = this.getRun(runId);
-      if (run?.projectId === projectId && run?.sessionId === sessionId && ACTIVE_RUN_STATUSES.includes(run.status)) return true;
+      if (run?.projectId === projectId && run?.sessionId === sessionId && ['running', 'waiting-approval'].includes(run.status)) return true;
     }
     return false;
   }
@@ -462,6 +555,12 @@ ${task.prompt}`;
     this.reconcileSessionRuns(projectId, sessionId);
     return sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs WHERE project_id = ? AND session_id = ? ORDER BY started_at DESC LIMIT ?`)
       .all(projectId, sessionId, limit)
+      .map(rowToRun);
+  }
+
+  getRecentRuns(limit = 100) {
+    return sqliteStore.db.prepare('SELECT * FROM orchestrator_runs ORDER BY updated_at DESC LIMIT ?')
+      .all(Math.max(1, Math.min(Number(limit) || 100, 500)))
       .map(rowToRun);
   }
 
@@ -685,15 +784,6 @@ ${task.prompt}`;
         return;
       }
 
-      // Last tier (opt-in): post-deploy visual validation on the host. Loads the
-      // deployed URL in a real browser, logs in with a configured test user,
-      // checks it loads cleanly, and loops failures back to the agent.
-      if (run.validateVisually && !active?.aborted) {
-        run.phase = 'validating-visually';
-        this._emitRun(run, broadcastFn);
-        await this._runVisualValidation(run, completed, { attachments, mode, tool, model, effort, broadcastFn, skipUnread });
-      }
-
       // Success — synthesize and return
       run.phase = 'synthesizing';
       run.updatedAt = nowIso();
@@ -885,90 +975,6 @@ ${task.prompt}`;
     const project = this._orchestratorProject(run);
     if (!project?.containerName) return;
     await removeWorktrees({ containerName: project.containerName, root, paths }).catch(() => {});
-  }
-
-  /**
-   * Post-deploy visual validation (opt-in). Resolves the deployed URL (from the
-   * agent's output or a configured environment baseUrl) + a test-user login,
-   * loads it in a host browser, and on failure feeds actionable evidence back to
-   * the agent to fix — bounded re-checks. Best-effort and non-blocking.
-   */
-  async _runVisualValidation(run, completed, opts) {
-    try {
-      const { validateDeployedUrl, buildVisualFeedback } = await import('./visualValidator.js');
-      const { getEnvironmentLogin } = await import('./projectEnvironments.js');
-
-      // Prefer a deployed URL the agent reported; else the environment baseUrl.
-      const text = completed.map((c) => String(c?.result?.content || '')).join('\n');
-      const urlFromOutput = (text.match(/https?:\/\/[^\s"'`)>\]]+/g) || [])
-        .map((u) => u.replace(/[.,);]+$/, ''))
-        .find((u) => !/githubusercontent|github\.com|npmjs\.|\bexample\.com|localhost|schema/i.test(u));
-      const login = getEnvironmentLogin(run.projectId, { url: urlFromOutput });
-      const url = urlFromOutput || login?.baseUrl;
-      if (!url) {
-        await this._event(run, null, 'visual-validation', 'Visual validation skipped: no deployed URL detected and no environment baseUrl configured.', null, opts.broadcastFn, 'info').catch(() => {});
-        return null;
-      }
-
-      const MAX_FIX_ROUNDS = 2;
-      let evidence = null;
-      for (let i = 0; i <= MAX_FIX_ROUNDS; i++) {
-        if (this.activeRuns.get(run.id)?.aborted) break;
-        await this._event(run, null, 'visual-validation', `🔎 Visually validating ${url}${i > 0 ? ` (re-check ${i})` : ''}…`, null, opts.broadcastFn, 'info').catch(() => {});
-        evidence = await validateDeployedUrl({
-          url,
-          username: login?.username,
-          password: login?.password,
-          loginRecipe: login?.loginRecipe || null,
-          goal: run.goal,
-          label: String(run.id).slice(0, 8),
-        });
-
-        if (!evidence?.available) {
-          await this._event(run, null, 'visual-validation', `Visual validation unavailable: ${evidence?.reason || 'unknown'}. Start Chrome with --remote-debugging-port=9222 on the host (or use the Debug Element launcher) to enable it.`, null, opts.broadcastFn, 'warning').catch(() => {});
-          return evidence;
-        }
-
-        this._emitValidationMessage(run, url, evidence, opts.broadcastFn);
-        if (evidence.passed || i === MAX_FIX_ROUNDS) break;
-
-        // Failed → hand evidence to the agent to fix, then re-validate.
-        const fixTask = this._createTask(run, { title: `Fix visual validation issues (round ${i + 1})`, prompt: '(built at run time)', taskType: 'implementation' });
-        this._saveTask(fixTask);
-        fixTask.prompt = this._buildTaskPrompt(run, buildVisualFeedback(evidence, url), completed);
-        this._emitRun(run, opts.broadcastFn);
-        const res = await this._runTaskWithRetries(run, fixTask, opts);
-        completed.push({ task: fixTask, result: res });
-        if (!res.success) break;
-      }
-      return evidence;
-    } catch (err) {
-      console.warn('[agentOrchestrator] visual validation error:', err.message);
-      return null;
-    }
-  }
-
-  _emitValidationMessage(run, url, evidence, broadcastFn) {
-    const msg = chatStore.addMessage({
-      projectId: run.projectId,
-      sessionId: run.sessionId,
-      role: 'agent',
-      content: `🔎 Visual validation of ${url}: ${evidence.passed ? '✅ passed' : '⚠️ issues found'} — ${evidence.summary}`,
-      metadata: {
-        orchestratorRunId: run.id,
-        visualValidation: {
-          passed: !!evidence.passed,
-          url,
-          summary: evidence.summary,
-          httpStatus: evidence.httpStatus,
-          screenshot: evidence.screenshotPath || null,
-          consoleErrors: (evidence.consoleErrors || []).slice(0, 8),
-          failedRequests: (evidence.failedRequests || []).slice(0, 8),
-          intentMatch: evidence.intentMatch || null,
-        },
-      },
-    });
-    broadcastFn?.({ type: 'chat-message', message: msg });
   }
 
   /** (Re)build a pipeline task's prompt at run time with the prior results. */

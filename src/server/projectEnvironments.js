@@ -50,21 +50,6 @@ function normalizeTestUser(user, prior = null) {
   };
 }
 
-/** Optional login recipe (non-secret: selectors/path) for visual validation. */
-function normalizeLoginRecipe(input) {
-  if (!input || typeof input !== 'object') return null;
-  const s = (v) => (v ? String(v).trim() : '');
-  const recipe = {
-    path: s(input.path),
-    usernameSelector: s(input.usernameSelector),
-    passwordSelector: s(input.passwordSelector),
-    submitSelector: s(input.submitSelector),
-    successSelector: s(input.successSelector),
-  };
-  // Only keep it if at least the password selector or a login path is set.
-  return (recipe.passwordSelector || recipe.path) ? recipe : null;
-}
-
 /**
  * Normalize+secure an environments array for storage. `existing` is the
  * project's currently-stored environments, used to preserve encrypted secrets
@@ -89,7 +74,6 @@ export function normalizeEnvironments(input, existing = []) {
         writesAllowed: typeof env.writesAllowed === 'boolean'
           ? env.writesAllowed
           : !/prod/i.test(name),
-        login: normalizeLoginRecipe(env.login),
         testUsers: Array.isArray(env.testUsers)
           ? env.testUsers.map((u) => normalizeTestUser(u, priorById.get(u?.id) || null))
           : [],
@@ -105,7 +89,6 @@ export function maskEnvironmentsForClient(environments = []) {
     label: env.label,
     baseUrl: env.baseUrl,
     writesAllowed: env.writesAllowed,
-    login: env.login || null,
     testUsers: (env.testUsers || []).map((u) => ({
       id: u.id,
       label: u.label,
@@ -194,32 +177,6 @@ export function resolveEnvironmentSecrets(projectId) {
  * A ready-to-run task prompt that drives the agent through a cross-tenant
  * isolation probe using the configured test users in different tenants.
  */
-/**
- * Resolve a baseUrl + decrypted test-user login for visual validation. Prefers
- * the environment whose baseUrl host matches `url`, else the first env with a
- * baseUrl. Returns null if none configured.
- */
-export function getEnvironmentLogin(projectId, { url = null } = {}) {
-  const envs = getProjectEnvironments(projectId);
-  let env = null;
-  if (url) {
-    try {
-      const host = new URL(url).host;
-      env = envs.find((e) => { try { return e.baseUrl && new URL(e.baseUrl).host === host; } catch { return false; } });
-    } catch {}
-  }
-  env = env || envs.find((e) => e.baseUrl);
-  if (!env) return null;
-  const user = (env.testUsers || []).find((u) => u.secretEnc) || (env.testUsers || [])[0] || null;
-  return {
-    environment: env.name,
-    baseUrl: env.baseUrl,
-    username: user?.username || null,
-    password: user?.secretEnc ? decrypt(user.secretEnc) : null,
-    loginRecipe: env.login || null,
-  };
-}
-
 export function buildTenantIsolationProbePrompt(projectId) {
   const envs = getProjectEnvironments(projectId);
   const target = envs.find((e) => e.writesAllowed && tenantsOf(e).length >= 2)

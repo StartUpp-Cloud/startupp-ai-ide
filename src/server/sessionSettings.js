@@ -76,10 +76,6 @@ export function mergeSessionAssistantSettings(existing = {}, updates = {}, fallb
   const resolved = resolveSessionAssistantSettings(merged, {
     tool: updatedTool || existing.tool || fallback.tool || 'claude',
   });
-  // Opt-in "validate visually" toggle (default off). Preserved across updates.
-  resolved.validateVisually = hasOwn(updates, 'validateVisually')
-    ? !!updates.validateVisually
-    : !!existing.validateVisually;
   return resolved;
 }
 

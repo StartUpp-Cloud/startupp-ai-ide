@@ -25,6 +25,7 @@ export default function SystemHealth({
   const { notify, fetchProjects } = useProjects();
   const [health, setHealth] = useState(null);
   const [dockerStatus, setDockerStatus] = useState(null);
+  const [diagnostics, setDiagnostics] = useState(null);
   const [showDetail, setShowDetail] = useState(false);
   const detailRef = useRef(null);
 
@@ -47,6 +48,11 @@ export default function SystemHealth({
       fetch('/api/containers/status')
         .then(r => r.ok ? r.json() : null)
         .then(data => { if (mounted && data) setDockerStatus(data); })
+        .catch(() => {});
+
+      fetch('/api/diagnostics')
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (mounted && data) setDiagnostics(data); })
         .catch(() => {});
     };
     poll();
@@ -242,6 +248,22 @@ export default function SystemHealth({
       {showDetail && (
         <div className="absolute right-0 top-full mt-1 w-64 bg-surface-850 border border-surface-700 rounded-lg shadow-xl z-50 p-3 space-y-3">
           <div className="text-[11px] font-medium text-surface-300 uppercase tracking-wider">System Health</div>
+
+          {diagnostics && (
+            <div className="rounded-md border border-surface-700/60 bg-surface-900/40 p-2 space-y-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="flex items-center gap-1.5 text-surface-400"><Server className="w-3.5 h-3.5" /> Run diagnostics</span>
+                <span className={diagnostics.status === 'ok' ? 'text-green-400' : 'text-yellow-400'}>{diagnostics.status === 'ok' ? 'Healthy' : 'Review'}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1 text-[10px] text-surface-500">
+                <span>Active runs: <strong className="text-surface-300">{diagnostics.summary.activeRuns}</strong></span>
+                <span>Stale: <strong className={diagnostics.summary.staleRuns ? 'text-yellow-300' : 'text-surface-300'}>{diagnostics.summary.staleRuns}</strong></span>
+                <span>Open sessions: <strong className="text-surface-300">{diagnostics.summary.openSessions}</strong></span>
+                <span>Retries: <strong className="text-surface-300">{diagnostics.summary.recentRetries ?? diagnostics.summary.recoveryAttempts}</strong></span>
+              </div>
+              {diagnostics.approvals?.length > 0 && <div className="border-t border-surface-700/40 pt-1 text-[10px] text-surface-500">Latest policy event: <span className="text-surface-300">{diagnostics.approvals[0].title}</span></div>}
+            </div>
+          )}
 
           {/* Docker */}
           <div className="rounded-md border border-surface-700/60 bg-surface-900/40 p-2 space-y-1.5">

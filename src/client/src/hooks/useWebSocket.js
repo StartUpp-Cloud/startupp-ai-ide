@@ -16,6 +16,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { createRequest, isProtocolEvent, WS_PROTOCOL_NAME } from '../../../shared/wsProtocol.js';
 
 // Connection states
 export const WS_STATUS = {
@@ -66,6 +67,8 @@ export function useWebSocket(path, options = {}) {
   const currentDelayRef = useRef(config.reconnectMinDelay);
   const isReconnectingRef = useRef(false);
   const wasConnectedRef = useRef(false);
+  const lastEventSeqRef = useRef(0);
+  const stateVersionRef = useRef(0);
 
   const [status, setStatus] = useState(WS_STATUS.DISCONNECTED);
   const [isConnected, setIsConnected] = useState(false);
@@ -166,6 +169,18 @@ export function useWebSocket(path, options = {}) {
       setConnectionVersion(version => version + 1);
       startHeartbeat();
 
+      // Reconnects resume from the last event observed by this browser. The
+      // server replays what it retained or asks the subscribed panel to fetch
+      // an authoritative snapshot when the gap is too old.
+      try {
+        ws.send(JSON.stringify(createRequest('hello', {
+          lastEventSeq: lastEventSeqRef.current,
+          stateVersion: stateVersionRef.current,
+        }, { requestId: `hello-${Date.now()}` })));
+      } catch (err) {
+        console.warn('[WebSocket] Failed to send protocol handshake:', err);
+      }
+
       // Notify connection established
       config.onConnect?.();
     };
@@ -177,6 +192,21 @@ export function useWebSocket(path, options = {}) {
 
       try {
         const msg = JSON.parse(event.data);
+
+        if (isProtocolEvent(msg)) {
+          const seq = Number(msg.seq || 0);
+          if (seq > 0 && lastEventSeqRef.current > 0 && seq > lastEventSeqRef.current + 1) {
+            try {
+              ws.send(JSON.stringify(createRequest('reconcile', {
+                lastEventSeq: lastEventSeqRef.current,
+              }, { requestId: `reconcile-${seq}-${Date.now()}` })));
+            } catch (err) {
+              console.warn('[WebSocket] Failed to request state reconciliation:', err);
+            }
+          }
+          if (seq > lastEventSeqRef.current) lastEventSeqRef.current = seq;
+          stateVersionRef.current = Math.max(stateVersionRef.current, Number(msg.stateVersion || 0));
+        }
 
         // Handle pong internally (don't pass to handler)
         if (msg.type === 'pong') return;
@@ -372,6 +402,7 @@ export function useWebSocket(path, options = {}) {
     send,
     forceReconnect,
     checkConnection,
+    protocol: { name: WS_PROTOCOL_NAME, version: 1, lastEventSeqRef, stateVersionRef },
   };
 }
 

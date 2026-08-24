@@ -10,7 +10,6 @@ import QuickPrompt from "./pages/QuickPrompt";
 import IDE from "./pages/IDE";
 import Profile from "./pages/Profile";
 import BranchReview from "./pages/BranchReview";
-import DebugElement from "./pages/DebugElement";
 import Onboarding from "./pages/Onboarding";
 import Skills from "./pages/Skills";
 import Connections from "./pages/Connections";
@@ -89,7 +88,6 @@ function App() {
           {/* Standalone pages */}
           <Route path="/setup" element={<Onboarding />} />
           <Route path="/branch-review" element={<BranchReview />} />
-          <Route path="/debug" element={<DebugElement />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/skills" element={<Skills />} />
           <Route path="/connections" element={<Layout><Connections /></Layout>} />

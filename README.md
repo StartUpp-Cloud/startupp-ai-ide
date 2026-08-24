@@ -13,8 +13,8 @@ An open-source, containerized AI development environment. Each project runs in i
 ├──────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  ┌─────────┐  ┌─────────────────┐  ┌──────────────────────────────┐ │
-│  │  Ollama  │  │  Docker Engine  │  │  Chrome DevTools Protocol    │ │
-│  │  OpenAI  │  │                 │  │  (Debug Element)             │ │
+│  │  Ollama  │  │  Docker Engine  │  │      Agent Orchestrator       │ │
+│  │  OpenAI  │  │                 │  │  (sessions, plans, safety)    │ │
 │  │ DeepSeek │  │  ┌───────────┐  │  └──────────────────────────────┘ │
 │  └────┬─────┘  │  │Project A  │  │                                   │
 │       │        │  │ Claude    │  │                                   │
@@ -206,16 +206,6 @@ Installable rule packs that extend the AI's capabilities per project:
 
 7 built-in skills: React Testing, Docker Deploy, Database Migrations, Security Audit, TypeScript Strict, REST API Design, Git Workflow. Install custom skills from URL or JSON.
 
-### Debug Element (Chrome DevTools Protocol)
-
-Connect to your running Chrome instance to capture screenshots, console errors, and inspect DOM elements:
-
-1. Launch Chrome with `./scripts/launch-chrome-debug.sh`
-2. Open Debug Element from the IDE (mouse pointer icon in top bar)
-3. Select a Chrome tab → screenshot + console errors captured
-4. Click on the screenshot to inspect any DOM element
-5. Copy everything as markdown for AI-assisted debugging
-
 ### Notifications
 
 - Bell icon in top bar with unread count
@@ -272,7 +262,6 @@ Connect to your running Chrome instance to capture screenshots, console errors, 
 | Terminal   | node-pty, xterm.js, WebSocket           |
 | Containers | Docker, named volumes                   |
 | LLM        | Ollama / OpenAI / DeepSeek              |
-| Debug      | Chrome DevTools Protocol                |
 | UI icons   | Lucide React                            |
 | Runtime    | Node.js 18+, Docker                     |
 
@@ -286,7 +275,6 @@ Connect to your running Chrome instance to capture screenshots, console errors, 
 | **Branch Review** | `/commits`, `/changes`, `/explain-file`, `/summarize` |
 | **Skills** | `GET/POST/DELETE /api/skills`, `/project/:id/activate` |
 | **Scheduler** | `GET/POST/PUT/DELETE /api/schedules`, `/trigger`, `/generate` |
-| **Debug** | `/status`, `/tabs`, `/screenshot`, `/console-errors`, `/element-at-point` |
 | **Setup** | `GET /api/setup-status` |
 
 ## Scripts

@@ -41,7 +41,6 @@ import schedulerRoutes from "./routes/scheduler.js";
 import promptFromFileRoutes from "./routes/promptFromFile.js";
 import branchReviewRoutes from "./routes/branchReview.js";
 import skillRoutes from "./routes/skills.js";
-import debugElementRoutes from "./routes/debugElement.js";
 import containerRoutes from "./routes/containers.js";
 import sessionHistoryRoutes from "./routes/sessionHistory.js";
 import chatRoutes from "./routes/chat.js";
@@ -50,6 +49,7 @@ import slackRoutes from "./routes/slack.js";
 import connectionRoutes from "./routes/connections.js";
 import salesforceRoutes from "./routes/salesforce.js";
 import codeIndexRoutes from "./routes/codeIndex.js";
+import diagnosticsRoutes from "./routes/diagnostics.js";
 import { authMiddleware, getToken } from "./authToken.js";
 import { autoResponder } from "./autoResponder.js";
 import { bigProjectPlanner } from "./bigProjectPlanner.js";
@@ -154,7 +154,6 @@ async function startServer() {
     app.use("/api/branch-review", branchReviewRoutes);
     app.use("/api/projects/:projectId/quick-commands", (await import("./routes/quickCommands.js")).default);
     app.use("/api/skills", skillRoutes);
-    app.use("/api/debug", debugElementRoutes);
     app.use("/api/containers", containerRoutes);
     app.use("/api/session-history", sessionHistoryRoutes);
     app.use("/api/projects", chatRoutes);
@@ -164,6 +163,7 @@ async function startServer() {
     app.use("/api/connections", connectionRoutes);
     app.use("/api/salesforce", salesforceRoutes);
     app.use("/api/jobs", (await import("./routes/jobs.js")).default);
+    app.use("/api/diagnostics", diagnosticsRoutes);
 
     // Health check endpoint
     app.get("/api/health", (req, res) => {

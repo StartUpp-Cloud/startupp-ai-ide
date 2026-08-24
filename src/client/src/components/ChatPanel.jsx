@@ -6,7 +6,7 @@ import InternalConsole from './InternalConsole';
 import ContainerFileEditor from './ContainerFileEditor';
 import { useFileEditor } from '../contexts/FileEditorContext';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
-import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, ChevronRight, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy, CheckCircle2, Circle, XCircle, MinusCircle } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, ChevronRight, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy, CheckCircle2, Circle, XCircle, MinusCircle, Eye, Send, ShieldCheck } from 'lucide-react';
 import ModeToggle from './ModeToggle';
 import {
   CLI_TOOLS,
@@ -22,6 +22,7 @@ import {
   isAbortLikeError,
   shouldRefetchWithoutSince,
 } from '../utils/chatHistoryLoad';
+import { createRequest } from '../../../shared/wsProtocol.js';
 
 const VISIBLE_SESSION_HEALTH_INTERVAL_MS = 5000;
 const NOT_BUSY_CLEAR_GRACE_MS = 12000;
@@ -1270,6 +1271,106 @@ function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, project
   );
 }
 
+function RunObserverRail({ run, wsRef, projectId, sessionId }) {
+  const [open, setOpen] = useState(false);
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [observation, setObservation] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const pendingApproval = run?.pendingApproval || run?.data?.pendingApproval;
+  const policy = run?.policy || run?.data?.policy;
+
+  useEffect(() => {
+    if (!open || !run?.id || !wsRef?.current) return undefined;
+    const handleMessage = (event) => {
+      let message;
+      try { message = JSON.parse(event.data); } catch { return; }
+      if (message.type !== 'run-observation' || message.runId !== run.id) return;
+      setLoading(false);
+      if (message.observation) setObservation(message.observation);
+      if (message.answer) setAnswer(message.answer);
+    };
+    wsRef.current.addEventListener('message', handleMessage);
+    return () => wsRef.current?.removeEventListener('message', handleMessage);
+  }, [open, run?.id, wsRef]);
+
+  const sendRequest = (type, payload) => {
+    if (wsRef?.current?.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(JSON.stringify(createRequest(type, payload, {
+      requestId: `${type}-${run.id}-${Date.now()}`,
+      idempotencyKey: `${type}:${run.id}:${payload.approvalId || Date.now()}`,
+    })));
+    return true;
+  };
+
+  const loadSnapshot = () => {
+    setOpen(true);
+    setLoading(true);
+    sendRequest('run-observe', { runId: run.id, projectId, sessionId });
+  };
+
+  const ask = (event) => {
+    event.preventDefault();
+    const clean = question.trim();
+    if (!clean) return;
+    setAnswer('');
+    setLoading(true);
+    sendRequest('run-observe', { runId: run.id, projectId, sessionId, question: clean });
+  };
+
+  if (!run) return null;
+  return (
+    <div className="mx-3 mb-3 rounded-lg border border-surface-700/40 bg-surface-950/50">
+      <button
+        type="button"
+        onClick={() => (open ? setOpen(false) : loadSnapshot())}
+        className="flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-surface-300 transition-colors hover:bg-surface-800/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60"
+        aria-expanded={open}
+      >
+        <Eye size={13} className="text-primary-300" />
+        <span className="font-medium text-surface-200">Ask about this run</span>
+        <span className="ml-auto text-[10px] text-surface-500">Read-only</span>
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+      </button>
+      {open && (
+        <div className="border-t border-surface-700/35 px-3 py-2.5">
+          {policy && (
+            <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Effective run policy">
+              <span className="inline-flex items-center gap-1 rounded border border-emerald-500/25 bg-emerald-500/5 px-1.5 py-0.5 text-[10px] text-emerald-300"><ShieldCheck size={10} /> {policy.approvalMode || 'on-risk'} approvals</span>
+              <span className="rounded border border-surface-700/60 px-1.5 py-0.5 text-[10px] text-surface-400">Files: {policy.filesystemScope || 'project'}</span>
+              <span className="rounded border border-surface-700/60 px-1.5 py-0.5 text-[10px] text-surface-400">Network: {policy.networkScope || 'provider-required'}</span>
+            </div>
+          )}
+          {pendingApproval && (
+            <div className="mb-2 rounded border border-amber-500/35 bg-amber-500/10 p-2 text-[11px] text-amber-200">
+              <div className="font-medium">Approval needed: {pendingApproval.risk} risk</div>
+              <div className="mt-1 text-amber-100/75">{(pendingApproval.reasons || []).join('; ') || 'This operation crosses the configured policy boundary.'}</div>
+              <div className="mt-2 flex gap-2">
+                <button type="button" onClick={() => sendRequest('run-approve', { runId: run.id, approvalId: pendingApproval.id })} className="min-h-11 rounded bg-amber-400/20 px-3 text-[11px] font-medium text-amber-100 hover:bg-amber-400/30">Approve</button>
+                <button type="button" onClick={() => sendRequest('run-reject', { runId: run.id, approvalId: pendingApproval.id })} className="min-h-11 rounded border border-surface-700 px-3 text-[11px] text-surface-300 hover:bg-surface-800">Reject</button>
+              </div>
+            </div>
+          )}
+          {observation && (
+            <div className="mb-2 space-y-1 text-[10px] text-surface-400">
+              <div><span className="text-surface-500">Status:</span> {observation.run.status} · {observation.run.phase}</div>
+              <div><span className="text-surface-500">Tasks:</span> {observation.tasks.filter(task => task.status === 'completed').length}/{observation.tasks.length} complete</div>
+              <div className="max-h-24 overflow-y-auto border-l border-surface-700/60 pl-2">{observation.events.slice(-4).map((event, index) => <div key={`${event.createdAt}-${index}`}>{event.message}</div>)}</div>
+            </div>
+          )}
+          {answer && <div className="mb-2 rounded bg-surface-900/70 p-2 text-[11px] leading-relaxed text-surface-200">{answer}</div>}
+          <form onSubmit={ask} className="flex items-center gap-2">
+            <input value={question} onChange={event => setQuestion(event.target.value)} placeholder="What is blocking the run?" className="min-h-11 min-w-0 flex-1 rounded border border-surface-700 bg-surface-900 px-2 text-[11px] text-surface-200 outline-none focus:border-primary-500" maxLength={500} />
+            <button type="submit" disabled={loading || !question.trim()} className="flex min-h-11 min-w-11 items-center justify-center rounded border border-primary-500/40 text-primary-200 hover:bg-primary-500/10 disabled:cursor-not-allowed disabled:opacity-40" title="Ask read-only observer">
+              {loading ? <Loader size={13} className="animate-spin" /> : <Send size={13} />}
+            </button>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function dedupeModelOptions(options) {
   const seen = new Set();
   return options.filter((option) => {
@@ -1507,20 +1608,20 @@ function SessionAssistantControls({
             type="button"
             onClick={onOpenMain}
             disabled={!mainSession?.id}
-            className="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-surface-700 bg-surface-900 px-2 py-1 text-[11px] font-medium text-surface-300 transition-colors hover:border-primary-500/45 hover:bg-primary-500/10 hover:text-primary-200 disabled:cursor-not-allowed disabled:opacity-50"
+            aria-label="Back to main thread"
+            className="inline-flex min-h-11 min-w-11 flex-shrink-0 items-center justify-center rounded-md border border-surface-700 bg-surface-900 p-2 text-[11px] font-medium text-surface-300 transition-colors hover:border-primary-500/45 hover:bg-primary-500/10 hover:text-primary-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/70 disabled:cursor-not-allowed disabled:opacity-50"
             title="Back to main thread"
           >
             <ArrowLeft size={12} />
-            <span className="hidden sm:inline">Back</span>
           </button>
           <button
             type="button"
             onClick={onCloseSession}
-            className="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-surface-700 bg-surface-900 px-2 py-1 text-[11px] font-medium text-surface-300 transition-colors hover:border-red-500/45 hover:bg-red-500/10 hover:text-red-200"
+            aria-label="Close this child session"
+            className="inline-flex min-h-11 min-w-11 flex-shrink-0 items-center justify-center rounded-md border border-surface-700 bg-surface-900 p-2 text-[11px] font-medium text-surface-300 transition-colors hover:border-red-500/45 hover:bg-red-500/10 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
             title="Close this child session"
           >
             <X size={12} />
-            <span className="hidden sm:inline">Close</span>
           </button>
         </>
       )}
@@ -1638,19 +1739,6 @@ function SessionAssistantControls({
         </div>
       )}
 
-      <label
-        className="flex items-center gap-1.5 min-w-0 cursor-pointer"
-        title="After the work is done, load the deployed URL in a browser, log in with a configured test user, and verify it renders cleanly — looping failures back to the agent. Uses the project's Environments config. Off by default."
-      >
-        <input
-          type="checkbox"
-          checked={!!session?.validateVisually}
-          disabled={disabled}
-          onChange={(e) => onUpdate({ validateVisually: e.target.checked })}
-          className="w-3.5 h-3.5 accent-primary-500 disabled:opacity-50"
-        />
-        <span className="text-[11px] text-surface-300 hidden lg:inline">Validate visually</span>
-      </label>
         </>
       )}
 
@@ -2786,7 +2874,6 @@ function ChatSessionContent({
         tool: effectiveTool,
         model: sessionModel || null,
         effort: sessionEffort || null,
-        validateVisually: !!session?.validateVisually,
         activeRolePromptIds: [],
       }));
     } else {
@@ -3120,6 +3207,15 @@ function ChatSessionContent({
             projectId={projectId}
             sessionId={sessionId}
             runStatus={runStatus}
+          />
+        )}
+
+        {!showOnlySessions && orchestratorRun && (
+          <RunObserverRail
+            run={orchestratorRun}
+            wsRef={wsRef}
+            projectId={projectId}
+            sessionId={sessionId}
           />
         )}
 

@@ -228,7 +228,6 @@ function SectionTips() {
   const tips = [
     { label: 'Agent vs Ask mode', desc: 'Agent mode lets the AI execute code. Ask mode is read-only — great for questions without side effects.' },
     { label: 'Multi-project tabs', desc: 'Open multiple projects and switch between them. Each project\'s chat and terminal state is preserved independently.' },
-    { label: 'Quick Capture', desc: 'Take screenshots of your app and send them directly to the AI for visual feedback and debugging.' },
     { label: 'File attachments', desc: 'Attach files, paste text, or use git diffs as context when chatting. The LLM generates optimized prompts from your attachments.' },
     { label: 'Global Rules', desc: 'Define rules that apply across all projects (coding standards, naming conventions). Each project can also have its own rules.' },
     { label: 'Command Builder', desc: 'In the Internal Console, describe what you want in English and the LLM generates the shell command. Hit Enter to run it.' },
