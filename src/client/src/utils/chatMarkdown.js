@@ -21,6 +21,25 @@ function isListLine(line) {
   return /^\s*(?:[-*]|\d+[.)])\s+/.test(line);
 }
 
+const LIST_BLOCK_TYPES = new Set(['bullet', 'number', 'check']);
+
+/**
+ * Last bullet / last paragraph in a run get trailing space so the next
+ * heading or section does not sit flush against them.
+ */
+export function blockNeedsTrailSpace(blocks, index) {
+  const block = blocks?.[index];
+  if (!block) return false;
+  const next = blocks[index + 1];
+  if (LIST_BLOCK_TYPES.has(block.type)) {
+    return !next || !LIST_BLOCK_TYPES.has(next.type);
+  }
+  if (block.type === 'p') {
+    return !next || next.type !== 'p';
+  }
+  return false;
+}
+
 /**
  * @param {string} text
  * @returns {Array<{ type: string, [key: string]: any }>}

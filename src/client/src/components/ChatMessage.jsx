@@ -1,6 +1,6 @@
 import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText } from 'lucide-react';
 import { useEffect, useState, useMemo } from 'react';
-import { parseMarkdownBlocks } from '../utils/chatMarkdown.js';
+import { parseMarkdownBlocks, blockNeedsTrailSpace } from '../utils/chatMarkdown.js';
 
 const ROLE_STYLES = {
   user: { align: 'justify-end', bubble: 'bg-blue-600/15 border-blue-500/20', icon: User, label: 'You' },
@@ -232,14 +232,17 @@ function renderMarkdown(text) {
     return parts;
   };
 
-  const listRow = (key, indent, marker, body) => (
-    <div key={key} className="flex items-start gap-1.5 leading-snug" style={{ paddingLeft: `${4 + indent * 16}px` }}>
+  const listRow = (key, indent, marker, body, extraClass = '') => (
+    <div key={key} className={`flex items-start gap-1.5 leading-snug ${extraClass}`.trim()} style={{ paddingLeft: `${4 + indent * 16}px` }}>
       {marker}
       <span className="min-w-0 flex-1 text-surface-200">{body}</span>
     </div>
   );
 
-  return parseMarkdownBlocks(cleaned).map((block, i) => {
+  const blocks = parseMarkdownBlocks(cleaned);
+  return blocks.map((block, i) => {
+    const trail = blockNeedsTrailSpace(blocks, i) ? 'mb-2.5' : '';
+    const headingMt = i === 0 ? 'mt-0' : 'mt-3';
     if (block.type === 'code') {
       return (
         <pre key={`code-${i}`} className="my-2 p-3 rounded-md bg-surface-950/80 border border-surface-700/30 text-[12px] font-mono text-surface-300 overflow-x-auto">
@@ -249,12 +252,12 @@ function renderMarkdown(text) {
       );
     }
     if (block.type === 'gap') return <div key={`gap-${i}`} className="h-1.5" />;
-    if (block.type === 'h4') return <h4 key={i} className="text-[13px] font-semibold text-surface-100 mt-2 mb-0.5">{processInline(block.text)}</h4>;
-    if (block.type === 'h3') return <h3 key={i} className="text-sm font-semibold text-surface-100 mt-2 mb-0.5">{processInline(block.text)}</h3>;
-    if (block.type === 'h2') return <h2 key={i} className="text-[15px] font-bold text-surface-100 mt-2 mb-0.5">{processInline(block.text)}</h2>;
+    if (block.type === 'h4') return <h4 key={i} className={`text-sm font-semibold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h4>;
+    if (block.type === 'h3') return <h3 key={i} className={`text-[15px] font-semibold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h3>;
+    if (block.type === 'h2') return <h2 key={i} className={`text-base font-bold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h2>;
     if (block.type === 'hr') return <hr key={i} className="border-surface-700/50 my-2" />;
     if (block.type === 'bullet') {
-      return listRow(i, block.indent, <span className="text-primary-400 mt-0.5 flex-shrink-0">•</span>, processInline(block.text));
+      return listRow(i, block.indent, <span className="text-primary-400 mt-0.5 flex-shrink-0">•</span>, processInline(block.text), trail);
     }
     if (block.type === 'number') {
       return listRow(
@@ -262,6 +265,7 @@ function renderMarkdown(text) {
         block.indent,
         <span className="w-4 flex-shrink-0 text-right text-[11px] font-mono text-surface-500 mt-0.5">{block.n}.</span>,
         processInline(block.text),
+        trail,
       );
     }
     if (block.type === 'check') {
@@ -272,6 +276,7 @@ function renderMarkdown(text) {
           ? <CheckCircle size={13} className="text-green-400 mt-0.5 flex-shrink-0" />
           : <div className="w-[13px] h-[13px] rounded border border-surface-600 mt-0.5 flex-shrink-0" />,
         <span className={block.checked ? 'text-surface-400 line-through' : undefined}>{processInline(block.text)}</span>,
+        trail,
       );
     }
     if (block.type === 'table') {
@@ -298,7 +303,7 @@ function renderMarkdown(text) {
         </div>
       );
     }
-    return <p key={i} className="text-surface-200 leading-relaxed">{processInline(block.text)}</p>;
+    return <p key={i} className={`text-surface-200 leading-relaxed ${trail}`.trim()}>{processInline(block.text)}</p>;
   });
 }
 
@@ -490,7 +495,7 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
             {detail && (
               <button onClick={() => setShowDetail(!showDetail)} className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors">
                 {showDetail ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                Explain
+                Working notes
               </button>
             )}
             {rawOutput && (
