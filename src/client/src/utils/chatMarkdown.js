@@ -40,6 +40,132 @@ export function blockNeedsTrailSpace(blocks, index) {
   return false;
 }
 
+/** Tight but readable gap between consecutive list items. */
+export function listItemSpacingClass(blocks, index) {
+  return blockNeedsTrailSpace(blocks, index) ? 'mb-2.5' : 'mb-1';
+}
+
+export const CHAT_COLLAPSE_CHARS = 320;
+export const CHAT_COLLAPSE_LINES = 6;
+
+export function shouldCollapseChatText(text) {
+  const source = String(text || '');
+  if (source.length > CHAT_COLLAPSE_CHARS) return true;
+  return source.split('\n').length > CHAT_COLLAPSE_LINES;
+}
+
+export function previewChatText(text, { maxChars = 280, maxLines = 4 } = {}) {
+  const lines = String(text || '').split('\n');
+  let preview = lines.slice(0, maxLines).join('\n');
+  if (preview.length > maxChars) preview = preview.slice(0, maxChars).trimEnd();
+  return preview;
+}
+
+export function isSafeHttpUrl(url) {
+  try {
+    const href = String(url || '').trim();
+    const parsed = new URL(/^https?:\/\//i.test(href) ? href : `https://${href}`);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeHttpUrl(url) {
+  const href = String(url || '').trim().replace(/[),.;!?]+$/g, '');
+  if (!href) return '';
+  return /^https?:\/\//i.test(href) ? href : `https://${href}`;
+}
+
+/**
+ * Compact label for GitHub PRs, issues, and repo URLs.
+ */
+export function githubLinkLabel(url) {
+  try {
+    const parsed = new URL(normalizeHttpUrl(url));
+    if (!/(^|\.)github\.com$/i.test(parsed.hostname)) return '';
+    const pull = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/(pull|issues)\/(\d+)/i);
+    if (pull) {
+      const kind = pull[3].toLowerCase() === 'pull' ? 'PR' : 'Issue';
+      return `${kind} #${pull[4]} (${pull[1]}/${pull[2]})`;
+    }
+    const repo = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/?$/);
+    if (repo) return `${repo[1]}/${repo[2]}`;
+    const rest = parsed.pathname.replace(/^\//, '');
+    return rest || 'GitHub';
+  } catch {
+    return '';
+  }
+}
+
+export function linkLabelForUrl(href, explicitLabel = '') {
+  const label = String(explicitLabel || '').trim();
+  const normalized = normalizeHttpUrl(href);
+  const rawLooksLikeUrl = !label
+    || label === href
+    || label === normalized
+    || label === String(href || '').replace(/^https?:\/\//i, '');
+  if (!rawLooksLikeUrl) return label;
+  return githubLinkLabel(normalized) || label || normalized;
+}
+
+/**
+ * Turn markdown links and bare URLs (especially GitHub PRs) into tokens.
+ * @returns {Array<{ type: 'text'|'code'|'bold'|'link', value?: string, href?: string, label?: string }>}
+ */
+export function parseInlineTokens(line) {
+  const tokens = [];
+  let remaining = String(line || '');
+
+  while (remaining.length > 0) {
+    const codeMatch = remaining.match(/^(.*?)`([^`]+)`(.*)$/);
+    if (codeMatch) {
+      if (codeMatch[1]) tokens.push(...parseInlineTokens(codeMatch[1]));
+      tokens.push({ type: 'code', value: codeMatch[2] });
+      remaining = codeMatch[3];
+      continue;
+    }
+
+    const mdLink = remaining.match(/^(.*?)\[([^\]]+)\]\(\s*(https?:\/\/[^)\s]+)\s*\)(.*)$/i);
+    if (mdLink) {
+      if (mdLink[1]) tokens.push(...parseInlineTokens(mdLink[1]));
+      if (isSafeHttpUrl(mdLink[3])) {
+        tokens.push({ type: 'link', href: mdLink[3], label: linkLabelForUrl(mdLink[3], mdLink[2]) });
+      } else {
+        tokens.push({ type: 'text', value: mdLink[2] });
+      }
+      remaining = mdLink[4];
+      continue;
+    }
+
+    const urlMatch = remaining.match(/^(.*?)((?:https?:\/\/|github\.com\/)[^\s<>\]\)]+)(.*)$/i);
+    if (urlMatch) {
+      if (urlMatch[1]) tokens.push(...parseInlineTokens(urlMatch[1]));
+      const href = normalizeHttpUrl(urlMatch[2]);
+      if (isSafeHttpUrl(href)) {
+        tokens.push({ type: 'link', href, label: linkLabelForUrl(href, urlMatch[2]) });
+      } else {
+        tokens.push({ type: 'text', value: urlMatch[2] });
+      }
+      remaining = urlMatch[3];
+      continue;
+    }
+
+    const boldMatch = remaining.match(/^(.*?)\*\*(.+?)\*\*(.*)$/);
+    if (boldMatch) {
+      if (boldMatch[1]) tokens.push({ type: 'text', value: boldMatch[1] });
+      tokens.push({ type: 'bold', value: boldMatch[2] });
+      remaining = boldMatch[3];
+      continue;
+    }
+
+    tokens.push({ type: 'text', value: remaining });
+    break;
+  }
+
+  return tokens;
+}
+
 /**
  * @param {string} text
  * @returns {Array<{ type: string, [key: string]: any }>}

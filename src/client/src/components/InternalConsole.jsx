@@ -725,7 +725,9 @@ function HostAuthButtons({ projectId }) {
           ? 'This project\'s container is stopped. Docker can be up while the workspace is not — it will start automatically, or use System Health → Start container.'
           : result && result !== 'ok'
             ? result
-            : info?.warning || `Copy host ${btn.label} login into this project`;
+            : info?.warning || (btn.id === 'gh'
+              ? 'Copy host GitHub login and configure git credentials in this project'
+              : `Copy host ${btn.label} login into this project`);
         return (
           <button
             key={btn.id}

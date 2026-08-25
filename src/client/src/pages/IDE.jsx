@@ -31,7 +31,6 @@ const STORAGE_KEYS = {
   RIGHT_PANEL_WIDTH: 'ide-right-panel-width',
   LEFT_PANEL_COLLAPSED: 'ide-left-collapsed',
   RIGHT_PANEL_COLLAPSED: 'ide-right-collapsed',
-  FORCE_MOBILE_LAYOUT: 'ide-force-mobile-layout',
 };
 
 function useIsMobileLayout() {
@@ -152,10 +151,7 @@ function WorkspaceProjectsList({ repos, currentBranch, onSelectRepo, onRepoActio
 export default function IDE() {
   const { projects, getProject, getGlobalRules, notify } = useProjects();
   const viewportIsMobile = useIsMobileLayout();
-  const [forceMobileLayout, setForceMobileLayout] = useState(() => {
-    return localStorage.getItem(STORAGE_KEYS.FORCE_MOBILE_LAYOUT) === 'true';
-  });
-  const isMobileLayout = viewportIsMobile || forceMobileLayout;
+  const isMobileLayout = viewportIsMobile;
   // Layout state (with persistence)
   const [leftPanelWidth, setLeftPanelWidth] = useState(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.LEFT_PANEL_WIDTH);
@@ -272,10 +268,6 @@ export default function IDE() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.RIGHT_PANEL_COLLAPSED, rightPanelCollapsed.toString());
   }, [rightPanelCollapsed]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.FORCE_MOBILE_LAYOUT, forceMobileLayout.toString());
-  }, [forceMobileLayout]);
 
   useEffect(() => {
     localStorage.setItem('agent-mode', agentMode);
@@ -610,8 +602,6 @@ export default function IDE() {
         onModeChange={setAgentMode}
         selectedTool={selectedTool}
         onToolChange={setSelectedTool}
-        forceMobileLayout={forceMobileLayout}
-        onForceMobileLayoutChange={setForceMobileLayout}
         onProjectUpdated={(project) => setSelectedProject(project)}
         projects={projects}
         notificationSlot={

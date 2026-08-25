@@ -1142,9 +1142,46 @@ function bucketItems(bucket, stripLabel) {
     const norm = text.toLowerCase();
     if (!text || seen.has(norm)) continue;
     seen.add(norm);
-    out.push({ id: it.id, text, status: it.status });
+    out.push({ id: it.id, text, status: it.status, detail: it.detail || '' });
   }
   return out;
+}
+
+function pickLiveNarrative(phases = []) {
+  const working = phases.find((phase) => phase.status === 'working');
+  const ordered = working ? [working, ...phases.filter((phase) => phase !== working)] : [...phases].reverse();
+  for (const phase of ordered) {
+    const items = phase.items || [];
+    const active = [...items].reverse().find((item) => item.status === 'active' && item.detail);
+    if (active?.detail) return active.detail;
+  }
+  for (const phase of ordered) {
+    const withDetail = [...(phase.items || [])].reverse().find((item) => String(item.detail || '').length > 40);
+    if (withDetail?.detail) return withDetail.detail;
+  }
+  return '';
+}
+
+function initialRunPrompt(run) {
+  const tasks = run?.tasks || [];
+  const first = tasks.find((task) => task.taskType !== 'consolidation' && task.taskType !== 'validation') || tasks[0];
+  return run?.data?.initialPrompt || first?.sentPrompt || first?.prompt || '';
+}
+
+function attachOrchestratorContext(messages = []) {
+  return messages.map((message, index) => {
+    if (message.role !== 'user' || message.metadata?.orchestratorPrompt) return message;
+    const following = messages.slice(index + 1).find((entry) => entry.role === 'agent' && entry.metadata?.orchestratorPrompt);
+    if (!following) return message;
+    return {
+      ...message,
+      metadata: {
+        ...(message.metadata || {}),
+        orchestratorPrompt: following.metadata.orchestratorPrompt,
+        orchestratorRunId: message.metadata?.orchestratorRunId || following.metadata.orchestratorRunId,
+      },
+    };
+  });
 }
 
 function PhaseItemIcon({ status }) {
@@ -1203,6 +1240,7 @@ function PhaseGroup({ phase, index, defaultOpen }) {
 }
 
 function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, projectId, sessionId, runStatus = null }) {
+  const [showPrompt, setShowPrompt] = useState(false);
   const tasks = run?.tasks || [];
   const planItems = bucketItems(phaseProgress['_general']);
   const phases = [];
@@ -1218,6 +1256,8 @@ function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, project
   }
 
   const hasAny = !!run || phases.some((p) => p.items.length);
+  const liveNarrative = pickLiveNarrative(phases);
+  const sentPrompt = initialRunPrompt(run);
   if (!hasAny) return null;
 
   const handleStop = () => {
@@ -1254,6 +1294,29 @@ function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, project
           />
         ))}
       </div>
+      {liveNarrative && (
+        <div className="mt-2.5 rounded-md border border-primary-500/20 bg-primary-500/5 px-2.5 py-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-primary-300">Now</div>
+          <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-surface-200">{liveNarrative}</p>
+        </div>
+      )}
+      {sentPrompt && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setShowPrompt((value) => !value)}
+            className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300"
+          >
+            {showPrompt ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            Prompt sent to agent
+          </button>
+          {showPrompt && (
+            <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded border border-surface-700/30 bg-surface-950/70 p-2 text-[11px] font-mono leading-relaxed text-surface-400">
+              {sentPrompt}
+            </pre>
+          )}
+        </div>
+      )}
       {changedFiles.length > 0 && (
         <div className="mt-2 border-t border-surface-700/35 pt-2">
           <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">Files edited in this session</div>
@@ -1894,7 +1957,7 @@ function ChatSessionContent({
         lines[lines.length - 1] = { ...last, status: status || last.status };
       } else {
         if (status === 'active') lines = lines.map(it => (it.status === 'active' ? { ...it, status: 'done' } : it));
-        lines.push({ id: `${key}-l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text: clean, status });
+        lines.push({ id: `${key}-l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text: clean, status, detail: clean.length > 80 ? clean : '' });
         lines = lines.slice(-60);
       }
       return { ...prev, [key]: { ...bucket, lines } };
@@ -2390,6 +2453,7 @@ function ChatSessionContent({
         case 'chat-message':
           if (msg.message?.sessionId === sessionId && msg.message?.id) {
             knownIdsRef.current.add(msg.message.id);
+            const isUpdate = messagesRef.current.some(m => m.id === msg.message.id);
             if (msg.message.role === 'agent' || msg.message.role === 'error') {
               setStreamingMessage(null);
               setLiveProgressEntries([]);
@@ -2401,7 +2465,7 @@ function ChatSessionContent({
               setAgentBusy(false);
               setRunStatus(null);
               setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
-            } else if (msg.message.role === 'user') {
+            } else if (msg.message.role === 'user' && !isUpdate) {
               setLiveProgressEntries([]);
               setLiveChangedFiles([]);
             }
@@ -3040,7 +3104,7 @@ function ChatSessionContent({
   );
 
   const filteredMessages = useMemo(() => {
-    return sortedMessages.filter(m => m.role !== 'progress');
+    return attachOrchestratorContext(sortedMessages.filter(m => m.role !== 'progress'));
   }, [sortedMessages]);
 
   useEffect(() => {

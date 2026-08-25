@@ -1,6 +1,13 @@
-import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText } from 'lucide-react';
+import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText, ListTree } from 'lucide-react';
 import { useEffect, useState, useMemo } from 'react';
-import { parseMarkdownBlocks, blockNeedsTrailSpace } from '../utils/chatMarkdown.js';
+import {
+  parseMarkdownBlocks,
+  blockNeedsTrailSpace,
+  listItemSpacingClass,
+  parseInlineTokens,
+  shouldCollapseChatText,
+  previewChatText,
+} from '../utils/chatMarkdown.js';
 
 const ROLE_STYLES = {
   user: { align: 'justify-end', bubble: 'bg-blue-600/15 border-blue-500/20', icon: User, label: 'You' },
@@ -112,6 +119,70 @@ function MessageChecks({ checks }) {
   );
 }
 
+function promptForTask(task) {
+  return task?.sentPrompt || task?.prompt || '';
+}
+
+function OrchestratorTracePanel({ loading, trace }) {
+  if (loading) {
+    return (
+      <div className="mt-2 flex items-center gap-2 rounded border border-surface-700/30 bg-surface-950/40 p-2 text-[11px] text-surface-400">
+        <Loader size={12} className="animate-spin" />
+        Loading interaction trace…
+      </div>
+    );
+  }
+  if (!trace?.run) {
+    return <div className="mt-2 text-[11px] text-surface-500">No orchestrator trace is available for this reply.</div>;
+  }
+
+  const tasks = Array.isArray(trace.tasks) ? trace.tasks : [];
+  const events = Array.isArray(trace.events) ? trace.events : [];
+
+  return (
+    <div className="mt-2 max-h-96 overflow-y-auto rounded-md border border-surface-700/40 bg-surface-950/50 p-2">
+      <div className="mb-2 text-[11px] text-surface-400">
+        {trace.run.status} · {tasks.length} task{tasks.length === 1 ? '' : 's'} · {events.length} event{events.length === 1 ? '' : 's'}
+      </div>
+      {tasks.map((task, index) => (
+        <details key={task.id || index} className="mb-1.5 rounded border border-surface-700/30 bg-surface-900/40 p-2" open={index === 0}>
+          <summary className="cursor-pointer text-[11px] text-surface-200">
+            {task.title || `Task ${index + 1}`}
+            <span className="ml-1.5 text-surface-500">{task.status}</span>
+          </summary>
+          {promptForTask(task) && (
+            <div className="mt-2">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">Sent to coding agent</div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-[11px] font-mono leading-relaxed text-surface-400">{promptForTask(task)}</pre>
+            </div>
+          )}
+          {task.result && (
+            <div className="mt-2">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">Agent result</div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-[11px] font-mono leading-relaxed text-surface-400">{task.result}</pre>
+            </div>
+          )}
+          {task.error && <div className="mt-2 text-[11px] text-red-300">{task.error}</div>}
+        </details>
+      ))}
+      {events.length > 0 && (
+        <details className="rounded border border-surface-700/30 bg-surface-900/40 p-2">
+          <summary className="cursor-pointer text-[11px] text-surface-200">Event timeline ({events.length})</summary>
+          <div className="mt-2 space-y-1">
+            {events.map((event) => (
+              <div key={event.id} className="text-[11px] leading-snug text-surface-400">
+                <span className="font-mono text-[10px] text-surface-500">{event.eventType}</span>
+                <span className="mx-1 text-surface-600">·</span>
+                {event.message}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 /**
  * Lightweight markdown renderer — handles the common formatting cases
  * without pulling in a heavy library.
@@ -141,47 +212,32 @@ function renderMarkdown(text) {
     .replace(/<li>([\s\S]*?)<\/li>/gi, '- $1')
     .replace(/<\/?[uo]l>/gi, '')
     .replace(/<h([1-6])>([\s\S]*?)<\/h\1>/gi, (_, level, content) => '#'.repeat(parseInt(level)) + ' ' + content)
+    .replace(/<a\s[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
     // Catch any remaining HTML tags
     .replace(/<\/?[a-z][a-z0-9]*[^>]*>/gi, '');
 
-  const processInline = (line) => {
-    // Bold: **text** or __text__
-    // Inline code: `text`
-    // Links: [text](url)
-    const parts = [];
-    let remaining = line;
-    let key = 0;
-
-    while (remaining.length > 0) {
-      // Code inline: `...`
-      const codeMatch = remaining.match(/^(.*?)`([^`]+)`(.*)$/);
-      if (codeMatch) {
-        // Render the text BEFORE the code span with the same bold-aware inline
-        // parser (recursion terminates: codeMatch[1] has no backtick, so it
-        // won't re-enter this branch). Using a string-returning helper here used
-        // to leak literal "<b>…</b>" into the DOM (React escapes the string).
-        if (codeMatch[1]) parts.push(<span key={key++}>{processInline(codeMatch[1])}</span>);
-        parts.push(<code key={key++} className="px-1 py-0.5 rounded bg-surface-700/60 text-primary-300 text-[12px] font-mono">{codeMatch[2]}</code>);
-        remaining = codeMatch[3];
-        continue;
-      }
-
-      // Bold: **...**
-      const boldMatch = remaining.match(/^(.*?)\*\*(.+?)\*\*(.*)$/);
-      if (boldMatch) {
-        if (boldMatch[1]) parts.push(<span key={key++}>{boldMatch[1]}</span>);
-        parts.push(<strong key={key++} className="font-semibold text-surface-100">{boldMatch[2]}</strong>);
-        remaining = boldMatch[3];
-        continue;
-      }
-
-      // No more matches
-      parts.push(<span key={key++}>{remaining}</span>);
-      break;
+  const processInline = (line) => parseInlineTokens(line).map((token, key) => {
+    if (token.type === 'code') {
+      return <code key={key} className="px-1 py-0.5 rounded bg-surface-700/60 text-primary-300 text-[12px] font-mono">{token.value}</code>;
     }
-
-    return parts;
-  };
+    if (token.type === 'bold') {
+      return <strong key={key} className="font-semibold text-surface-100">{token.value}</strong>;
+    }
+    if (token.type === 'link') {
+      return (
+        <a
+          key={key}
+          href={token.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-primary-300 underline decoration-primary-500/40 underline-offset-2 hover:text-primary-200"
+        >
+          {token.label}
+        </a>
+      );
+    }
+    return <span key={key}>{token.value}</span>;
+  });
 
   const listRow = (key, indent, marker, body, extraClass = '') => (
     <div key={key} className={`flex items-start gap-1.5 leading-snug ${extraClass}`.trim()} style={{ paddingLeft: `${4 + indent * 16}px` }}>
@@ -192,7 +248,8 @@ function renderMarkdown(text) {
 
   const blocks = parseMarkdownBlocks(cleaned);
   return blocks.map((block, i) => {
-    const trail = blockNeedsTrailSpace(blocks, i) ? 'mb-2.5' : '';
+    const isList = block.type === 'bullet' || block.type === 'number' || block.type === 'check';
+    const trail = isList ? listItemSpacingClass(blocks, i) : (blockNeedsTrailSpace(blocks, i) ? 'mb-2.5' : '');
     const headingMt = i === 0 ? 'mt-0' : 'mt-3';
     if (block.type === 'code') {
       return (
@@ -288,6 +345,32 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const [showDetail, setShowDetail] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
   const [showLogInput, setShowLogInput] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [showTrace, setShowTrace] = useState(false);
+  const [trace, setTrace] = useState(undefined);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const orchestratorRunId = message.metadata?.orchestratorRunId;
+  const orchestratorPrompt = message.metadata?.orchestratorPrompt;
+
+  useEffect(() => {
+    setExpanded(false);
+    setShowPrompt(false);
+    setShowTrace(false);
+    setTrace(undefined);
+  }, [message.id]);
+
+  useEffect(() => {
+    if (!showTrace || trace !== undefined || !orchestratorRunId) return undefined;
+    let cancelled = false;
+    setTraceLoading(true);
+    fetch(`/api/orchestrator/runs/${orchestratorRunId}`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => { if (!cancelled) setTrace(data || null); })
+      .catch(() => { if (!cancelled) setTrace(null); })
+      .finally(() => { if (!cancelled) setTraceLoading(false); });
+    return () => { cancelled = true; };
+  }, [showTrace, trace, orchestratorRunId]);
   const shellPrompt = message.metadata?.shell?.prompt;
   const isShellMessage = message.metadata?.channel === 'shell' || Boolean(message.metadata?.shell);
   const style = isShellMessage && message.role !== 'user'
@@ -331,9 +414,11 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
 
   const typedContent = useTypedContent(message.content, animateContent && (message.role === 'agent' || message.role === 'error'));
   const isTyping = animateContent && typedContent.length < String(message.content || '').length;
+  const canCollapse = message.role === 'user' && shouldCollapseChatText(message.content);
+  const displayText = canCollapse && !expanded ? previewChatText(typedContent) : typedContent;
 
   // Memoize markdown rendering
-  const renderedContent = useMemo(() => renderMarkdown(typedContent), [typedContent]);
+  const renderedContent = useMemo(() => renderMarkdown(displayText), [displayText]);
 
   const handleApprovePlan = () => {
     if (wsRef?.current?.readyState === WebSocket.OPEN) {
@@ -388,7 +473,34 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
           )}
           {renderedContent}
           {isTyping && <span className="ml-0.5 inline-block h-4 w-1 translate-y-0.5 animate-pulse bg-surface-300" />}
+          {canCollapse && (
+            <button
+              type="button"
+              onClick={() => setExpanded((value) => !value)}
+              className="mt-1.5 text-[11px] text-primary-300 hover:text-primary-200"
+            >
+              {expanded ? 'Show less' : 'Show more'}
+            </button>
+          )}
         </div>
+
+        {orchestratorPrompt && (
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={() => setShowPrompt((value) => !value)}
+              className="flex items-center gap-1 text-[11px] text-surface-500 hover:text-surface-300 transition-colors"
+            >
+              {showPrompt ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+              Prompt sent to agent
+            </button>
+            {showPrompt && (
+              <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded border border-surface-700/20 bg-surface-950/80 p-2 text-[11px] font-mono leading-relaxed text-surface-400">
+                {orchestratorPrompt}
+              </pre>
+            )}
+          </div>
+        )}
 
         {shellPrompt?.responses?.length > 0 && (
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -600,7 +712,21 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
             >
               Retry
             </button>
+            {orchestratorRunId && (
+              <button
+                type="button"
+                onClick={() => setShowTrace((value) => !value)}
+                className="flex items-center gap-1 px-2 py-1 rounded border border-surface-600/60 text-[11px] text-surface-300 hover:text-surface-100 hover:border-primary-500/50 hover:bg-primary-500/10 transition-colors"
+                title="Show orchestrator and coding-agent interaction"
+              >
+                <ListTree size={11} />
+                Trace
+              </button>
+            )}
           </div>
+        )}
+        {showTrace && orchestratorRunId && (
+          <OrchestratorTracePanel loading={traceLoading} trace={trace} />
         )}
       </div>
     </div>

@@ -65,6 +65,48 @@ const WRANGLER_MISSING =
 const WRANGLER_EXPIRED =
   'Host Wrangler OAuth expired and could not be refreshed. Run wrangler login on the host (or Login to Cloudflare in this shell), then click Wrangler again.';
 
+const GH_HOME = '/home/dev';
+const GH_GITCONFIG = `${GH_HOME}/.gitconfig`;
+const GH_CONFIG_DIR = `${GH_HOME}/.config/gh`;
+const GH_CREDENTIAL_HOSTS = ['github.com', 'gist.github.com'];
+
+/**
+ * Configure git so HTTPS GitHub remotes use the copied `gh` token.
+ *
+ * Project containers are `USER dev`. `docker exec` without `-u root` is
+ * already that user, so `su`/`chown` fail and a swallowed `gh auth setup-git`
+ * never writes `~/.gitconfig`. Write the credential helper directly.
+ */
+export function ghGitCredentialScript() {
+  const hostLoop = GH_CREDENTIAL_HOSTS.map((host) => {
+    const key = `credential.https://${host}.helper`;
+    return [
+      `git config --file ${GH_GITCONFIG} --unset-all ${key} || true`,
+      `git config --file ${GH_GITCONFIG} ${key} ""`,
+      `git config --file ${GH_GITCONFIG} --add ${key} "!$GH_BIN auth git-credential"`,
+    ].join('\n');
+  }).join('\n');
+
+  return [
+    `export HOME=${GH_HOME}`,
+    `export GH_CONFIG_DIR=${GH_CONFIG_DIR}`,
+    `export XDG_CONFIG_HOME=${GH_HOME}/.config`,
+    'GH_BIN="$(command -v gh || echo /usr/bin/gh)"',
+    hostLoop,
+    'gh auth setup-git || true',
+    `chown dev:dev ${GH_GITCONFIG} 2>/dev/null || true`,
+  ].join('\n');
+}
+
+/**
+ * Same setup, encoded so `execInContainerAsync` quote-escaping cannot
+ * drop `!` or nested quotes.
+ */
+export function buildGhGitCredentialCommand() {
+  const b64 = Buffer.from(ghGitCredentialScript(), 'utf8').toString('base64');
+  return `echo '${b64}' | base64 -d | bash`;
+}
+
 function tomlQuoted(text, key) {
   const match = String(text || '').match(new RegExp(`${key}\\s*=\\s*"(\\S+)"`));
   return match && match[1] && match[1] !== 'null' ? match[1] : '';
@@ -370,10 +412,7 @@ export async function importHostAuth({
       `chown -R dev:dev ${unique.join(' ')} 2>/dev/null || true`,
     );
     if (imported.some((item) => item.id === 'gh' && item.ok)) {
-      await execFn(
-        containerName,
-        'su -s /bin/bash dev -c "export HOME=/home/dev; gh auth setup-git >/dev/null 2>&1 || true"',
-      );
+      await execFn(containerName, buildGhGitCredentialCommand());
     }
   }
 

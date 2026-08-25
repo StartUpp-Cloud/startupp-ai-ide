@@ -32,6 +32,7 @@ import {
   normalizeRunPolicy,
 } from './runPolicy.js';
 import { formatGoalContract, normalizeGoalContract } from './goalContract.js';
+import { deriveTaskTitle, heuristicDecomposeGoal } from './orchestratorTaskTitles.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_RUN_RETRIES = 2; // Run-level auto-retries after all task attempts are exhausted
@@ -380,7 +381,7 @@ class AgentOrchestrator extends EventEmitter {
         sessionId: run.sessionId,
         role: 'agent',
         content: userMessage,
-        metadata: { orchestratorRunId: run.id, orchestratorFailure: true, rawError: err.message },
+        metadata: { orchestratorRunId: run.id, orchestratorFailure: true, rawError: err.message, orchestratorPrompt: run.data?.initialPrompt || '' },
       });
       broadcastFn?.({ type: 'chat-message', message: msg });
     }
@@ -698,12 +699,13 @@ ${task.prompt}`;
 
       // Set up isolated worktrees for any parallel sub-tasks (best-effort; any
       // failure falls back to safe serial execution in the base workspace).
-      await this._setupParallelWorktrees(run, tasks);
+      await       this._setupParallelWorktrees(run, tasks);
       for (const task of tasks) this._saveTask(task);
 
       run.phase = 'executing';
       run.updatedAt = nowIso();
-      run.data = { ...(run.data || {}), taskCount: tasks.length + completed.length, runAttempt };
+      const initialTask = tasks.find((t) => t.taskType !== 'consolidation' && t.taskType !== 'validation') || tasks[0];
+      run.data = { ...(run.data || {}), taskCount: tasks.length + completed.length, runAttempt, initialPrompt: initialTask?.prompt || run.data?.initialPrompt || '' };
       this._saveRun(run);
       this._emitRun(run, broadcastFn);
       if (runAttempt === 0 && !resuming) {
@@ -800,6 +802,7 @@ ${task.prompt}`;
             orchestratorRunId: run.id,
             orchestratorTaskId: failed.task.id,
             orchestratorFailure: true,
+            orchestratorPrompt: run.data?.initialPrompt || failed.task.prompt || '',
             rawError: run.error,
             ...(failed.result.changedFiles?.length > 0 ? { changedFiles: failed.result.changedFiles } : {}),
           },
@@ -827,6 +830,7 @@ ${task.prompt}`;
         metadata: {
           orchestratorRunId: run.id,
           tool,
+          orchestratorPrompt: run.data?.initialPrompt || '',
           tasks: completed.map(({ task }) => ({ id: task.id, title: task.title, status: task.status })),
           ...(changedFiles.length > 0 ? { changedFiles } : {}),
         },
@@ -859,7 +863,7 @@ ${task.prompt}`;
         ? this._buildRunRetryTaskPrompt(run, runRetryContext)
         : this._buildTaskPrompt(run, run.goal, []);
       return [this._createTask(run, {
-        title: executeReviewedPlan ? 'Execute approved plan' : `Retry user request (attempt ${runRetryContext.attempt + 1})`,
+        title: executeReviewedPlan ? 'Execute approved plan' : `Retry: ${deriveTaskTitle(run.goal, 0)}`,
         prompt,
         taskType: executeReviewedPlan ? 'implementation' : 'general',
       })];
@@ -870,10 +874,10 @@ ${task.prompt}`;
     // Decomposition is DETERMINISTIC (no LLM in the orchestrator — all content
     // generation stays in the CLI agents). Single-step goals fall back to one
     // task; the CLI agent is already instructed to spin its own sub-agents.
-    const subtasks = this._heuristicDecompose(run);
+    const subtasks = heuristicDecomposeGoal(run.goal);
     if (!subtasks || subtasks.length <= 1) {
       return [this._createTask(run, {
-        title: 'Complete user request',
+        title: deriveTaskTitle(run.goal, 0),
         prompt: this._buildTaskPrompt(run, run.goal, []),
         taskType: 'general',
       })];
@@ -902,39 +906,6 @@ ${task.prompt}`;
     validate.data = { ...validate.data, phase: 'validate', usePriorResults: true };
 
     return [...tasks, consolidate, validate];
-  }
-
-  /**
-   * Deterministically split a goal into sub-tasks from the user's OWN explicit
-   * structure (numbered or bulleted steps). No LLM — content generation stays in
-   * the CLI agents. Returns null for non-enumerated goals (→ single task).
-   * Sub-tasks run sequentially by default (they share one workspace); the
-   * consolidate phase reconciles them.
-   */
-  _heuristicDecompose(run) {
-    const goal = String(run.goal || '');
-    const itemStart = /^\s*(?:\d+[.)]|[-*•])\s+(.+)$/;
-    const items = [];
-    let current = null;
-    for (const line of goal.split('\n')) {
-      const m = line.match(itemStart);
-      if (m) {
-        if (current) items.push(current);
-        current = m[1].trim();
-      } else if (current && line.trim()) {
-        current += ' ' + line.trim();
-      }
-    }
-    if (current) items.push(current);
-
-    const cleaned = items.map((s) => s.trim()).filter((s) => s.length > 3);
-    if (cleaned.length < 2) return null;
-
-    return cleaned.slice(0, 5).map((item, i, arr) => ({
-      title: `Part ${i + 1}`,
-      parallelSafe: false,
-      prompt: `This is part ${i + 1} of ${arr.length} of the user's overall request. Focus ONLY on your part; later phases consolidate and validate all parts together.\n\nOVERALL REQUEST:\n${goal}\n\nYOUR PART:\n${item}`,
-    }));
   }
 
   _orchestratorProject(run) {
@@ -1246,6 +1217,8 @@ ${run.goal}`;
       const prompt = attempt === 1
         ? task.prompt
         : await this._buildRetryPrompt(run, task, lastResult);
+      task.data = { ...(task.data || {}), sentPrompt: prompt };
+      this._saveTask(task);
 
       const result = await agentGateway.handleTask({
         projectId: run.projectId,
@@ -1536,7 +1509,7 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
       sessionId: run.sessionId,
       role: 'agent',
       content,
-      metadata: { orchestratorRunId: run.id, stopped: true, changedFiles },
+      metadata: { orchestratorRunId: run.id, stopped: true, changedFiles, orchestratorPrompt: run.data?.initialPrompt || '' },
     });
     broadcastFn?.({ type: 'chat-message', message: msg });
   }
@@ -1648,7 +1621,7 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
         sessionId: run.sessionId,
         role: 'agent',
         content: error,
-        metadata: { orchestratorRunId: run.id, interrupted: true, recoveryPending: true },
+        metadata: { orchestratorRunId: run.id, interrupted: true, recoveryPending: true, orchestratorPrompt: run.data?.initialPrompt || '' },
       });
       broadcastFn?.({ type: 'chat-message', message: msg });
       run.data = { ...run.data, reliabilityNoticeCreated: true };

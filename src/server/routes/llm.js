@@ -506,6 +506,7 @@ Respond with valid JSON only. No markdown, no wrapping, no thinking tags. Output
 - Order steps logically — later steps can depend on earlier ones.
 - Set "requiresApproval": true for steps that involve destructive operations, deployments, or major architectural changes.
 - Keep prompts focused — one clear task per step. Each prompt should be 100-300 words.
+- Title every step with a short description of the work (for example "Add GitHub link rendering"), never "Step 1" or "Part 2".
 - Include context from previous steps in later prompts when needed (e.g., "In the previous step we created X, now...").
 - Reference project rules so the AI assistant follows them.
 - Aim for 3-8 steps. Split large tasks, but don't over-fragment.

@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   HOST_AUTH_TOOLS,
+  buildGhGitCredentialCommand,
   buildGhHostsYml,
+  ghGitCredentialScript,
   ghHostsHasFileToken,
   importHostAuth,
   listHostAuthStatus,
@@ -121,8 +123,20 @@ assert.ok(copied.some((c) => c.destPath === '/home/dev/.codex'));
 assert.ok(copied.some((c) => c.destPath === '/home/dev/.config/.wrangler'));
 assert.ok(copied.every((c) => !String(c.localPath).includes('sessions')));
 assert.ok(execs.some((e) => /chown/.test(e.command) && /dev:dev/.test(e.command)));
-assert.ok(execs.some((e) => /gh auth setup-git/.test(e.command)));
+assert.ok(execs.some((e) => e.command === buildGhGitCredentialCommand()));
+assert.ok(!execs.some((e) => /\bsu\b/.test(e.command)), 'project shells already run as dev; su cannot configure git');
 assert.ok(!JSON.stringify(result).includes('gho_TESTONLYTOKEN'));
+
+const ghGitScript = ghGitCredentialScript();
+assert.match(ghGitScript, /HOME=\/home\/dev/);
+assert.match(ghGitScript, /GH_CONFIG_DIR=\/home\/dev\/\.config\/gh/);
+assert.match(ghGitScript, /git config --file \/home\/dev\/\.gitconfig/);
+assert.match(ghGitScript, /credential\.https:\/\/github\.com\.helper/);
+assert.match(ghGitScript, /credential\.https:\/\/gist\.github\.com\.helper/);
+assert.match(ghGitScript, /\$GH_BIN auth git-credential/);
+assert.match(ghGitScript, /gh auth setup-git/);
+assert.doesNotMatch(ghGitScript, /\bsu\b/);
+assert.match(buildGhGitCredentialCommand(), /base64 -d/);
 
 fs.writeFileSync(
   path.join(hostAuthDir, 'wrangler', 'config', 'default.toml'),

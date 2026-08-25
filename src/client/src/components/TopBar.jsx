@@ -6,7 +6,6 @@ import {
   Settings,
   HelpCircle,
   MessageSquare,
-  Smartphone,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import SystemHealth from './SystemHealth';
@@ -25,8 +24,6 @@ export default function TopBar({
   planCurrentStep,
   selectedTool,
   onToolChange,
-  forceMobileLayout = false,
-  onForceMobileLayoutChange,
   onProjectUpdated,
   notificationSlot,
   layoutControls,
@@ -34,7 +31,6 @@ export default function TopBar({
 }) {
   const completedSteps = planSteps ? planSteps.filter((_, i) => i < (planCurrentStep || 0)).length : 0;
   const totalSteps = planSteps?.length || 0;
-  const compactLayout = forceMobileLayout;
   const [showToolMenu, setShowToolMenu] = useState(false);
   const [showLLMSettings, setShowLLMSettings] = useState(false);
   const [showSlack, setShowSlack] = useState(false);
@@ -66,33 +62,33 @@ export default function TopBar({
 
   return (
     <div className="flex-shrink-0">
-      <div className={`flex flex-wrap items-center bg-surface-850 border-b border-surface-700 px-2 py-1.5 gap-1.5 ${compactLayout ? '' : 'sm:flex-nowrap sm:px-3 sm:gap-3'}`}>
+      <div className="flex flex-wrap items-center bg-surface-850 border-b border-surface-700 px-2 py-1.5 gap-1.5 sm:flex-nowrap sm:px-3 sm:gap-3">
 
         {/* Logo + Project */}
-        <div className={`flex items-center gap-2 ${compactLayout ? 'min-w-0' : 'flex-shrink-0'}`}>
+        <div className="flex items-center gap-2 flex-shrink-0">
           <div className="w-6 h-6 rounded-md bg-primary-500 flex items-center justify-center flex-shrink-0">
             <span className="text-surface-950 font-display font-bold text-[10px]">P</span>
           </div>
-          <span className={`text-[11px] font-medium text-surface-400 tracking-tight ${compactLayout ? 'hidden' : 'hidden sm:inline'}`}>IDE</span>
+          <span className="text-[11px] font-medium text-surface-400 tracking-tight hidden sm:inline">IDE</span>
           <VersionBadge />
           {selectedProject && (
             <>
-              <span className={`text-surface-600 text-[11px] ${compactLayout ? 'hidden' : 'hidden sm:inline'}`}>/</span>
-              <span className={`text-[11px] text-surface-200 font-medium truncate ${compactLayout ? 'max-w-[110px]' : 'max-w-[110px] sm:max-w-[160px]'}`}>{selectedProject.name}</span>
+              <span className="text-surface-600 text-[11px] hidden sm:inline">/</span>
+              <span className="text-[11px] text-surface-200 font-medium truncate max-w-[110px] sm:max-w-[160px]">{selectedProject.name}</span>
             </>
           )}
         </div>
 
         {/* Branch info */}
         {currentBranch?.branch && (
-          <div className={`${compactLayout ? 'hidden' : 'hidden sm:flex'} min-w-0 items-center gap-1.5 text-[11px] text-surface-400`}>
+          <div className="hidden sm:flex min-w-0 items-center gap-1.5 text-[11px] text-surface-400">
             <GitBranch className="w-3 h-3" />
             <span className="truncate max-w-[120px]">{currentBranch.branch}</span>
             {currentBranch.hasChanges && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" title="Uncommitted changes" />}
           </div>
         )}
 
-        <div className={`${compactLayout ? 'hidden' : 'hidden sm:block'} w-px h-4 bg-surface-700`} />
+        <div className="hidden sm:block w-px h-4 bg-surface-700" />
 
         {/* Tool selector */}
         <div className="relative" ref={toolMenuRef}>
@@ -138,13 +134,13 @@ export default function TopBar({
           </div>
         )}
 
-        <div className={`${compactLayout ? 'hidden' : 'hidden sm:block'} w-px h-4 bg-surface-700`} />
+        <div className="hidden sm:block w-px h-4 bg-surface-700" />
 
         {selectedProject && (
           <select
             value={selectedProject.stack || 'generic'}
             onChange={(e) => updateProjectStack(e.target.value)}
-            className={`bg-surface-800 border border-surface-700 rounded px-1.5 py-1 text-[11px] text-surface-300 focus:outline-none focus:ring-1 focus:ring-primary-500 ${compactLayout ? 'max-w-[92px]' : ''}`}
+            className="bg-surface-800 border border-surface-700 rounded px-1.5 py-1 text-[11px] text-surface-300 focus:outline-none focus:ring-1 focus:ring-primary-500 max-w-[92px] sm:max-w-none"
             title="Project stack"
           >
             <option value="generic">Generic</option>
@@ -152,24 +148,10 @@ export default function TopBar({
           </select>
         )}
 
-        <div className={`${compactLayout ? 'hidden' : 'hidden sm:block'} w-px h-4 bg-surface-700`} />
-
-        <button
-          onClick={() => onForceMobileLayoutChange?.(!forceMobileLayout)}
-          className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
-            forceMobileLayout
-              ? 'bg-primary-500/15 text-primary-300 ring-1 ring-primary-500/30'
-              : 'text-surface-400 hover:text-surface-200 hover:bg-surface-750'
-          }`}
-          title={forceMobileLayout ? 'Use responsive layout' : 'Force mobile layout'}
-          aria-pressed={forceMobileLayout}
-        >
-          <Smartphone size={12} />
-          <span className={compactLayout ? 'sr-only' : 'hidden sm:inline'}>Mobile</span>
-        </button>
+        <div className="hidden sm:block w-px h-4 bg-surface-700" />
 
         {activeChatSessionName && (
-          <div className={`flex min-w-0 flex-1 items-center gap-1.5 ${compactLayout ? 'max-w-[140px]' : ''}`}>
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 max-w-[140px] sm:max-w-none">
             <MessageSquare size={12} className="flex-shrink-0 text-primary-400/80" />
             <span className="truncate text-[11px] font-medium text-surface-300" title={activeChatSessionName}>
               {activeChatSessionName}

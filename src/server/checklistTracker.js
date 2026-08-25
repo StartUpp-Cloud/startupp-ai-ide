@@ -21,7 +21,9 @@
 const BROADCAST_DEBOUNCE_MS = 350;
 const MAX_STEPS = 40;
 const LABEL_MAX = 96;
-const DETAIL_MAX = 320;
+const DETAIL_MAX = 900;
+const GENERIC_STEP_RE = /^(?:step|part|phase|task)\s*\d+\s*$/i;
+const STEP_PREFIX_RE = /^(?:step|part|phase|task)\s*\d+\s*[:.)\-–—]\s*/i;
 
 // A line that looks like the start of the final structured report — we do NOT
 // want the report itself showing up as a "step"; it becomes the message body.
@@ -83,7 +85,7 @@ class ChecklistTracker {
       const item = json.item;
       if (item.type === 'agent_message' && item.text) {
         if (REPORT_START_RE.test(item.text)) { this._completeActive(st); return; }
-        const label = firstLine(item.text);
+        const label = meaningfulProgressLabel(item.text) || firstLine(item.text);
         this._addStep(st, { label, status: 'active', detail: clip(item.text, DETAIL_MAX) });
         return;
       }
@@ -106,7 +108,7 @@ class ChecklistTracker {
       for (const block of json.message.content) {
         if (block?.type === 'text' && block.text) {
           if (REPORT_START_RE.test(block.text)) { this._completeActive(st); continue; }
-          this._addStep(st, { label: firstLine(block.text), status: 'active', detail: clip(block.text, DETAIL_MAX) });
+          this._addStep(st, { label: meaningfulProgressLabel(block.text) || firstLine(block.text), status: 'active', detail: clip(block.text, DETAIL_MAX) });
         } else if (block?.type === 'tool_use') {
           this._addStep(st, { label: toolUseLabel(block), status: 'active', detail: '', toolId: block.id });
         }
@@ -135,7 +137,7 @@ class ChecklistTracker {
 
   _addStep(st, { label, status, detail, toolId }) {
     const clean = clip(stripMd(label), LABEL_MAX);
-    if (!clean) return;
+    if (!clean || GENERIC_STEP_RE.test(clean)) return;
     // De-dupe consecutive identical labels.
     const last = st.steps[st.steps.length - 1];
     if (last && last.label === clean) {
@@ -231,6 +233,22 @@ function stripMd(s) {
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/`([^`]*)`/g, '$1')
     .trim();
+}
+
+/**
+ * Prefer a descriptive progress label over generic "Step 1" headings.
+ */
+export function meaningfulProgressLabel(text) {
+  const lines = String(text || '').split('\n').map((line) => stripMd(line)).filter(Boolean);
+  for (const line of lines) {
+    if (GENERIC_STEP_RE.test(line)) continue;
+    const withoutPrefix = line.replace(STEP_PREFIX_RE, '').trim();
+    const candidate = withoutPrefix.length >= 8 ? withoutPrefix : line;
+    if (GENERIC_STEP_RE.test(candidate) || candidate.length < 8) continue;
+    const sentence = candidate.match(/^.*?[.!?](\s|$)/);
+    return (sentence ? sentence[0] : candidate).trim();
+  }
+  return '';
 }
 
 function toolUseLabel(block) {

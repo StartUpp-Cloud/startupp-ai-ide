@@ -154,6 +154,23 @@ function dockerSync(docker, args, env) {
   return result.stdout || '';
 }
 
+function isUnsharedBindMountError(error) {
+  const msg = String(error?.message || error || '');
+  return /not shared from the host/i.test(msg) || /ETIMEDOUT/i.test(msg);
+}
+
+function withoutHostAuthMounts(runArgs) {
+  const out = [];
+  for (let i = 0; i < runArgs.length; i += 1) {
+    if (runArgs[i] === '--mount' && String(runArgs[i + 1] || '').includes('/root/host-auth/')) {
+      i += 1;
+      continue;
+    }
+    out.push(runArgs[i]);
+  }
+  return out;
+}
+
 function imageExists(docker, env, image) {
   const out = spawnSync(docker, ['images', '-q', image], {
     cwd: ROOT,
@@ -270,7 +287,16 @@ function runWindowsNative({
   if (dev) runArgs.push('npm', 'run', 'dev');
 
   process.stderr.write(`Starting ${CONTAINER} via docker.exe run…\n`);
-  dockerSync(docker, runArgs, env);
+  try {
+    dockerSync(docker, runArgs, env);
+  } catch (error) {
+    if (!isUnsharedBindMountError(error) || withoutHostAuthMounts(runArgs).length === runArgs.length) {
+      throw error;
+    }
+    process.stderr.write('Wrangler host bind skipped (path is not in Docker Desktop File Sharing).\n');
+    dockerRaw(docker, ['rm', '-f', CONTAINER], { env });
+    dockerSync(docker, withoutHostAuthMounts(runArgs), env);
+  }
   seedHostAuthWhenReady({ docker, env });
 
   if (detach) {
@@ -390,6 +416,8 @@ module.exports = {
   launchIde,
   runWindowsNative,
   runCompose,
+  isUnsharedBindMountError,
+  withoutHostAuthMounts,
 };
 
 if (require.main === module) main();

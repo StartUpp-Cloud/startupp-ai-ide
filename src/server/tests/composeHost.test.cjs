@@ -8,6 +8,8 @@ const {
   startPlan,
   applyStartPlanToComposeArgs,
   assertSafeDockerArgs,
+  isUnsharedBindMountError,
+  withoutHostAuthMounts,
 } = require('../../../scripts/compose-host.cjs');
 
 const env = hostDockerEnv({ PATH: 'C:\\Windows' }, 'win32');
@@ -54,5 +56,19 @@ assert.deepEqual(applyStartPlanToComposeArgs(['stop']), ['stop']);
 assert.deepEqual(applyStartPlanToComposeArgs(['logs', '-f']), ['logs', '-f']);
 assert.doesNotThrow(() => assertSafeDockerArgs(['stop', 'sai-ide']));
 assert.throws(() => assertSafeDockerArgs(['rmi', 'startupp-ai-ide:latest']), /images/i);
+
+assert.equal(
+  isUnsharedBindMountError('the path "C:\\\\Users\\\\me\\\\.wrangler" is not shared from the host'),
+  true,
+);
+assert.equal(isUnsharedBindMountError('busy'), false);
+assert.deepEqual(
+  withoutHostAuthMounts([
+    'run', '-d', '--name', 'sai-ide',
+    '--mount', 'type=bind,src=C:\\Users\\me\\.wrangler,dst=/root/host-auth/wrangler,readonly',
+    '-p', '5173:5173', 'startupp-ai-ide:dev',
+  ]),
+  ['run', '-d', '--name', 'sai-ide', '-p', '5173:5173', 'startupp-ai-ide:dev'],
+);
 
 console.log('composeHost tests passed');
