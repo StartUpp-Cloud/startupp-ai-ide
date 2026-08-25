@@ -1,5 +1,5 @@
 import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText, ListTree } from 'lucide-react';
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   parseMarkdownBlocks,
   blockNeedsTrailSpace,
@@ -8,6 +8,7 @@ import {
   shouldCollapseChatText,
   previewChatText,
 } from '../utils/chatMarkdown.js';
+import { useFileEditor } from '../contexts/FileEditorContext.jsx';
 
 const ROLE_STYLES = {
   user: { align: 'justify-end', bubble: 'bg-blue-600/15 border-blue-500/20', icon: User, label: 'You' },
@@ -186,9 +187,12 @@ function OrchestratorTracePanel({ loading, trace }) {
 /**
  * Lightweight markdown renderer — handles the common formatting cases
  * without pulling in a heavy library.
+ * @param {string} text
+ * @param {{ onOpenWorkspaceFile?: (path: string) => void }} [options]
  */
-function renderMarkdown(text) {
+function renderMarkdown(text, options = {}) {
   if (!text) return null;
+  const { onOpenWorkspaceFile } = options;
 
   // Convert common HTML tags to markdown before processing
   const cleaned = String(text)
@@ -224,6 +228,26 @@ function renderMarkdown(text) {
       return <strong key={key} className="font-semibold text-surface-100">{token.value}</strong>;
     }
     if (token.type === 'link') {
+      if (token.kind === 'file') {
+        if (typeof onOpenWorkspaceFile === 'function') {
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onOpenWorkspaceFile(token.href)}
+              title={token.href}
+              className="inline text-left text-primary-300 underline decoration-primary-500/40 underline-offset-2 hover:text-primary-200"
+            >
+              {token.label}
+            </button>
+          );
+        }
+        return (
+          <span key={key} className="font-mono text-[12px] text-primary-300/90" title={token.href}>
+            {token.label}
+          </span>
+        );
+      }
       return (
         <a
           key={key}
@@ -339,7 +363,8 @@ function useTypedContent(content, enabled) {
   return typedText;
 }
 
-export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry, animateContent = false, threadKind = 'session' }) {
+export default function ChatMessage({ message, wsRef, projectId, containerName = null, onSend, onRetry, animateContent = false, threadKind = 'session' }) {
+  const fileEditor = useFileEditor();
   const [showRaw, setShowRaw] = useState(false);
   const [showChangedFiles, setShowChangedFiles] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
@@ -352,6 +377,11 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const [traceLoading, setTraceLoading] = useState(false);
   const orchestratorRunId = message.metadata?.orchestratorRunId;
   const orchestratorPrompt = message.metadata?.orchestratorPrompt;
+
+  const openWorkspaceFile = useCallback((path) => {
+    if (!containerName || !path || !fileEditor?.openEditor) return;
+    fileEditor.openEditor({ containerName, path });
+  }, [containerName, fileEditor]);
 
   useEffect(() => {
     setExpanded(false);
@@ -418,7 +448,10 @@ export default function ChatMessage({ message, wsRef, projectId, onSend, onRetry
   const displayText = canCollapse && !expanded ? previewChatText(typedContent) : typedContent;
 
   // Memoize markdown rendering
-  const renderedContent = useMemo(() => renderMarkdown(displayText), [displayText]);
+  const renderedContent = useMemo(
+    () => renderMarkdown(displayText, { onOpenWorkspaceFile: openWorkspaceFile }),
+    [displayText, openWorkspaceFile],
+  );
 
   const handleApprovePlan = () => {
     if (wsRef?.current?.readyState === WebSocket.OPEN) {

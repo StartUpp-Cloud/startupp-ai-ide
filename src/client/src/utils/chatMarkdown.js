@@ -64,8 +64,12 @@ export function previewChatText(text, { maxChars = 280, maxLines = 4 } = {}) {
 export function isSafeHttpUrl(url) {
   try {
     const href = String(url || '').trim();
-    const parsed = new URL(/^https?:\/\//i.test(href) ? href : `https://${href}`);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    // Absolute filesystem paths must not be coerced into https://...
+    if (!href || href.startsWith('/') || href.startsWith('\\')) return false;
+    const withScheme = /^https?:\/\//i.test(href) ? href : `https://${href}`;
+    const parsed = new URL(withScheme);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    return Boolean(parsed.hostname);
   } catch {
     return false;
   }
@@ -75,6 +79,41 @@ export function normalizeHttpUrl(url) {
   const href = String(url || '').trim().replace(/[),.;!?]+$/g, '');
   if (!href) return '';
   return /^https?:\/\//i.test(href) ? href : `https://${href}`;
+}
+
+/**
+ * True for absolute container paths the IDE can open in the file editor.
+ * Rejects schemes and path traversal.
+ */
+export function isWorkspaceFilePath(href) {
+  const raw = String(href || '').trim().replace(/[),.;!?]+$/g, '');
+  if (!raw) return false;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return false;
+  if (raw.includes('\0') || /\\/.test(raw)) return false;
+
+  let path = raw;
+  try {
+    path = decodeURIComponent(raw);
+  } catch {
+    path = raw;
+  }
+  path = path.replace(/\\/g, '/');
+  if (!(path === '/workspace' || path === '/home/dev' || path.startsWith('/workspace/') || path.startsWith('/home/dev/'))) {
+    return false;
+  }
+  const segments = path.split('/');
+  if (segments.some((part) => part === '..')) return false;
+  return true;
+}
+
+export function normalizeWorkspaceFilePath(href) {
+  const raw = String(href || '').trim().replace(/[),.;!?]+$/g, '');
+  if (!isWorkspaceFilePath(raw)) return '';
+  try {
+    return decodeURIComponent(raw).replace(/\\/g, '/');
+  } catch {
+    return raw.replace(/\\/g, '/');
+  }
 }
 
 /**
@@ -100,6 +139,11 @@ export function githubLinkLabel(url) {
 
 export function linkLabelForUrl(href, explicitLabel = '') {
   const label = String(explicitLabel || '').trim();
+  if (isWorkspaceFilePath(href)) {
+    if (label) return label;
+    const path = normalizeWorkspaceFilePath(href);
+    return path.split('/').pop() || path;
+  }
   const normalized = normalizeHttpUrl(href);
   const rawLooksLikeUrl = !label
     || label === href
@@ -111,7 +155,8 @@ export function linkLabelForUrl(href, explicitLabel = '') {
 
 /**
  * Turn markdown links and bare URLs (especially GitHub PRs) into tokens.
- * @returns {Array<{ type: 'text'|'code'|'bold'|'link', value?: string, href?: string, label?: string }>}
+ * Workspace file paths become kind:"file" links for the IDE editor.
+ * @returns {Array<{ type: 'text'|'code'|'bold'|'link', value?: string, href?: string, label?: string, kind?: 'http'|'file' }>}
  */
 export function parseInlineTokens(line) {
   const tokens = [];
@@ -126,13 +171,17 @@ export function parseInlineTokens(line) {
       continue;
     }
 
-    const mdLink = remaining.match(/^(.*?)\[([^\]]+)\]\(\s*(https?:\/\/[^)\s]+)\s*\)(.*)$/i);
+    const mdLink = remaining.match(/^(.*?)\[([^\]]+)\]\(\s*([^)\s]+)\s*\)(.*)$/);
     if (mdLink) {
       if (mdLink[1]) tokens.push(...parseInlineTokens(mdLink[1]));
-      if (isSafeHttpUrl(mdLink[3])) {
-        tokens.push({ type: 'link', href: mdLink[3], label: linkLabelForUrl(mdLink[3], mdLink[2]) });
+      const href = String(mdLink[3] || '').trim();
+      if (isWorkspaceFilePath(href)) {
+        const path = normalizeWorkspaceFilePath(href);
+        tokens.push({ type: 'link', kind: 'file', href: path, label: linkLabelForUrl(path, mdLink[2]) });
+      } else if (isSafeHttpUrl(href)) {
+        tokens.push({ type: 'link', kind: 'http', href, label: linkLabelForUrl(href, mdLink[2]) });
       } else {
-        tokens.push({ type: 'text', value: mdLink[2] });
+        tokens.push({ type: 'text', value: `[${mdLink[2]}](${mdLink[3]})` });
       }
       remaining = mdLink[4];
       continue;
@@ -143,7 +192,7 @@ export function parseInlineTokens(line) {
       if (urlMatch[1]) tokens.push(...parseInlineTokens(urlMatch[1]));
       const href = normalizeHttpUrl(urlMatch[2]);
       if (isSafeHttpUrl(href)) {
-        tokens.push({ type: 'link', href, label: linkLabelForUrl(href, urlMatch[2]) });
+        tokens.push({ type: 'link', kind: 'http', href, label: linkLabelForUrl(href, urlMatch[2]) });
       } else {
         tokens.push({ type: 'text', value: urlMatch[2] });
       }

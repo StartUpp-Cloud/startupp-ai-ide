@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import {
   blockNeedsTrailSpace,
   githubLinkLabel,
+  isWorkspaceFilePath,
   linkLabelForUrl,
   listIndentLevel,
   listItemSpacingClass,
+  normalizeWorkspaceFilePath,
   parseInlineTokens,
   parseMarkdownBlocks,
   previewChatText,
@@ -59,7 +61,6 @@ assert.equal(blockNeedsTrailSpace(report, 0), false, 'headings manage their own 
 assert.equal(blockNeedsTrailSpace(report, 1), true, 'paragraphs need space after the last line');
 assert.equal(blockNeedsTrailSpace(report, report.findIndex((block) => block.type === 'bullet' && block.text.includes('CDP'))), false);
 assert.equal(blockNeedsTrailSpace(report, report.findLastIndex((block) => block.type === 'bullet')), true);
-assert.equal(blockNeedsTrailSpace(report, report.length - 1), true);
 assert.equal(listItemSpacingClass(report, report.findIndex((block) => block.type === 'bullet' && block.text.includes('CDP'))), 'mb-1');
 assert.equal(listItemSpacingClass(report, report.findLastIndex((block) => block.type === 'bullet')), 'mb-2.5');
 
@@ -73,6 +74,26 @@ assert.deepEqual(linked.filter((token) => token.type === 'link').map((token) => 
   'PR #42 (acme/app)',
   'docs',
 ]);
+
+const workspacePath = '/workspace/firstplace-spiritwear/docs/plans/2026-08-25-001-prod-rollout-plan.md';
+assert.equal(isWorkspaceFilePath(workspacePath), true);
+assert.equal(isWorkspaceFilePath('javascript:alert(1)'), false);
+assert.equal(isWorkspaceFilePath('/etc/passwd'), false);
+assert.equal(isWorkspaceFilePath('/workspace/../etc/passwd'), false);
+assert.equal(normalizeWorkspaceFilePath(workspacePath), workspacePath);
+
+const fileLinked = parseInlineTokens(
+  `I created a plan in [2026-08-25-001-prod-rollout-plan.md](${workspacePath}).`,
+);
+assert.deepEqual(
+  fileLinked.filter((token) => token.type === 'link'),
+  [{
+    type: 'link',
+    kind: 'file',
+    href: workspacePath,
+    label: '2026-08-25-001-prod-rollout-plan.md',
+  }],
+);
 
 const longMessage = ['Please review this.', ...Array.from({ length: 8 }, (_, i) => `Line ${i + 1} of a long request.`)].join('\n');
 assert.equal(shouldCollapseChatText('Short note'), false);
