@@ -2024,7 +2024,10 @@ function ChatSessionContent({
   }, [isVisible]);
 
   const applyPersistedOrchestratorRuns = useCallback((runs = [], { live } = {}) => {
-    const activeRun = runs.find(run => run && !['completed', 'failed', 'blocked', 'cancelled'].includes(run.status));
+    // Prefer a live running run over a stale waiting-approval row so an orphaned
+    // approval gate cannot freeze the banner after newer work has continued.
+    const activeRun = runs.find(run => run?.status === 'running')
+      || runs.find(run => run && !['completed', 'failed', 'blocked', 'cancelled'].includes(run.status));
     if (activeRun && live !== false) {
       setOrchestratorRun(activeRun);
       setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });

@@ -4,6 +4,7 @@ import {
   classifyRunRisk,
   needsRunApproval,
   normalizeRunPolicy,
+  RUN_POLICY_VERSION,
 } from '../runPolicy.js';
 
 const policy = normalizeRunPolicy({ allowedTools: ['read', 'shell'], filesystemScope: 'project' }, { tool: 'codex', projectRuntime: 'container' });
@@ -11,6 +12,7 @@ assert.deepEqual(policy.allowedTools, ['read', 'shell']);
 assert.equal(policy.containerBoundary, 'project-container');
 assert.equal(policy.approvalMode, 'never');
 assert.equal(policy.autoConfirmCommands, true);
+assert.equal(policy.version, RUN_POLICY_VERSION);
 
 assert.equal(classifyRunRisk('Explain the existing login flow').risk, 'safe');
 assert.equal(classifyRunRisk('Write a production rollout plan and migrate the schema').risk, 'medium');
@@ -28,28 +30,38 @@ assert.equal(
   needsRunApproval({ content: 'Write a production rollout plan', policy }).requiresApproval,
   false,
 );
+
+// Legacy sticky session policy must migrate away from constant approvals.
+const legacySticky = normalizeRunPolicy({
+  version: 1,
+  approvalMode: 'on-risk',
+  autoConfirmCommands: false,
+});
+assert.equal(legacySticky.approvalMode, 'never');
+assert.equal(legacySticky.autoConfirmCommands, true);
 assert.equal(
   needsRunApproval({
-    content: 'deploy to production tonight',
-    policy: { ...policy, approvalMode: 'on-risk', autoConfirmCommands: true },
+    content: 'Please check production build release and the regular dev release cycle',
+    policy: { version: 1, approvalMode: 'on-risk', autoConfirmCommands: false },
   }).requiresApproval,
   false,
-  'on-risk + autoConfirm should not pause high-risk work',
 );
+
 assert.equal(
   needsRunApproval({
     content: 'delete production data',
-    policy: { ...policy, approvalMode: 'on-risk' },
+    policy: { approvalMode: 'on-risk', explicitApprovalPolicy: true, version: RUN_POLICY_VERSION },
   }).requiresApproval,
   true,
-  'on-risk must still pause critical ops',
+  'explicit on-risk must still pause critical ops',
 );
 assert.equal(
   needsRunApproval({
     content: 'deploy to production tonight',
-    policy: { ...policy, approvalMode: 'on-risk', autoConfirmCommands: false },
+    policy: { approvalMode: 'on-risk', explicitApprovalPolicy: true, version: RUN_POLICY_VERSION, autoConfirmCommands: false },
   }).requiresApproval,
-  true,
+  false,
+  'on-risk should not pause non-critical high-risk work',
 );
 
 const approval = buildApprovalRequest({ runId: 'run-1', operation: 'wipe production', policy, risk: 'critical', reasons: ['destructive'] });

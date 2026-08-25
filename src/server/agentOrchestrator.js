@@ -215,6 +215,10 @@ class AgentOrchestrator extends EventEmitter {
   }
 
   async startRun({ projectId, sessionId, content, attachments = [], mode = 'agent', tool = 'claude', model = null, effort = null, policy = {}, projectRuntime = 'container', goalContract = {}, broadcastFn, skipUnread = false, executeReviewedPlan = false }) {
+    // Drop orphaned waiting-approval rows from prior process lifetimes so they
+    // cannot freeze the session UI forever (Approve needs an in-memory active run).
+    this._abandonOrphanedApprovals(projectId, sessionId, broadcastFn);
+
     const recoveredContinuation = this._findRecoverableContinuationContext(projectId, sessionId, content);
     const effectivePolicy = normalizeRunPolicy(policy, { tool, projectRuntime });
     const effectiveGoalContract = normalizeGoalContract({ content, ...goalContract });
@@ -297,12 +301,23 @@ class AgentOrchestrator extends EventEmitter {
     return run;
   }
 
-  approveRun(runId, approvalId = null) {
+  approveRun(runId, approvalId = null, broadcastFn = null) {
     const run = this.getRun(runId);
     const pending = run?.data?.pendingApproval;
     if (!run || run.status !== 'waiting-approval' || !pending || (approvalId && pending.id !== approvalId)) return null;
-    const active = this.activeRuns.get(run.id);
-    if (!active) return null;
+    let active = this.activeRuns.get(run.id);
+    if (!active) {
+      // Process restart orphaned the in-memory slot — rebind so Approve still works.
+      active = {
+        aborted: false,
+        broadcastFn: broadcastFn || null,
+        lastActivityAt: Date.now(),
+        lastMeaningfulActivityAt: Date.now(),
+      };
+      this.activeRuns.set(run.id, active);
+    } else if (broadcastFn && !active.broadcastFn) {
+      active.broadcastFn = broadcastFn;
+    }
     const opts = run.data?.executionOptions || {};
     run.status = 'running';
     run.phase = 'planning';
@@ -326,7 +341,7 @@ class AgentOrchestrator extends EventEmitter {
     return run;
   }
 
-  rejectRun(runId, approvalId = null) {
+  rejectRun(runId, approvalId = null, broadcastFn = null) {
     const run = this.getRun(runId);
     const pending = run?.data?.pendingApproval;
     if (!run || run.status !== 'waiting-approval' || !pending || (approvalId && pending.id !== approvalId)) return null;
@@ -347,9 +362,9 @@ class AgentOrchestrator extends EventEmitter {
       detail: 'The developer rejected the pending policy escalation.',
       metadata: { approvalId: pending.id, policy: run.data?.policy || null },
     });
-    const broadcastFn = active?.broadcastFn;
-    this._event(run, null, 'approval-rejected', 'The run was stopped because approval was declined.', { approvalId: pending.id }, broadcastFn, 'warning').catch(() => {});
-    this._emitRun(run, broadcastFn);
+    const emitFn = active?.broadcastFn || broadcastFn || null;
+    this._event(run, null, 'approval-rejected', 'The run was stopped because approval was declined.', { approvalId: pending.id }, emitFn, 'warning').catch(() => {});
+    this._emitRun(run, emitFn);
     this._deactivateRun(run.id);
     return run;
   }
@@ -603,6 +618,8 @@ ${task.prompt}`;
   }
 
   reconcileInterruptedRuns(broadcastFn = null) {
+    this._abandonAllOrphanedApprovals(broadcastFn);
+
     const rows = sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs
       WHERE status IN (${ACTIVE_RUN_STATUS_SQL})
       ORDER BY updated_at DESC`).all(...ACTIVE_RUN_STATUSES);
@@ -619,6 +636,8 @@ ${task.prompt}`;
   }
 
   reconcileSessionRuns(projectId, sessionId, broadcastFn = null) {
+    this._abandonOrphanedApprovals(projectId, sessionId, broadcastFn);
+
     const rows = sqliteStore.db.prepare(`SELECT * FROM orchestrator_runs
       WHERE project_id = ? AND session_id = ? AND status IN (${ACTIVE_RUN_STATUS_SQL})
       ORDER BY updated_at DESC`).all(projectId, sessionId, ...ACTIVE_RUN_STATUSES);
@@ -635,6 +654,72 @@ ${task.prompt}`;
       if (interrupted) reconciled.push(interrupted);
     }
     return reconciled;
+  }
+
+  /**
+   * waiting-approval rows that are not in the live activeRuns map cannot be
+   * approved (pre-fix) and freeze the chat UI forever. Cancel them.
+   */
+  _abandonOrphanedApprovals(projectId, sessionId, broadcastFn = null) {
+    if (!projectId || !sessionId) return;
+    let rows = [];
+    try {
+      rows = sqliteStore.db.prepare(`
+        SELECT * FROM orchestrator_runs
+        WHERE project_id = ? AND session_id = ? AND status = 'waiting-approval'
+        ORDER BY started_at DESC
+      `).all(projectId, sessionId);
+    } catch {
+      return;
+    }
+    for (const row of rows) {
+      this._cancelOrphanedApproval(rowToRun(row), broadcastFn);
+    }
+  }
+
+  _abandonAllOrphanedApprovals(broadcastFn = null) {
+    let rows = [];
+    try {
+      rows = sqliteStore.db.prepare(`
+        SELECT * FROM orchestrator_runs
+        WHERE status = 'waiting-approval'
+        ORDER BY started_at DESC
+      `).all();
+    } catch {
+      return;
+    }
+    for (const row of rows) {
+      this._cancelOrphanedApproval(rowToRun(row), broadcastFn);
+    }
+  }
+
+  _cancelOrphanedApproval(run, broadcastFn = null) {
+    if (!run || this.activeRuns.has(run.id) || run.status !== 'waiting-approval') return;
+    run.status = 'cancelled';
+    run.phase = 'cancelled';
+    run.error = 'Orphaned approval gate cleared after process restart / policy migration.';
+    run.completedAt = nowIso();
+    run.updatedAt = run.completedAt;
+    run.data = {
+      ...(run.data || {}),
+      pendingApproval: null,
+      approval: {
+        status: 'auto-cancelled',
+        reason: 'orphaned-waiting-approval',
+        cancelledAt: run.completedAt,
+      },
+    };
+    this._saveRun(run);
+    this._event(
+      run,
+      null,
+      'approval-auto-cancelled',
+      'Cleared a stale approval gate so the conversation can continue.',
+      null,
+      broadcastFn,
+      'info',
+    ).catch(() => {});
+    this._emitRun(run, broadcastFn);
   }
 
   getRecentSessionRuns(projectId, sessionId, limit = 5, { reconcile = true } = {}) {

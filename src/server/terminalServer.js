@@ -1943,13 +1943,21 @@ class TerminalServer {
   }
 
   async handleRunApproval(ws, { runId, approvalId } = {}, requestId = null) {
-    const run = agentOrchestrator.approveRun(runId, approvalId);
-    this.send(ws, createResponse('run-approval-result', { runId, approved: Boolean(run), run }, { requestId, status: run ? 'ok' : 'error' }));
+    const run = agentOrchestrator.getRun(runId);
+    const broadcastFn = run?.sessionId
+      ? (data) => this.broadcastToChatSession(run.sessionId, data)
+      : (data) => this.send(ws, data);
+    const approved = agentOrchestrator.approveRun(runId, approvalId, broadcastFn);
+    this.send(ws, createResponse('run-approval-result', { runId, approved: Boolean(approved), run: approved }, { requestId, status: approved ? 'ok' : 'error' }));
   }
 
   async handleRunRejection(ws, { runId, approvalId } = {}, requestId = null) {
-    const run = agentOrchestrator.rejectRun(runId, approvalId);
-    this.send(ws, createResponse('run-approval-result', { runId, approved: false, rejected: Boolean(run), run }, { requestId, status: run ? 'ok' : 'error' }));
+    const run = agentOrchestrator.getRun(runId);
+    const broadcastFn = run?.sessionId
+      ? (data) => this.broadcastToChatSession(run.sessionId, data)
+      : (data) => this.send(ws, data);
+    const rejected = agentOrchestrator.rejectRun(runId, approvalId, broadcastFn);
+    this.send(ws, createResponse('run-approval-result', { runId, approved: false, rejected: Boolean(rejected), run: rejected }, { requestId, status: rejected ? 'ok' : 'error' }));
   }
 
   /**
