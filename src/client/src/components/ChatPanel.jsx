@@ -1334,13 +1334,61 @@ function RunProgressTree({ run, phaseProgress, changedFiles = [], wsRef, project
   );
 }
 
+function getRunPendingApproval(run) {
+  return run?.pendingApproval || run?.data?.pendingApproval || null;
+}
+
+function sendRunControlRequest(wsRef, runId, type, payload = {}) {
+  if (!runId || wsRef?.current?.readyState !== WebSocket.OPEN) return false;
+  wsRef.current.send(JSON.stringify(createRequest(type, payload, {
+    requestId: `${type}-${runId}-${Date.now()}`,
+    idempotencyKey: `${type}:${runId}:${payload.approvalId || Date.now()}`,
+  })));
+  return true;
+}
+
+/** Always-visible approval actions — kept out of the collapsed "Ask about this run" rail. */
+function RunPendingApprovalBanner({ run, wsRef }) {
+  const pendingApproval = getRunPendingApproval(run);
+  if (!run?.id || !pendingApproval) return null;
+
+  return (
+    <div className="mx-3 mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[11px] text-amber-100">
+      <div className="flex items-start gap-2">
+        <ShieldCheck size={14} className="mt-0.5 flex-shrink-0 text-amber-300" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-amber-100">Approval needed: {pendingApproval.risk || 'elevated'} risk</div>
+          <div className="mt-1 text-amber-100/75">
+            {(pendingApproval.reasons || []).join('; ') || 'This operation crosses the configured policy boundary.'}
+          </div>
+          <div className="mt-2.5 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => sendRunControlRequest(wsRef, run.id, 'run-approve', { runId: run.id, approvalId: pendingApproval.id })}
+              className="min-h-11 rounded bg-amber-400/25 px-3 text-[11px] font-medium text-amber-50 hover:bg-amber-400/35"
+            >
+              Approve
+            </button>
+            <button
+              type="button"
+              onClick={() => sendRunControlRequest(wsRef, run.id, 'run-reject', { runId: run.id, approvalId: pendingApproval.id })}
+              className="min-h-11 rounded border border-surface-700 px-3 text-[11px] text-surface-300 hover:bg-surface-800"
+            >
+              Reject
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RunObserverRail({ run, wsRef, projectId, sessionId }) {
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [observation, setObservation] = useState(null);
   const [loading, setLoading] = useState(false);
-  const pendingApproval = run?.pendingApproval || run?.data?.pendingApproval;
   const policy = run?.policy || run?.data?.policy;
 
   useEffect(() => {
@@ -1357,14 +1405,7 @@ function RunObserverRail({ run, wsRef, projectId, sessionId }) {
     return () => wsRef.current?.removeEventListener('message', handleMessage);
   }, [open, run?.id, wsRef]);
 
-  const sendRequest = (type, payload) => {
-    if (wsRef?.current?.readyState !== WebSocket.OPEN) return false;
-    wsRef.current.send(JSON.stringify(createRequest(type, payload, {
-      requestId: `${type}-${run.id}-${Date.now()}`,
-      idempotencyKey: `${type}:${run.id}:${payload.approvalId || Date.now()}`,
-    })));
-    return true;
-  };
+  const sendRequest = (type, payload) => sendRunControlRequest(wsRef, run.id, type, payload);
 
   const loadSnapshot = () => {
     setOpen(true);
@@ -1402,16 +1443,6 @@ function RunObserverRail({ run, wsRef, projectId, sessionId }) {
               <span className="inline-flex items-center gap-1 rounded border border-emerald-500/25 bg-emerald-500/5 px-1.5 py-0.5 text-[10px] text-emerald-300"><ShieldCheck size={10} /> {policy.approvalMode || 'on-risk'} approvals</span>
               <span className="rounded border border-surface-700/60 px-1.5 py-0.5 text-[10px] text-surface-400">Files: {policy.filesystemScope || 'project'}</span>
               <span className="rounded border border-surface-700/60 px-1.5 py-0.5 text-[10px] text-surface-400">Network: {policy.networkScope || 'provider-required'}</span>
-            </div>
-          )}
-          {pendingApproval && (
-            <div className="mb-2 rounded border border-amber-500/35 bg-amber-500/10 p-2 text-[11px] text-amber-200">
-              <div className="font-medium">Approval needed: {pendingApproval.risk} risk</div>
-              <div className="mt-1 text-amber-100/75">{(pendingApproval.reasons || []).join('; ') || 'This operation crosses the configured policy boundary.'}</div>
-              <div className="mt-2 flex gap-2">
-                <button type="button" onClick={() => sendRequest('run-approve', { runId: run.id, approvalId: pendingApproval.id })} className="min-h-11 rounded bg-amber-400/20 px-3 text-[11px] font-medium text-amber-100 hover:bg-amber-400/30">Approve</button>
-                <button type="button" onClick={() => sendRequest('run-reject', { runId: run.id, approvalId: pendingApproval.id })} className="min-h-11 rounded border border-surface-700 px-3 text-[11px] text-surface-300 hover:bg-surface-800">Reject</button>
-              </div>
             </div>
           )}
           {observation && (
@@ -2746,6 +2777,26 @@ function ChatSessionContent({
     }
   }, [isVisible, scheduleScrollToBottom]);
 
+  // Shell/Salesforce unmount the chat scroller — snap back to bottom when returning
+  // to Assistant, and when switching session tabs (scroll position is not stored).
+  useEffect(() => {
+    if (!isVisible || !isSelected) return undefined;
+    const channel = contracted ? 'assistant' : chatChannel;
+    if (channel !== 'assistant') return undefined;
+    isNearBottomRef.current = true;
+    return scheduleScrollToBottom();
+  }, [isVisible, isSelected, contracted, chatChannel, scheduleScrollToBottom]);
+
+  // Keep approval / status actions in view when the run starts waiting on the user.
+  useEffect(() => {
+    if (!isVisible) return undefined;
+    const channel = contracted ? 'assistant' : chatChannel;
+    if (channel !== 'assistant') return undefined;
+    if (!getRunPendingApproval(orchestratorRun)) return undefined;
+    isNearBottomRef.current = true;
+    return scheduleScrollToBottom();
+  }, [isVisible, contracted, chatChannel, orchestratorRun?.pendingApproval, orchestratorRun?.data?.pendingApproval, scheduleScrollToBottom]);
+
   useEffect(() => {
     if (!isVisible || loading) return undefined;
     return scheduleScrollToBottom();
@@ -3272,6 +3323,10 @@ function ChatSessionContent({
             sessionId={sessionId}
             runStatus={runStatus}
           />
+        )}
+
+        {!showOnlySessions && orchestratorRun && (
+          <RunPendingApprovalBanner run={orchestratorRun} wsRef={wsRef} />
         )}
 
         {!showOnlySessions && orchestratorRun && (
