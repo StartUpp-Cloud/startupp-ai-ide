@@ -43,23 +43,23 @@
   "author": "StartUpp AI",
   "license": "MIT",
   "dependencies": {
-    "@slack/bolt": "^4.7.0",
+    "@slack/bolt": "^4.7.3",
     "compromise": "^14.15.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "express": "^4.18.2",
+    "express": "^4.22.2",
     "express-async-errors": "^3.1.1",
     "express-rate-limit": "^7.1.5",
     "helmet": "^7.1.0",
     "lowdb": "^7.0.1",
-    "multer": "^2.1.1",
+    "multer": "^2.2.0",
     "natural": "^8.1.1",
     "node-pty": "^1.1.0",
-    "uuid": "^9.0.0",
-    "ws": "^8.20.0"
+    "uuid": "^13.0.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2",
-    "nodemon": "^3.0.2"
+    "concurrently": "^10.0.5",
+    "nodemon": "^3.1.14"
   }
 }
