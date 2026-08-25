@@ -9,6 +9,7 @@ import { findProjectById, updateProject } from "./models/Project.js";
 import { runHostShell } from "./hostShell.js";
 import { execDockerCmd } from "./dockerRoute.js";
 import { copyIntoContainer } from "./dockerCopy.js";
+import { skillMatchesTags } from "./orchestratorContextPack.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1113,14 +1114,16 @@ class SkillManager {
 
   /**
    * Build skill context for a specific task, including selective "reference" files.
-   * Includes everything from buildSkillContext plus reference files that match
-   * the given task tags or file path triggers.
+   * When matchingOnly is true, only skills that match taskTags or filePaths are
+   * included (used by the orchestrator so small-context models are not flooded).
+   * Default behavior still includes every active skill's always-files, then adds
+   * reference files that match tags/triggers.
    *
    * @param {string} projectId - The project ID
-   * @param {object} options - { taskTags: string[], filePaths: string[] }
+   * @param {object} options - { taskTags, filePaths, matchingOnly }
    * @returns {string} Formatted markdown context string
    */
-  buildSkillContextForTask(projectId, { taskTags = [], filePaths = [] } = {}) {
+  buildSkillContextForTask(projectId, { taskTags = [], filePaths = [], matchingOnly = false } = {}) {
     const activeSkills = this.getActiveSkills(projectId);
     if (activeSkills.length === 0) return "";
 
@@ -1128,6 +1131,24 @@ class SkillManager {
     sections.push("## Active Skills\n");
 
     for (const skill of activeSkills) {
+      const matchesTags = skillMatchesTags(skill, taskTags);
+      let matchesFiles = false;
+      if (Array.isArray(skill.triggers) && filePaths.length > 0) {
+        for (const trigger of skill.triggers) {
+          if (!trigger.filePattern) continue;
+          try {
+            const regex = globToRegex(trigger.filePattern);
+            if (filePaths.some((fp) => regex.test(fp))) {
+              matchesFiles = true;
+              break;
+            }
+          } catch {
+            // Skip invalid patterns
+          }
+        }
+      }
+      if (matchingOnly && !matchesTags && !matchesFiles) continue;
+
       const parts = [];
       parts.push(`### ${skill.name}`);
 
@@ -1222,6 +1243,7 @@ class SkillManager {
       sections.push(parts.join("\n"));
     }
 
+    if (sections.length <= 1) return "";
     return sections.join("\n");
   }
 

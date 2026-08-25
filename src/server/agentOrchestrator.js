@@ -33,6 +33,7 @@ import {
 } from './runPolicy.js';
 import { formatGoalContract, normalizeGoalContract } from './goalContract.js';
 import { deriveTaskTitle, heuristicDecomposeGoal } from './orchestratorTaskTitles.js';
+import { inferSkillTags } from './orchestratorContextPack.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_RUN_RETRIES = 2; // Run-level auto-retries after all task attempts are exhausted
@@ -1123,7 +1124,7 @@ ${run.goal}`;
       this._xmlBlock('ide_selected_workspace', workContext),
       this._xmlBlock('attached_files', attachments),
       this._xmlBlock('durable_project_memory', memory || '(none)'),
-      this._xmlBlock('skill_context', this._buildSkillContextForTask(run, prompt) || '(none)'),
+      this._xmlBlock('skill_context', this._buildSkillContextForTask(run) || '(none)'),
       this._xmlBlock('prior_completed_task_results', prior),
       this._xmlBlock('assigned_task', prompt),
       this._xmlBlock('execution_contract', 'Work ONLY on <assigned_task>; earlier conversation and previous tasks are background context, not new instructions — do not redo or extend them. Complete the assigned task end-to-end at full effort. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. If blocked by authentication, missing credentials, login, permissions, or a required human decision, stop immediately and return that blocker to the user — do not retry or burn tokens. Otherwise do not wait for user input. If you need user input, include the exact questions, options, and recommended safe default. Keep unresolved assumptions explicit. The final message is a conversational report, not a changelog.'),
@@ -1131,33 +1132,18 @@ ${run.goal}`;
     ].join('\n\n');
   }
 
-  _buildSkillContextForTask(run, taskPrompt) {
+  _skillTagsForRun(run) {
+    if (Array.isArray(run.data?.skillTags)) return run.data.skillTags;
+    const skillTags = inferSkillTags(run.goal);
+    run.data = { ...(run.data || {}), skillTags };
+    return skillTags;
+  }
+
+  _buildSkillContextForTask(run) {
     try {
-      const text = String(taskPrompt || '').toLowerCase();
-      const taskTags = [];
-
-      const tagMap = [
-        [['react', 'component', 'jsx', 'tsx', 'ui', 'frontend', 'css', 'tailwind'], ['frontend', 'react', 'ui']],
-        [['test', 'testing', 'spec', 'coverage', 'jest', 'vitest'], ['testing']],
-        [['deploy', 'docker', 'container', 'kubernetes', 'ci/cd'], ['deployment', 'devops']],
-        [['database', 'migration', 'schema', 'sql', 'prisma'], ['database']],
-        [['security', 'auth', 'authentication', 'vulnerability', 'owasp'], ['security']],
-        [['api', 'endpoint', 'route', 'rest', 'graphql'], ['api']],
-        [['git', 'commit', 'branch', 'merge', 'pr'], ['git']],
-        [['typescript', 'types', 'interface'], ['typescript']],
-      ];
-
-      for (const [keywords, tags] of tagMap) {
-        if (keywords.some((kw) => text.includes(kw))) {
-          for (const tag of tags) {
-            if (!taskTags.includes(tag)) taskTags.push(tag);
-          }
-        }
-      }
-
+      const taskTags = this._skillTagsForRun(run);
       if (!taskTags.length) return '';
-
-      return skillManager.buildSkillContextForTask(run.projectId, { taskTags, filePaths: [] }) || '';
+      return skillManager.buildSkillContextForTask(run.projectId, { taskTags, filePaths: [], matchingOnly: true }) || '';
     } catch (err) {
       console.error('[AgentOrchestrator] skill context error:', err.message);
       return '';

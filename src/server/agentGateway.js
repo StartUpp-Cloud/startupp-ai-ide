@@ -331,7 +331,7 @@ class AgentGateway extends EventEmitter {
       const isCapable = provider !== 'ollama';
       const effectivePolicy = normalizeRunPolicy(policy, { tool, projectRuntime: policy?.projectRuntime || 'container' });
       const effectiveGoalContract = normalizeGoalContract({ content: fullContent, ...goalContract });
-      const assistantSettings = { model, effort, policy: effectivePolicy, goalContract: effectiveGoalContract };
+      const assistantSettings = { model, effort, policy: effectivePolicy, goalContract: effectiveGoalContract, orchestrated: orchestrated };
       const isOllamaAssistant = ollamaWorkspaceOrchestrator.isOllamaAssistant(tool);
 
       // Auto mode: two-stage draft→finalize pipeline. Intercept before the normal
@@ -3452,6 +3452,8 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     // Skip skills for Ollama models and Aider — Ollama models output raw JSON instead of
     // using tools; Aider doesn't understand Claude Code tool-use skill format at all.
     const isOllamaModel = assistantSettings?.model?.startsWith('ollama/') || tool === 'ollama';
+    const skipSkillPacks = isOllamaModel || tool === 'aider' || assistantSettings?.leanContext || assistantSettings?.orchestrated;
+    const orchestrated = !!assistantSettings?.orchestrated;
 
     // Tool-specific CLAUDE.md instruction
     if (tool === 'claude') {
@@ -3487,11 +3489,11 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     }
 
     const workContext = this._sessionWorkContext(projectId, sessionMeta);
-    if (workContext?.message) parts.push(`\n${workContext.message}`);
+    if (workContext?.message && !orchestrated) parts.push(`\n${workContext.message}`);
 
     // Profile
     const profile = this._getProfileContext();
-    if (profile) parts.push(`\nABOUT THE USER:\n${profile}`);
+    if (profile && !orchestrated) parts.push(`\nABOUT THE USER:\n${profile}`);
 
     // Project rules
     const rules = this._getProjectRules(projectId);
@@ -3502,18 +3504,18 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
     const environments = buildEnvironmentsSummary(projectId);
     if (environments) parts.push(`\n${environments}`);
 
-    // Active skills (skip for Ollama models and Aider — incompatible tool-use
-    // format; skip in leanContext, e.g. the Auto finalizer, which reviews the
-    // actual diff and doesn't need the drafter's skill packs re-sent).
-    if (!isOllamaModel && tool !== 'aider' && !assistantSettings?.leanContext) {
+    // Active skills. Orchestrated child sessions already receive a request-specific
+    // pack in the IDE handoff — do not dump every default-on skill again.
+    if (!skipSkillPacks) {
       const skillContext = skillManager.buildSkillContext(projectId);
       if (skillContext) parts.push(`\n${skillContext}`);
     }
 
     // Quality Lenses — project-type-aware "senior engineer eye" guidance, auto-
     // selected and grounded in the project's real libraries. Skipped in
-    // leanContext (the finalizer gets the RUBRIC form in its prompt instead).
-    if (tool !== 'aider' && !assistantSettings?.leanContext) {
+    // leanContext (the finalizer gets the RUBRIC form in its prompt instead)
+    // and for orchestrated runs (the handoff already carries the selected pack).
+    if (tool !== 'aider' && !assistantSettings?.leanContext && !orchestrated) {
       try {
         const lensGuidance = buildLensGuidance(findProjectById(projectId));
         if (lensGuidance) parts.push(`\n${lensGuidance}`);
@@ -3593,9 +3595,10 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
     // Skip skills for Ollama models and Aider — incompatible tool-use format
     const isOllamaModel = assistantSettings?.model?.startsWith('ollama/') || tool === 'ollama';
+    const skipSkillPacks = isOllamaModel || tool === 'aider' || assistantSettings?.leanContext || assistantSettings?.orchestrated;
 
     // Compute a lightweight skill hash to detect mid-session changes
-    const skillContext = (isOllamaModel || tool === 'aider') ? null : skillManager.buildSkillContext(projectId);
+    const skillContext = skipSkillPacks ? null : skillManager.buildSkillContext(projectId);
     const skillHash = skillContext
       ? String(skillContext.length) + '|' + skillContext.slice(0, 64)
       : '';
@@ -3667,7 +3670,9 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
     // Project memory is soft background context; skip it for leanContext calls
     // (the Auto finalizer) — hard constraints live in project rules, which stay.
-    const memoryContext = assistantSettings?.leanContext ? null : this._buildProjectMemoryContext(projectId, message);
+    const memoryContext = (assistantSettings?.leanContext || assistantSettings?.orchestrated)
+      ? null
+      : this._buildProjectMemoryContext(projectId, message);
     if (memoryContext) {
       fullMessage = `[Project Context — apply these durable project facts, preferences, handoffs, decisions, and prior outcomes. Do not repeat this block back.]\n${memoryContext}\n\n---\n\n${fullMessage}`;
     }
