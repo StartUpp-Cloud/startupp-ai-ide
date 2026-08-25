@@ -2857,7 +2857,10 @@ RULES:
     const hasPlanSignals = mode === 'plan' || /\b(PRD|plan|tasks added|phases?)\b/i.test(assistantContent);
     if (!hasPlanSignals) return null;
 
-    const mdMatches = Array.from(assistantContent.matchAll(/\b([\w./-]+\.md)\b/gi));
+    const mdMatches = [
+      ...assistantContent.matchAll(/\[[^\]]+\]\(\s*([^)\s]+\.md)\s*\)/gi),
+      ...assistantContent.matchAll(/(?:^|[\s("`'])(\/?[\w./-]+\.md)\b/gi),
+    ];
     if (mdMatches.length === 0) return null;
 
     const { default: Project } = await import('./models/Project.js');
@@ -2945,8 +2948,14 @@ RULES:
   }
 
   _isReviewDocPath(relPath) {
-    const fileName = path.basename(relPath || '');
-    return /^prd.*\.md$/i.test(fileName) || /^plan.*\.md$/i.test(fileName);
+    const normalized = String(relPath || '').replace(/\\/g, '/');
+    const fileName = path.basename(normalized);
+    if (!/\.md$/i.test(fileName)) return false;
+    if (/^(prd|plan)/i.test(fileName)) return true;
+    if (/(^|[-_.])(prd|plan)([-_.]|$)/i.test(fileName)) return true;
+    if (/(^|\/)docs\/plans?\//i.test(normalized)) return true;
+    if (/(^|\/)plans?\//i.test(normalized)) return true;
+    return false;
   }
 
   _pickReviewDocPath(matches) {

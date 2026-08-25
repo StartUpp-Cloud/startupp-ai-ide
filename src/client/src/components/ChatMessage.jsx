@@ -1,14 +1,13 @@
 import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText, ListTree } from 'lucide-react';
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import {
-  parseMarkdownBlocks,
-  blockNeedsTrailSpace,
-  listItemSpacingClass,
-  parseInlineTokens,
   shouldCollapseChatText,
   previewChatText,
+  isWorkspaceFilePath,
+  normalizeWorkspaceFilePath,
 } from '../utils/chatMarkdown.js';
 import { useFileEditor } from '../contexts/FileEditorContext.jsx';
+import MarkdownContent from './MarkdownContent.jsx';
 
 const ROLE_STYLES = {
   user: { align: 'justify-end', bubble: 'bg-blue-600/15 border-blue-500/20', icon: User, label: 'You' },
@@ -184,161 +183,6 @@ function OrchestratorTracePanel({ loading, trace }) {
   );
 }
 
-/**
- * Lightweight markdown renderer — handles the common formatting cases
- * without pulling in a heavy library.
- * @param {string} text
- * @param {{ onOpenWorkspaceFile?: (path: string) => void }} [options]
- */
-function renderMarkdown(text, options = {}) {
-  if (!text) return null;
-  const { onOpenWorkspaceFile } = options;
-
-  // Convert common HTML tags to markdown before processing
-  const cleaned = String(text)
-    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
-    .replace(/\x1B[P^_][\s\S]*?\x1B\\/g, '')
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/\x1B[()][A-Za-z0-9]/g, '')
-    .replace(/\x1B[78=><]/g, '')
-    .replace(/\x1B./g, '')
-    .replace(/␛\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/␛[78=><]?/g, '')
-    .replace(/<b>([\s\S]*?)<\/b>/gi, '**$1**')
-    .replace(/<strong>([\s\S]*?)<\/strong>/gi, '**$1**')
-    .replace(/<i>([\s\S]*?)<\/i>/gi, '*$1*')
-    .replace(/<em>([\s\S]*?)<\/em>/gi, '*$1*')
-    .replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>\s*<p>/gi, '\n\n')
-    .replace(/<\/?p>/gi, '')
-    .replace(/<\/?div>/gi, '\n')
-    .replace(/<li>([\s\S]*?)<\/li>/gi, '- $1')
-    .replace(/<\/?[uo]l>/gi, '')
-    .replace(/<h([1-6])>([\s\S]*?)<\/h\1>/gi, (_, level, content) => '#'.repeat(parseInt(level)) + ' ' + content)
-    .replace(/<a\s[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
-    // Catch any remaining HTML tags
-    .replace(/<\/?[a-z][a-z0-9]*[^>]*>/gi, '');
-
-  const processInline = (line) => parseInlineTokens(line).map((token, key) => {
-    if (token.type === 'code') {
-      return <code key={key} className="px-1 py-0.5 rounded bg-surface-700/60 text-primary-300 text-[12px] font-mono">{token.value}</code>;
-    }
-    if (token.type === 'bold') {
-      return <strong key={key} className="font-semibold text-surface-100">{token.value}</strong>;
-    }
-    if (token.type === 'link') {
-      if (token.kind === 'file') {
-        if (typeof onOpenWorkspaceFile === 'function') {
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onOpenWorkspaceFile(token.href)}
-              title={token.href}
-              className="inline text-left text-primary-300 underline decoration-primary-500/40 underline-offset-2 hover:text-primary-200"
-            >
-              {token.label}
-            </button>
-          );
-        }
-        return (
-          <span key={key} className="font-mono text-[12px] text-primary-300/90" title={token.href}>
-            {token.label}
-          </span>
-        );
-      }
-      return (
-        <a
-          key={key}
-          href={token.href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-primary-300 underline decoration-primary-500/40 underline-offset-2 hover:text-primary-200"
-        >
-          {token.label}
-        </a>
-      );
-    }
-    return <span key={key}>{token.value}</span>;
-  });
-
-  const listRow = (key, indent, marker, body, extraClass = '') => (
-    <div key={key} className={`flex items-start gap-1.5 leading-snug ${extraClass}`.trim()} style={{ paddingLeft: `${4 + indent * 16}px` }}>
-      {marker}
-      <span className="min-w-0 flex-1 text-surface-200">{body}</span>
-    </div>
-  );
-
-  const blocks = parseMarkdownBlocks(cleaned);
-  return blocks.map((block, i) => {
-    const isList = block.type === 'bullet' || block.type === 'number' || block.type === 'check';
-    const trail = isList ? listItemSpacingClass(blocks, i) : (blockNeedsTrailSpace(blocks, i) ? 'mb-2.5' : '');
-    const headingMt = i === 0 ? 'mt-0' : 'mt-3';
-    if (block.type === 'code') {
-      return (
-        <pre key={`code-${i}`} className="my-2 p-3 rounded-md bg-surface-950/80 border border-surface-700/30 text-[12px] font-mono text-surface-300 overflow-x-auto">
-          {block.lang && <div className="text-[10px] text-surface-500 mb-1 uppercase">{block.lang}</div>}
-          {block.text}
-        </pre>
-      );
-    }
-    if (block.type === 'gap') return <div key={`gap-${i}`} className="h-1.5" />;
-    if (block.type === 'h4') return <h4 key={i} className={`text-sm font-semibold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h4>;
-    if (block.type === 'h3') return <h3 key={i} className={`text-[15px] font-semibold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h3>;
-    if (block.type === 'h2') return <h2 key={i} className={`text-base font-bold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h2>;
-    if (block.type === 'hr') return <hr key={i} className="border-surface-700/50 my-2" />;
-    if (block.type === 'bullet') {
-      return listRow(i, block.indent, <span className="text-primary-400 mt-0.5 flex-shrink-0">•</span>, processInline(block.text), trail);
-    }
-    if (block.type === 'number') {
-      return listRow(
-        i,
-        block.indent,
-        <span className="w-4 flex-shrink-0 text-right text-[11px] font-mono text-surface-500 mt-0.5">{block.n}.</span>,
-        processInline(block.text),
-        trail,
-      );
-    }
-    if (block.type === 'check') {
-      return listRow(
-        i,
-        block.indent,
-        block.checked
-          ? <CheckCircle size={13} className="text-green-400 mt-0.5 flex-shrink-0" />
-          : <div className="w-[13px] h-[13px] rounded border border-surface-600 mt-0.5 flex-shrink-0" />,
-        <span className={block.checked ? 'text-surface-400 line-through' : undefined}>{processInline(block.text)}</span>,
-        trail,
-      );
-    }
-    if (block.type === 'table') {
-      return (
-        <div key={i} className="my-2 overflow-x-auto rounded-md border border-surface-700/40">
-          <table className="min-w-full text-left text-[12px]">
-            <thead className="bg-surface-900/80 text-surface-300">
-              <tr>
-                {block.headers.map((cell, ci) => (
-                  <th key={ci} className="border-b border-surface-700/40 px-2 py-1 font-semibold">{processInline(cell)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {block.rows.map((row, ri) => (
-                <tr key={ri} className="odd:bg-surface-950/30">
-                  {row.map((cell, ci) => (
-                    <td key={ci} className="border-t border-surface-700/25 px-2 py-0.5 text-surface-200">{processInline(cell)}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      );
-    }
-    return <p key={i} className={`text-surface-200 leading-relaxed ${trail}`.trim()}>{processInline(block.text)}</p>;
-  });
-}
-
 function useTypedContent(content, enabled) {
   const fullText = String(content || '');
   const [typedText, setTypedText] = useState(enabled ? '' : fullText);
@@ -379,9 +223,23 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
   const orchestratorPrompt = message.metadata?.orchestratorPrompt;
 
   const openWorkspaceFile = useCallback((path) => {
-    if (!containerName || !path || !fileEditor?.openEditor) return;
-    fileEditor.openEditor({ containerName, path });
+    const target = normalizeWorkspaceFilePath(path) || String(path || '').trim();
+    if (!target || !fileEditor?.openEditor) return;
+    if (!containerName) {
+      fileEditor.setError?.('Project container is not ready — cannot open this file yet.');
+      return;
+    }
+    fileEditor.openEditor({ containerName, path: target });
   }, [containerName, fileEditor]);
+
+  const resolveReviewDocPath = useCallback((docPath) => {
+    const raw = String(docPath || '').trim().replace(/\\/g, '/');
+    if (!raw) return '';
+    if (isWorkspaceFilePath(raw)) return normalizeWorkspaceFilePath(raw);
+    const cleaned = raw.replace(/^\/+/, '');
+    if (cleaned.startsWith('workspace/')) return `/${cleaned}`;
+    return `/workspace/${cleaned}`;
+  }, []);
 
   useEffect(() => {
     setExpanded(false);
@@ -447,11 +305,11 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
   const canCollapse = message.role === 'user' && shouldCollapseChatText(message.content);
   const displayText = canCollapse && !expanded ? previewChatText(typedContent) : typedContent;
 
-  // Memoize markdown rendering
-  const renderedContent = useMemo(
-    () => renderMarkdown(displayText, { onOpenWorkspaceFile: openWorkspaceFile }),
-    [displayText, openWorkspaceFile],
-  );
+  const openReviewDocument = useCallback(() => {
+    const path = resolveReviewDocPath(review?.docPath);
+    if (!path) return;
+    openWorkspaceFile(path);
+  }, [openWorkspaceFile, resolveReviewDocPath, review?.docPath]);
 
   const handleApprovePlan = () => {
     if (wsRef?.current?.readyState === WebSocket.OPEN) {
@@ -504,7 +362,7 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
           {isPlanReply && (
             <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-purple-300">Plan</div>
           )}
-          {renderedContent}
+          <MarkdownContent text={displayText} onOpenWorkspaceFile={openWorkspaceFile} />
           {isTyping && <span className="ml-0.5 inline-block h-4 w-1 translate-y-0.5 animate-pulse bg-surface-300" />}
           {canCollapse && (
             <button
@@ -637,17 +495,15 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
                 {review.summary.highlights.map((h, i) => <li key={i}>{h}</li>)}
               </ul>
             )}
-            <details className="mt-2">
-              <summary className="text-[11px] text-surface-400 cursor-pointer">Open markdown preview</summary>
-              {review.docPreview ? (
-                <pre className="mt-1 p-2 bg-surface-950/80 rounded border border-surface-700/20 text-[11px] font-mono text-surface-300 overflow-x-auto max-h-56 overflow-y-auto">{review.docPreview}</pre>
-              ) : (
-                <div className="mt-1 p-2 rounded border border-surface-700/20 text-[11px] text-surface-400">
-                  Preview unavailable from filesystem path in this workspace. You can still approve execution.
-                </div>
-              )}
-            </details>
-            <div className="mt-2 flex items-center gap-2">
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={openReviewDocument}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded border border-emerald-500/40 text-[11px] text-emerald-200 hover:bg-emerald-500/10 transition-colors"
+              >
+                <FileText size={10} />
+                Open & Edit Markdown
+              </button>
               <button
                 onClick={handleApproveReview}
                 className="px-2 py-1 rounded border border-emerald-500/50 text-[11px] text-emerald-200 hover:bg-emerald-500/10 transition-colors"
@@ -660,6 +516,9 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
               >
                 Re-evaluate
               </button>
+            </div>
+            <div className="mt-1.5 text-[10px] text-surface-500">
+              Opens the markdown reader so you can review, edit, and save before approving.
             </div>
           </div>
         )}

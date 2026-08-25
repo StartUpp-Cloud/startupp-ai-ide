@@ -3303,7 +3303,7 @@ function ChatSessionContent({
               message={msg}
               wsRef={wsRef}
               projectId={projectId}
-              containerName={containerName}
+              containerName={containerName || project?.containerName}
               onSend={handleSend}
               onRetry={handleRetryMessage}
               animateContent={typingMessageIds.has(msg.id)}
@@ -3378,7 +3378,7 @@ function ChatSessionContent({
             message={streamingMessage}
             wsRef={wsRef}
             projectId={projectId}
-            containerName={containerName}
+            containerName={containerName || project?.containerName}
             onSend={handleSend}
             threadKind={session?.isMainThread ? 'main' : 'session'}
           />
