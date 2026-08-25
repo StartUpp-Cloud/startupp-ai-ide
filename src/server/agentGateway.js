@@ -165,20 +165,85 @@ class AgentGateway extends EventEmitter {
     const session = chatStore.getSession(projectId, chatSessionId);
     const toolSessions = { ...(session?.toolSessions || {}) };
     toolSessions[tool] = { ...(toolSessions[tool] || {}), cliSessionId, workDir: workDir || null, updatedAt: new Date().toISOString() };
-    chatStore.updateSessionMeta(projectId, chatSessionId, { cliSessionId, cliSessionTool: tool, toolSessions });
+    chatStore.updateSessionMeta(projectId, chatSessionId, {
+      cliSessionId,
+      cliSessionTool: tool,
+      toolSessions,
+      cliSessionBroken: false,
+      cliResumeFailedTool: null,
+      cliResumeFailedAt: null,
+    });
+
+    // Keep parent conversation and durable agent child on the same CLI thread.
+    const mirrorIds = new Set();
+    if (session?.parentSessionId) mirrorIds.add(session.parentSessionId);
+    if (session?.durableAgentSessionId) mirrorIds.add(session.durableAgentSessionId);
+    for (const mirrorId of mirrorIds) {
+      if (!mirrorId || mirrorId === chatSessionId) continue;
+      const mirror = chatStore.getSession(projectId, mirrorId);
+      if (!mirror) continue;
+      const mirroredTools = { ...(mirror.toolSessions || {}) };
+      mirroredTools[tool] = {
+        ...(mirroredTools[tool] || {}),
+        cliSessionId,
+        workDir: workDir || mirroredTools[tool]?.workDir || mirror.workDir || null,
+        updatedAt: new Date().toISOString(),
+      };
+      chatStore.updateSessionMeta(projectId, mirrorId, {
+        cliSessionId,
+        cliSessionTool: tool,
+        toolSessions: mirroredTools,
+        cliSessionBroken: false,
+        cliResumeFailedTool: null,
+        cliResumeFailedAt: null,
+      });
+    }
   }
 
-  _clearStoredToolSession(projectId, chatSessionId, tool) {
+  _clearStoredToolSession(projectId, chatSessionId, tool, { broken = false } = {}) {
     if (!projectId || !chatSessionId) return;
     const session = chatStore.getSession(projectId, chatSessionId);
     const toolSessions = { ...(session?.toolSessions || {}) };
     if (tool) delete toolSessions[tool];
-    const meta = { toolSessions };
+    const meta = {
+      toolSessions,
+      ...(broken ? {
+        cliSessionBroken: true,
+        cliResumeFailedTool: tool || session?.cliSessionTool || null,
+        cliResumeFailedAt: new Date().toISOString(),
+      } : {}),
+    };
     if (!tool || session?.cliSessionTool === tool) {
       meta.cliSessionId = null;
       meta.cliSessionTool = null;
     }
     chatStore.updateSessionMeta(projectId, chatSessionId, meta);
+
+    // Mirror clear onto the paired parent/durable session so the next turn does
+    // not resume a known-bad CLI id.
+    const mirrorIds = new Set();
+    if (session?.parentSessionId) mirrorIds.add(session.parentSessionId);
+    if (session?.durableAgentSessionId) mirrorIds.add(session.durableAgentSessionId);
+    for (const mirrorId of mirrorIds) {
+      if (!mirrorId || mirrorId === chatSessionId) continue;
+      const mirror = chatStore.getSession(projectId, mirrorId);
+      if (!mirror) continue;
+      const mirroredTools = { ...(mirror.toolSessions || {}) };
+      if (tool) delete mirroredTools[tool];
+      const mirrorMeta = {
+        toolSessions: mirroredTools,
+        ...(broken ? {
+          cliSessionBroken: true,
+          cliResumeFailedTool: tool || mirror.cliSessionTool || null,
+          cliResumeFailedAt: new Date().toISOString(),
+        } : {}),
+      };
+      if (!tool || mirror.cliSessionTool === tool) {
+        mirrorMeta.cliSessionId = null;
+        mirrorMeta.cliSessionTool = null;
+      }
+      chatStore.updateSessionMeta(projectId, mirrorId, mirrorMeta);
+    }
   }
 
   _worktreePathForBranch(branch) {
@@ -1421,7 +1486,7 @@ RULES:
 
           if (result.retryType === 'context-lost') {
             this._clearCliState(chatSessionId, tool);
-            this._clearStoredToolSession(projectId, chatSessionId, tool);
+            this._clearStoredToolSession(projectId, chatSessionId, tool, { broken: true });
             const contextSummary = await this._getContextSummary(projectId, chatSessionId);
             message = `Context from our conversation:\n${contextSummary}\n\nUser's request: ${message}`;
           }
@@ -1432,7 +1497,7 @@ RULES:
             // developer handoff note from the raw tool output + git diff, then
             // start a fresh session with a continuation prompt.
             this._clearCliState(chatSessionId, tool);
-            this._clearStoredToolSession(projectId, chatSessionId, tool);
+            this._clearStoredToolSession(projectId, chatSessionId, tool, { broken: true });
             this._addProgressMessage(projectId, chatSessionId,
               '🔄 Context limit reached — synthesizing continuation context...', broadcastFn);
 

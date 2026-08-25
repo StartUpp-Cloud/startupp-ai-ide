@@ -1440,7 +1440,7 @@ function RunObserverRail({ run, wsRef, projectId, sessionId }) {
         <div className="border-t border-surface-700/35 px-3 py-2.5">
           {policy && (
             <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Effective run policy">
-              <span className="inline-flex items-center gap-1 rounded border border-emerald-500/25 bg-emerald-500/5 px-1.5 py-0.5 text-[10px] text-emerald-300"><ShieldCheck size={10} /> {policy.approvalMode || 'on-risk'} approvals</span>
+              <span className="inline-flex items-center gap-1 rounded border border-emerald-500/25 bg-emerald-500/5 px-1.5 py-0.5 text-[10px] text-emerald-300"><ShieldCheck size={10} /> {policy.approvalMode || 'never'} approvals</span>
               <span className="rounded border border-surface-700/60 px-1.5 py-0.5 text-[10px] text-surface-400">Files: {policy.filesystemScope || 'project'}</span>
               <span className="rounded border border-surface-700/60 px-1.5 py-0.5 text-[10px] text-surface-400">Network: {policy.networkScope || 'provider-required'}</span>
             </div>

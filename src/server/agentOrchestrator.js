@@ -432,13 +432,33 @@ class AgentOrchestrator extends EventEmitter {
 
     for (const t of tasks) {
       if (t.status === 'completed' || t.status === 'blocked') continue;
-      // Fresh continuation: new CLI thread + recovery-wrapped prompt.
-      t.agentSessionId = null;
+      // Keep the durable conversation agent session when possible so tool CLIs
+      // can still inherit continuity metadata; clear only the broken CLI thread.
+      const durableId = run.data?.durableAgentSessionId
+        || chatStore.getSession(run.projectId, run.sessionId)?.durableAgentSessionId
+        || null;
+      t.agentSessionId = durableId || null;
       t.attempt = 0;
       t.status = 'pending';
       t.error = null;
       t.startedAt = null;
       t.completedAt = null;
+      if (durableId) {
+        try {
+          const durable = chatStore.getSession(run.projectId, durableId);
+          const toolSessions = { ...(durable?.toolSessions || {}) };
+          if (run.tool) delete toolSessions[run.tool];
+          chatStore.updateSessionMeta(run.projectId, durableId, {
+            toolSessions,
+            cliSessionId: durable?.cliSessionTool === run.tool ? null : durable?.cliSessionId,
+            cliSessionTool: durable?.cliSessionTool === run.tool ? null : durable?.cliSessionTool,
+            cliSessionBroken: false,
+            forceNewAgentSession: false,
+            cliResumeFailedTool: null,
+            cliResumeFailedAt: null,
+          });
+        } catch {}
+      }
       // Persist the reset state, then wrap the prompt in-memory for this run.
       // (_saveTask doesn't persist `prompt`, so the DB keeps the original — which
       // means each resume wraps the original fresh and never nests wrappers.)
@@ -1305,26 +1325,168 @@ ${run.goal}`;
   _ensureAgentSession(run, task, { tool, model, effort }) {
     if (task.agentSessionId) {
       const existing = chatStore.getSession(run.projectId, task.agentSessionId);
-      if (existing) return existing;
+      if (existing && !this._agentSessionUnusable(existing, { tool, task })) {
+        this._bindDurableAgentSession(run, existing, { tool, model, effort, task });
+        return existing;
+      }
     }
-    const session = chatStore.createSession(run.projectId, `[Agent] ${task.title}`, { tool, model, effort });
+
+    // Parallel isolated worktrees must not share a CLI thread.
+    if (task.data?.workDir) {
+      return this._createAgentSession(run, task, { tool, model, effort, isolated: true });
+    }
+
     const parentSession = chatStore.getSession(run.projectId, run.sessionId);
+    const stickyIds = [
+      run.data?.durableAgentSessionId,
+      parentSession?.durableAgentSessionId,
+      this._findReusableAgentSessionId(run, { tool }),
+    ].filter(Boolean);
+
+    for (const sessionId of stickyIds) {
+      const existing = chatStore.getSession(run.projectId, sessionId);
+      if (!existing || this._agentSessionUnusable(existing, { tool, task })) continue;
+      this._bindDurableAgentSession(run, existing, { tool, model, effort, task });
+      this._seedCliContinuity(run.projectId, parentSession, existing, tool);
+      return existing;
+    }
+
+    const created = this._createAgentSession(run, task, { tool, model, effort, isolated: false });
+    this._seedCliContinuity(run.projectId, parentSession, created, tool);
+    this._bindDurableAgentSession(run, created, { tool, model, effort, task });
+    return created;
+  }
+
+  _findReusableAgentSessionId(run, { tool } = {}) {
+    try {
+      const sessions = chatStore.getSessions(run.projectId, { includeArchived: true })
+        .filter((session) => session?.orchestratorChild
+          && session?.parentSessionId === run.sessionId
+          && session?.durableConversationAgent
+          && !session?.isolatedParallelAgent);
+      if (!sessions.length) return null;
+      const withCli = sessions.find((session) => session?.toolSessions?.[tool]?.cliSessionId);
+      return (withCli || sessions[0])?.id || null;
+    } catch {
+      return null;
+    }
+  }
+
+  _agentSessionUnusable(session, { tool, task } = {}) {
+    if (!session) return true;
+    if (session.forceNewAgentSession) return true;
+    // Isolated parallel workers are only reusable for the same worktree assignment.
+    if (session.isolatedParallelAgent) {
+      const wanted = task?.data?.workDir || null;
+      if (!wanted || session.workDir !== wanted) return true;
+    }
+    return false;
+  }
+
+  _bindDurableAgentSession(run, session, { tool, model, effort, task } = {}) {
+    if (!session?.id) return;
+    run.data = { ...(run.data || {}), durableAgentSessionId: session.id };
+    this._saveRun(run);
+
+    const parentSession = chatStore.getSession(run.projectId, run.sessionId);
+    if (parentSession?.id) {
+      chatStore.updateSessionMeta(run.projectId, parentSession.id, {
+        durableAgentSessionId: session.id,
+      });
+    }
+
     const inheritedContext = {};
     for (const field of ['branch', 'repoPath', 'worktreePath', 'workDir', 'cwd']) {
       if (parentSession?.[field]) inheritedContext[field] = parentSession[field];
     }
-    // A parallel sub-task runs in its OWN isolated worktree (set up before the
-    // batch); that overrides the inherited parent workDir so concurrent agents
-    // can't clobber each other.
+    const sessionWorkDir = task?.data?.workDir
+      || inheritedContext.workDir || inheritedContext.cwd || this._sessionWorkDirFromMeta(inheritedContext);
+
+    chatStore.updateSessionMeta(run.projectId, session.id, {
+      archived: true,
+      orchestratorChild: true,
+      durableConversationAgent: !task?.data?.workDir,
+      isolatedParallelAgent: !!task?.data?.workDir,
+      orchestratorRunId: run.id,
+      orchestratorTaskId: task?.id,
+      parentSessionId: run.sessionId,
+      tool: tool || session.tool,
+      model: model ?? session.model,
+      effort: effort ?? session.effort,
+      forceNewAgentSession: false,
+      ...inheritedContext,
+      ...(task?.data?.workDir ? { worktreePath: task.data.workDir, branch: task.data.worktreeBranch } : {}),
+      ...(sessionWorkDir ? { workDir: sessionWorkDir } : {}),
+    });
+  }
+
+  /**
+   * Prefer an existing CLI thread from the parent conversation (or prior agent
+   * session) so Codex/Claude/etc resume instead of starting blank.
+   */
+  _seedCliContinuity(projectId, fromSession, toSession, tool) {
+    if (!projectId || !toSession?.id || !tool) return;
+    const source = fromSession || {};
+    const existing = toSession.toolSessions?.[tool]?.cliSessionId
+      || (toSession.cliSessionTool === tool ? toSession.cliSessionId : null);
+    if (existing) return;
+
+    const inherited = source.toolSessions?.[tool]
+      || (source.cliSessionTool === tool && source.cliSessionId
+        ? { cliSessionId: source.cliSessionId, workDir: source.workDir || source.cwd || null }
+        : null);
+    if (!inherited?.cliSessionId) return;
+
+    const toolSessions = {
+      ...(toSession.toolSessions || {}),
+      [tool]: {
+        ...(inherited || {}),
+        cliSessionId: inherited.cliSessionId,
+        workDir: inherited.workDir || toSession.workDir || null,
+        updatedAt: new Date().toISOString(),
+        inheritedFromSessionId: source.id || null,
+      },
+    };
+    chatStore.updateSessionMeta(projectId, toSession.id, {
+      toolSessions,
+      cliSessionId: inherited.cliSessionId,
+      cliSessionTool: tool,
+      cliSessionBroken: false,
+      cliResumeFailedTool: null,
+      cliResumeFailedAt: null,
+    });
+  }
+
+  _createAgentSession(run, task, { tool, model, effort, isolated = false }) {
+    const title = isolated
+      ? `[Agent] ${task.title}`
+      : `[Agent] ${chatStore.getSession(run.projectId, run.sessionId)?.name || 'Conversation'}`;
+    const session = chatStore.createSession(run.projectId, title, { tool, model, effort });
+    const parentSession = chatStore.getSession(run.projectId, run.sessionId);
+    const previousId = parentSession?.durableAgentSessionId || run.data?.durableAgentSessionId || null;
+    if (previousId && previousId !== session.id) {
+      chatStore.updateSessionMeta(run.projectId, previousId, {
+        forceNewAgentSession: true,
+        supersededByAgentSessionId: session.id,
+      });
+    }
+
+    const inheritedContext = {};
+    for (const field of ['branch', 'repoPath', 'worktreePath', 'workDir', 'cwd']) {
+      if (parentSession?.[field]) inheritedContext[field] = parentSession[field];
+    }
     const sessionWorkDir = task.data?.workDir
       || inheritedContext.workDir || inheritedContext.cwd || this._sessionWorkDirFromMeta(inheritedContext);
 
     chatStore.updateSessionMeta(run.projectId, session.id, {
       archived: true,
       orchestratorChild: true,
+      durableConversationAgent: !isolated,
+      isolatedParallelAgent: !!isolated,
       orchestratorRunId: run.id,
       orchestratorTaskId: task.id,
       parentSessionId: run.sessionId,
+      previousAgentSessionId: previousId,
       ...inheritedContext,
       ...(task.data?.workDir ? { worktreePath: task.data.workDir, branch: task.data.worktreeBranch } : {}),
       ...(sessionWorkDir ? { workDir: sessionWorkDir } : {}),

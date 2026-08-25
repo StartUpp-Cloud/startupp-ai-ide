@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(resolve(__dirname, '../agentOrchestrator.js'), 'utf8');
+const gatewaySource = readFileSync(resolve(__dirname, '../agentGateway.js'), 'utf8');
 
 assert.match(
   source,
@@ -32,8 +33,34 @@ assert.match(
 
 assert.match(
   source,
-  /const sessionWorkDir = task\.data\?\.workDir[\s\S]*?inheritedContext\.workDir \|\| inheritedContext\.cwd \|\| this\._sessionWorkDirFromMeta\(inheritedContext\);/,
+  /const sessionWorkDir = task[\s\S]*?data\?\.workDir[\s\S]*?inheritedContext\.workDir \|\| inheritedContext\.cwd \|\| this\._sessionWorkDirFromMeta\(inheritedContext\);/,
   'Child session workDir should prefer inherited workDir/cwd before worktree/repo fallback',
+);
+
+assert.match(
+  source,
+  /durableConversationAgent/,
+  'Orchestrator should keep a durable conversation agent session across turns',
+);
+assert.match(
+  source,
+  /_seedCliContinuity\(/,
+  'Orchestrator should seed CLI continuity from the parent conversation',
+);
+assert.match(
+  source,
+  /durableAgentSessionId/,
+  'Parent conversation should remember its durable agent session id',
+);
+assert.match(
+  gatewaySource,
+  /parentSessionId[\s\S]*durableAgentSessionId[\s\S]*cliSessionId/,
+  'Gateway should mirror CLI session ids between parent and durable agent sessions',
+);
+assert.match(
+  gatewaySource,
+  /broken:\s*true/,
+  'Context-lost/limit recovery should mark CLI continuity as broken',
 );
 
 console.log('orchestratorContext tests passed');

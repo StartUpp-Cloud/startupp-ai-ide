@@ -1,10 +1,28 @@
 import { v4 as uuidv4 } from 'uuid';
 
 const TOOL_NAMES = new Set(['claude', 'codex', 'opencode', 'aider', 'ollama', 'shell']);
+
+/**
+ * Risk rules for optional human gates.
+ * Keep these narrow — StartUpp is a localhost/LAN IDE where the orchestrator
+ * should proceed by default. Only exceptional, irreversible ops escalate.
+ */
 const RISK_RULES = [
-  { risk: 'critical', pattern: /(?:rm\s+-rf|drop\s+(?:database|table)|force[- ]push|production\s+deploy|delete\s+production)/i, reason: 'destructive or production operation' },
-  { risk: 'high', pattern: /(?:deploy|publish|release|push\s+to|migrate|chmod|curl\s+.*\|\s*(?:bash|sh))/i, reason: 'external or irreversible side effect' },
-  { risk: 'medium', pattern: /(?:install|upgrade|write|edit|modify|create|delete|remove|run\s+tests?)/i, reason: 'workspace mutation' },
+  {
+    risk: 'critical',
+    pattern: /(?:\brm\s+-rf\s+(?:\/|~|\$HOME|\.)|\bdrop\s+(?:database|table)\b|\b(?:git\s+push\b[^\n]*\s--force|--force\s+push|force[- ]push)\b|\b(?:delete|wipe|destroy)\s+production\b|\bformat\s+(?:the\s+)?(?:disk|drive)\b)/i,
+    reason: 'destructive or irreversible production operation',
+  },
+  {
+    risk: 'high',
+    pattern: /(?:\bdeploy(?:ing|ment)?\s+to\s+prod(?:uction)?\b|\bproduction\s+deploy(?:ment|ing)?\b|\bnpm\s+publish\b|\bcurl\s+[^\n]*\|\s*(?:bash|sh)\b|\bchmod\s+-R\s+777\b)/i,
+    reason: 'explicit production publish or dangerous shell pipeline',
+  },
+  {
+    risk: 'medium',
+    pattern: /(?:\b(?:install|upgrade|migrate|deploy|publish|release)\b|\b(?:write|edit|modify|create|delete|remove)\b|\brun\s+tests?\b)/i,
+    reason: 'workspace mutation',
+  },
 ];
 
 export const RUN_RISK_ORDER = ['safe', 'low', 'medium', 'high', 'critical'];
@@ -26,8 +44,10 @@ export function normalizeRunPolicy(policy = {}, { tool = 'claude', projectRuntim
     networkScope: ['none', 'container', 'host', 'provider-required'].includes(policy.networkScope)
       ? policy.networkScope : 'provider-required',
     containerBoundary: effectiveRuntime === 'host' ? 'host-project' : 'project-container',
-    approvalMode: ['never', 'on-risk', 'always'].includes(policy.approvalMode) ? policy.approvalMode : 'on-risk',
-    autoConfirmCommands: policy.autoConfirmCommands === true,
+    // Default: orchestrator proceeds without asking. Opt into on-risk/always explicitly.
+    approvalMode: ['never', 'on-risk', 'always'].includes(policy.approvalMode) ? policy.approvalMode : 'never',
+    // When on-risk is enabled, still auto-confirm non-critical command prompts.
+    autoConfirmCommands: policy.autoConfirmCommands !== false,
     projectRuntime: effectiveRuntime,
     tool: normalizedTool,
     redaction: 'secrets-and-tokens',
@@ -49,18 +69,32 @@ export function buildApprovalRequest({ runId, operation, policy, risk, reasons =
     type: 'run-policy-escalation',
     status: 'pending',
     operation: String(operation || '').trim().slice(0, 500),
-    risk: risk || 'high',
+    risk: risk || 'critical',
     reasons: reasons.slice(0, 8),
     policy: normalizeRunPolicy(policy),
     createdAt: new Date().toISOString(),
   };
 }
 
+/**
+ * Human approval is exceptional. With default policy (never + autoConfirm),
+ * only an explicit approvalMode of "always", or on-risk + critical risk,
+ * will pause a run.
+ */
 export function needsRunApproval({ content = '', policy = {} } = {}) {
   const normalized = normalizeRunPolicy(policy);
   const assessment = classifyRunRisk(content);
-  const requiresApproval = normalized.approvalMode === 'always'
-    || (normalized.approvalMode === 'on-risk' && ['high', 'critical'].includes(assessment.risk) && !normalized.autoConfirmCommands);
+  if (normalized.approvalMode === 'never') {
+    return { ...assessment, requiresApproval: false };
+  }
+  if (normalized.approvalMode === 'always') {
+    return { ...assessment, requiresApproval: true };
+  }
+  // on-risk: only critical ops pause the run. High-risk still proceeds when
+  // autoConfirmCommands is enabled (the default).
+  const critical = assessment.risk === 'critical';
+  const highWithoutAutoconfirm = assessment.risk === 'high' && !normalized.autoConfirmCommands;
+  const requiresApproval = critical || highWithoutAutoconfirm;
   return { ...assessment, requiresApproval };
 }
 
