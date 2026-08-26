@@ -1193,8 +1193,13 @@ function PhaseItemIcon({ status }) {
 }
 
 function PhaseGroup({ phase, index, defaultOpen }) {
-  const [override, setOverride] = useState(null);
-  const isOpen = override === null ? defaultOpen : override;
+  // Auto-expand the active phase, but never auto-collapse — collapsing finished
+  // phases while new ones open causes large height thrash and scroll flashing.
+  const [open, setOpen] = useState(Boolean(defaultOpen));
+  useEffect(() => {
+    if (defaultOpen) setOpen(true);
+  }, [defaultOpen]);
+  const isOpen = open;
   const items = phase.items;
   const statusText = phase.status === 'done' ? `${items.length} step${items.length === 1 ? '' : 's'}`
     : phase.status === 'working' ? 'working'
@@ -1214,7 +1219,7 @@ function PhaseGroup({ phase, index, defaultOpen }) {
     <div>
       <button
         type="button"
-        onClick={() => items.length && setOverride(!isOpen)}
+        onClick={() => items.length && setOpen(value => !value)}
         className={`flex w-full items-center gap-2 rounded px-1 py-1 text-left ${items.length ? 'hover:bg-surface-800/40' : 'cursor-default'}`}
       >
         {HeaderIcon}
@@ -1915,6 +1920,7 @@ function ChatSessionContent({
 
   const messagesEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
+  const scrollContentRef = useRef(null);
   const messagesRef = useRef([]);
   const knownIdsRef = useRef(new Set());
   const streamingChunksRef = useRef('');
@@ -2131,46 +2137,61 @@ function ChatSessionContent({
   // scrollIntoView() which can be defeated by overflow:hidden ancestors.
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-      setShowJumpBottom(false);
-      setShowJumpTop(el.scrollHeight > el.clientHeight + 300);
-    }
+    if (!el) return;
+    // Instant jump — smooth scrolling during rapid progress updates looks like flashing.
+    el.scrollTop = el.scrollHeight;
+    isNearBottomRef.current = true;
+    setShowJumpBottom(false);
+    setShowJumpTop(el.scrollHeight > el.clientHeight + 300);
   }, []);
 
+  /**
+   * Pin once after layout. Avoid the old 0/80/240/600ms burst — overlapping
+   * timers fighting browser overflow-anchoring caused scroll to jump between
+   * the latest user message and the true bottom during live progress.
+   */
   const scheduleScrollToBottom = useCallback(() => {
     if (!isVisible) return undefined;
 
-    let rafId = null;
-    const timeoutIds = [0, 80, 240, 600].map(delay => setTimeout(scrollToBottom, delay));
-    rafId = requestAnimationFrame(() => {
+    let raf1 = 0;
+    let raf2 = 0;
+    const timeoutId = setTimeout(scrollToBottom, 120);
+    raf1 = requestAnimationFrame(() => {
       scrollToBottom();
-      rafId = requestAnimationFrame(scrollToBottom);
+      raf2 = requestAnimationFrame(scrollToBottom);
     });
 
     return () => {
-      timeoutIds.forEach(clearTimeout);
-      if (rafId !== null) cancelAnimationFrame(rafId);
+      clearTimeout(timeoutId);
+      if (raf1) cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
     };
   }, [isVisible, scrollToBottom]);
 
+  // While the assistant is actively growing content below the last user message,
+  // keep the viewport glued to the bottom without re-arming timeout storms.
+  useEffect(() => {
+    if (!isVisible) return undefined;
+    const scroller = scrollContainerRef.current;
+    const content = scrollContentRef.current;
+    if (!scroller || !content || typeof ResizeObserver === 'undefined') return undefined;
+
+    const stickIfNeeded = () => {
+      if (!isNearBottomRef.current) return;
+      if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 4) return;
+      scroller.scrollTop = scroller.scrollHeight;
+    };
+
+    const observer = new ResizeObserver(stickIfNeeded);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [isVisible, sessionId, projectId]);
+
   useEffect(() => {
     if (!isVisible || !anchorScrollSignal) return undefined;
-
-    const endAt = Date.now() + 650;
-    let rafId = null;
-    const keepAnchored = () => {
-      scrollToBottom();
-      if (Date.now() < endAt) rafId = requestAnimationFrame(keepAnchored);
-    };
-
-    rafId = requestAnimationFrame(keepAnchored);
-    const timeoutId = setTimeout(scrollToBottom, 700);
-    return () => {
-      if (rafId !== null) cancelAnimationFrame(rafId);
-      clearTimeout(timeoutId);
-    };
-  }, [isVisible, anchorScrollSignal, scrollToBottom]);
+    isNearBottomRef.current = true;
+    return scheduleScrollToBottom();
+  }, [isVisible, anchorScrollSignal, scheduleScrollToBottom]);
 
   useEffect(() => {
     messagesLoadedRef.current = false;
@@ -2748,6 +2769,7 @@ function ChatSessionContent({
     if (suppressNextAutoScrollRef.current) {
       suppressNextAutoScrollRef.current = false;
     } else if (isInitialLoadRef.current && currentCount > 0) {
+      isNearBottomRef.current = true;
       scheduleScrollToBottom();
       isInitialLoadRef.current = false;
     } else if (currentCount > prevCount && prevCount > 0 && isNearBottomRef.current) {
@@ -2757,25 +2779,25 @@ function ChatSessionContent({
     prevMessageCountRef.current = currentCount;
   }, [messages, isVisible, scheduleScrollToBottom]);
 
+  // When a stream/run becomes active, pin once. ResizeObserver keeps us stuck
+  // afterward — re-arming on every chunk content change caused scroll flashing.
   useEffect(() => {
     if (!isVisible) return;
     if (!streamingMessage && !agentBusy && !recoveryStatus.active) return;
-    if (!isNearBottomRef.current) return; // user scrolled up to read — don't yank them down
-
+    if (!isNearBottomRef.current) return;
     return scheduleScrollToBottom();
   }, [
     isVisible,
     streamingMessage?.id,
-    streamingMessage?.content,
     agentBusy,
     recoveryStatus.active,
-    recoveryStatus.message,
     scheduleScrollToBottom,
   ]);
 
   // Scroll to bottom when becoming visible
   useEffect(() => {
     if (isVisible) {
+      isNearBottomRef.current = true;
       return scheduleScrollToBottom();
     }
   }, [isVisible, scheduleScrollToBottom]);
@@ -2802,12 +2824,14 @@ function ChatSessionContent({
 
   useEffect(() => {
     if (!isVisible || loading) return undefined;
+    isNearBottomRef.current = true;
     return scheduleScrollToBottom();
   }, [isVisible, loading, scheduleScrollToBottom]);
 
   // Ensure visible sessions jump to latest when switching projects
   useEffect(() => {
     if (!isVisible) return;
+    isNearBottomRef.current = true;
     return scheduleScrollToBottom();
   }, [projectSwitchKey, isVisible, scheduleScrollToBottom]);
 
@@ -3161,11 +3185,6 @@ function ChatSessionContent({
     return attachOrchestratorContext(sortedMessages.filter(m => m.role !== 'progress'));
   }, [sortedMessages]);
 
-  useEffect(() => {
-    if (!isVisible || progressTranscriptEntries.length === 0) return undefined;
-    return scheduleScrollToBottom();
-  }, [isVisible, progressTranscriptEntries.length, scheduleScrollToBottom]);
-
   const displayMessages = searchResults || filteredMessages;
   const showMainThreadSessionBubbles = session?.isMainThread && !searchResults && mainThreadSessionBubbles;
   const emptyState = conversationEmptyState({
@@ -3260,7 +3279,13 @@ function ChatSessionContent({
       ) : (
         <>
       {/* Messages */}
-      <div ref={scrollContainerRef} onScroll={handleScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }} className="px-1 py-4">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative', overflowAnchor: 'none' }}
+        className="px-1 py-4"
+      >
+        <div ref={scrollContentRef}>
         {!showOnlySessions && !searchResults && displayMessages.length > 0 && (hasMoreHistory || historyLoadingOlder) && (
           <div className="mb-3 flex justify-center px-3">
             <button
@@ -3392,6 +3417,7 @@ function ChatSessionContent({
         )}
 
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       {/* Jump to top / bottom floating buttons */}
