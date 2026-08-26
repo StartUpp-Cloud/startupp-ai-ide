@@ -189,4 +189,19 @@
   .stagger-4 { animation-delay: 0.2s; }
   .stagger-5 { animation-delay: 0.25s; }
   .stagger-6 { animation-delay: 0.3s; }
+
+  @keyframes chat-message-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .chat-message-fade-in {
+    animation: chat-message-fade-in 0.22s ease-out both;
+  }
 }

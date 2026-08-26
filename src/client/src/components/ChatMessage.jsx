@@ -183,31 +183,7 @@ function OrchestratorTracePanel({ loading, trace }) {
   );
 }
 
-function useTypedContent(content, enabled) {
-  const fullText = String(content || '');
-  const [typedText, setTypedText] = useState(enabled ? '' : fullText);
-
-  useEffect(() => {
-    if (!enabled) {
-      setTypedText(fullText);
-      return undefined;
-    }
-
-    let index = 0;
-    setTypedText('');
-    const timer = setInterval(() => {
-      index = Math.min(fullText.length, index + 8);
-      setTypedText(fullText.slice(0, index));
-      if (index >= fullText.length) clearInterval(timer);
-    }, 8);
-
-    return () => clearInterval(timer);
-  }, [enabled, fullText]);
-
-  return typedText;
-}
-
-export default function ChatMessage({ message, wsRef, projectId, containerName = null, onSend, onRetry, animateContent = false, threadKind = 'session' }) {
+export default function ChatMessage({ message, wsRef, projectId, containerName = null, onSend, onRetry, fadeIn = false, onFadeComplete, threadKind = 'session' }) {
   const fileEditor = useFileEditor();
   const [showRaw, setShowRaw] = useState(false);
   const [showChangedFiles, setShowChangedFiles] = useState(false);
@@ -300,10 +276,8 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
     );
   }
 
-  const typedContent = useTypedContent(message.content, animateContent && (message.role === 'agent' || message.role === 'error'));
-  const isTyping = animateContent && typedContent.length < String(message.content || '').length;
   const canCollapse = message.role === 'user' && shouldCollapseChatText(message.content);
-  const displayText = canCollapse && !expanded ? previewChatText(typedContent) : typedContent;
+  const displayText = canCollapse && !expanded ? previewChatText(message.content) : message.content;
 
   const openReviewDocument = useCallback(() => {
     const path = resolveReviewDocPath(review?.docPath);
@@ -344,7 +318,10 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
   };
 
   return (
-    <div className={`flex ${style.align} mb-3 w-full min-w-0 px-3`}>
+    <div
+      className={`flex ${style.align} mb-3 w-full min-w-0 px-3 ${fadeIn ? 'chat-message-fade-in' : ''}`}
+      onAnimationEnd={fadeIn ? onFadeComplete : undefined}
+    >
       <div className={`min-w-0 max-w-[85%] rounded-lg border px-3 py-2 ${style.bubble} ${threadKind === 'main' ? 'shadow-[0_0_0_1px_rgba(14,165,233,0.08)]' : ''}`}>
         {/* Header */}
         <div className="flex items-center gap-2 mb-1.5 text-[11px] text-surface-500">
@@ -363,7 +340,6 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
             <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-purple-300">Plan</div>
           )}
           <MarkdownContent text={displayText} onOpenWorkspaceFile={openWorkspaceFile} />
-          {isTyping && <span className="ml-0.5 inline-block h-4 w-1 translate-y-0.5 animate-pulse bg-surface-300" />}
           {canCollapse && (
             <button
               type="button"

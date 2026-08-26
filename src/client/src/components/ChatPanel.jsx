@@ -28,6 +28,8 @@ const VISIBLE_SESSION_HEALTH_INTERVAL_MS = 5000;
 const NOT_BUSY_CLEAR_GRACE_MS = 12000;
 const CHAT_HISTORY_LOOKBACK_DAYS = 7;
 const CHAT_HISTORY_PAGE_SIZE = 100;
+/** Only animate replies received within this window while the chat is open. */
+const FRESH_MESSAGE_MAX_AGE_MS = 20_000;
 
 function chatHistorySinceIso() {
   return new Date(Date.now() - CHAT_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
@@ -134,42 +136,14 @@ function buildMainThreadRepoActionMessage(action, repo) {
   return `Push ${name} from ${path}. Inspect git status, commit any relevant completed changes if needed, push to the tracked remote without force pushing, and summarize the result here in the main thread.`;
 }
 
-function useTypedLine(text, enabled) {
-  const fullText = String(text || '');
-  const [typedText, setTypedText] = useState(enabled ? '' : fullText);
-
-  useEffect(() => {
-    if (!enabled) {
-      setTypedText(fullText);
-      return undefined;
-    }
-
-    let index = 0;
-    setTypedText('');
-    const timer = setInterval(() => {
-      index = Math.min(fullText.length, index + 6);
-      setTypedText(fullText.slice(0, index));
-      if (index >= fullText.length) clearInterval(timer);
-    }, 12);
-
-    return () => clearInterval(timer);
-  }, [enabled, fullText]);
-
-  return typedText;
-}
-
 function ProgressTranscriptLine({ entry, latest }) {
-  const text = useTypedLine(entry.content, latest);
-  const isTyping = latest && text.length < String(entry.content || '').length;
-
   return (
     <div className="flex gap-2 border-t border-surface-700/30 py-1.5 first:border-t-0 first:pt-0 last:pb-0">
       <span className="w-[70px] flex-shrink-0 font-mono text-[10px] tabular-nums text-surface-500">
         {formatProgressLineTime(entry.createdAt)}
       </span>
-      <span className="min-w-0 flex-1 text-surface-300">
-        {text}
-        {isTyping && <span className="ml-0.5 inline-block h-3 w-1 translate-y-0.5 animate-pulse bg-primary-300" />}
+      <span className={`min-w-0 flex-1 text-surface-300 ${latest ? 'chat-message-fade-in' : ''}`}>
+        {entry.content}
       </span>
     </div>
   );
@@ -1910,7 +1884,7 @@ function ChatSessionContent({
   const [liveChecks, setLiveChecks] = useState([]);
   // Progress bucketed by orchestrator phase/task: { [taskId|'_general'|'_default']: { lines, checks } }
   const [phaseProgress, setPhaseProgress] = useState({});
-  const [typingMessageIds, setTypingMessageIds] = useState(() => new Set());
+  const [fadeInMessageId, setFadeInMessageId] = useState(null);
   const [orchestratorRun, setOrchestratorRun] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState({ active: false, message: null, startedAt: null, stalled: false });
   const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
@@ -1923,6 +1897,7 @@ function ChatSessionContent({
   const scrollContentRef = useRef(null);
   const messagesRef = useRef([]);
   const knownIdsRef = useRef(new Set());
+  const seenMessageIdsRef = useRef(new Set());
   const streamingChunksRef = useRef('');
   const agentBusyRef = useRef(false);
   const streamingMessageIdRef = useRef(null);
@@ -1930,7 +1905,6 @@ function ChatSessionContent({
   const prevMessageCountRef = useRef(0);
   const isInitialLoadRef = useRef(true);
   const messagesLoadedRef = useRef(false);
-  const visibleSinceRef = useRef(isVisible ? Date.now() : 0);
   const historyCursorRef = useRef(null);
   const historySinceRef = useRef(chatHistorySinceIso());
   const historyLoadingOlderRef = useRef(false);
@@ -2011,22 +1985,30 @@ function ChatSessionContent({
     });
   }, []);
 
-  useEffect(() => {
-    if (isVisible) visibleSinceRef.current = Date.now();
-  }, [isVisible]);
 
-  const markMessageForTyping = useCallback((message) => {
+  const markMessageForFadeIn = useCallback((message) => {
     if (!message?.id || (message.role !== 'agent' && message.role !== 'error')) return;
-    if (!isVisible || !visibleSinceRef.current) return;
+    if (seenMessageIdsRef.current.has(message.id)) return;
+
+    if (!isVisible) {
+      seenMessageIdsRef.current.add(message.id);
+      return;
+    }
+
+    seenMessageIdsRef.current.add(message.id);
 
     const createdAt = new Date(message.createdAt || 0).getTime();
-    if (!Number.isFinite(createdAt) || createdAt < visibleSinceRef.current) return;
+    const age = Date.now() - createdAt;
+    if (!Number.isFinite(createdAt) || age < 0 || age > FRESH_MESSAGE_MAX_AGE_MS) return;
 
-    setTypingMessageIds(prev => {
-      const next = new Set(prev);
-      next.add(message.id);
-      return next;
-    });
+    const candidates = [...messagesRef.current.filter(m => m.id !== message.id), message]
+      .filter(m => m.role === 'agent' || m.role === 'error');
+    const latest = candidates.sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    )[0];
+    if (latest?.id !== message.id) return;
+
+    setFadeInMessageId(message.id);
   }, [isVisible]);
 
   const applyPersistedOrchestratorRuns = useCallback((runs = [], { live } = {}) => {
@@ -2093,7 +2075,10 @@ function ChatSessionContent({
       let nextCursor = before;
       suppressNextAutoScrollRef.current = true;
       for (const message of older) {
-        if (message?.id) knownIdsRef.current.add(message.id);
+        if (message?.id) {
+          knownIdsRef.current.add(message.id);
+          seenMessageIdsRef.current.add(message.id);
+        }
       }
       updateMessages(prev => {
         const byId = new Map(prev.map(message => [message.id, message]));
@@ -2198,6 +2183,8 @@ function ChatSessionContent({
     isInitialLoadRef.current = true;
     prevMessageCountRef.current = 0;
     knownIdsRef.current = new Set();
+    seenMessageIdsRef.current = new Set();
+    setFadeInMessageId(null);
     historySinceRef.current = chatHistorySinceIso();
     historyCursorRef.current = null;
     suppressNextAutoScrollRef.current = false;
@@ -2246,6 +2233,7 @@ function ChatSessionContent({
       let merged = [...messagesRef.current];
 
       for (const message of incoming) {
+        const wasKnown = knownIdsRef.current.has(message.id);
         knownIdsRef.current.add(message.id);
 
         if (message.role === 'user') {
@@ -2275,8 +2263,8 @@ function ChatSessionContent({
           if (message.role === 'agent' || message.role === 'error') finalMessageChanged = true;
         }
 
-        if (message.role === 'agent' || message.role === 'error') {
-          markMessageForTyping(message);
+        if (!wasKnown && (message.role === 'agent' || message.role === 'error')) {
+          markMessageForFadeIn(message);
         }
       }
 
@@ -2308,7 +2296,7 @@ function ChatSessionContent({
     } else if (authoritativeBusy !== false) {
       notBusySinceRef.current = null;
     }
-  }, [clearBusyState, markMessageForTyping, updateMessages]);
+  }, [clearBusyState, markMessageForFadeIn, updateMessages]);
 
   // Load messages only when visible. Hidden tabs stay mounted; do not treat
   // abort/errors as an empty conversation, and do not skip a retry after one.
@@ -2328,6 +2316,10 @@ function ChatSessionContent({
     const applyMessages = (msgs, { hasMore, nextBefore, markRead = true } = {}) => {
       const next = Array.isArray(msgs) ? msgs : [];
       knownIdsRef.current = new Set(next.map(m => m.id).filter(Boolean));
+      for (const message of next) {
+        if (message?.id) seenMessageIdsRef.current.add(message.id);
+      }
+      setFadeInMessageId(null);
       historyCursorRef.current = nextBefore || next[0]?.id || null;
       setHasMoreHistory(Boolean(hasMore));
       updateMessages(next);
@@ -2515,7 +2507,7 @@ function ChatSessionContent({
               setLiveChangedFiles([]);
               setLiveChecks([]);
               setPhaseProgress({});
-              markMessageForTyping(msg.message);
+              markMessageForFadeIn(msg.message);
               streamingChunksRef.current = '';
               setAgentBusy(false);
               setRunStatus(null);
@@ -2586,7 +2578,7 @@ function ChatSessionContent({
               setLiveChecks([]);
               setPhaseProgress({});
               setRunStatus(null);
-              markMessageForTyping(msg.message);
+              markMessageForFadeIn(msg.message);
             }
             updateMessages(prev => [
               ...prev.filter(m => m.id !== msg.messageId && m.id !== msg.message.id),
@@ -2733,7 +2725,7 @@ function ChatSessionContent({
 
     wsRef.current.addEventListener('message', handleMessage);
     return () => wsRef.current?.removeEventListener('message', handleMessage);
-  }, [wsRef, wsConnectionVersion, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange, appendLiveProgressEntry, appendPhaseLine, setPhaseChecks, markMessageForTyping, mergeServerMessages, applyPersistedOrchestratorRuns, updateMessages]);
+  }, [wsRef, wsConnectionVersion, sessionId, projectId, isVisible, markCurrentSessionRead, onSessionUpdate, onUnreadChange, appendLiveProgressEntry, appendPhaseLine, setPhaseChecks, markMessageForFadeIn, mergeServerMessages, applyPersistedOrchestratorRuns, updateMessages]);
 
   // Detect stalled recovery after 30 seconds
   useEffect(() => {
@@ -2759,7 +2751,15 @@ function ChatSessionContent({
     }
   };
 
-  // Scroll handling - only when visible and new messages arrive
+  useEffect(() => {
+    if (!fadeInMessageId || !isVisible) return undefined;
+    isNearBottomRef.current = true;
+    return scheduleScrollToBottom();
+  }, [fadeInMessageId, isVisible, scheduleScrollToBottom]);
+
+  const handleFadeInComplete = useCallback((messageId) => {
+    setFadeInMessageId(current => (current === messageId ? null : current));
+  }, []);
   useEffect(() => {
     if (!isVisible) return;
 
@@ -3293,7 +3293,8 @@ function ChatSessionContent({
               containerName={containerName || project?.containerName}
               onSend={handleSend}
               onRetry={handleRetryMessage}
-              animateContent={typingMessageIds.has(msg.id)}
+              fadeIn={msg.id === fadeInMessageId}
+              onFadeComplete={() => handleFadeInComplete(msg.id)}
               threadKind={session?.isMainThread ? 'main' : 'session'}
             />
           ))
