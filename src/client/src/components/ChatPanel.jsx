@@ -3135,47 +3135,6 @@ function ChatSessionContent({
     });
   }, [agentBusy, streamingMessage, recoveryStatus.active, sortedMessages, sessionId, session?.messageCount, onSessionUpdate]);
 
-  const progressTranscriptEntries = useMemo(() => {
-    if (searchResults) return [];
-
-    const lastUserIndex = [...sortedMessages].map(m => m.role).lastIndexOf('user');
-    if (lastUserIndex < 0) return [];
-
-    const lastUser = sortedMessages[lastUserIndex];
-    const lastUserTime = new Date(lastUser.createdAt).getTime() || 0;
-    const afterLastUser = sortedMessages.slice(lastUserIndex + 1);
-    const hasFinalResponse = afterLastUser.some(m => m.role === 'agent' || m.role === 'error');
-    if (hasFinalResponse) return [];
-
-    const entries = [
-      ...afterLastUser.filter(m => m.role === 'progress'),
-      ...liveProgressEntries.filter(entry => (new Date(entry.createdAt).getTime() || Date.now()) >= lastUserTime),
-    ];
-
-    const byKey = new Map();
-    for (const entry of entries) {
-      const content = String(entry.content || '').trim();
-      if (!content) continue;
-      const key = entry.id || `${entry.createdAt}-${content}`;
-      byKey.set(key, {
-        id: key,
-        content,
-        createdAt: entry.createdAt || new Date().toISOString(),
-      });
-    }
-
-    // Collapse consecutive entries with identical content (server-side dedup
-    // may miss tight races, so we catch them here before rendering).
-    const sorted = [...byKey.values()]
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-    const deduped = [];
-    for (const entry of sorted) {
-      if (deduped.length > 0 && deduped[deduped.length - 1].content === entry.content) continue;
-      deduped.push(entry);
-    }
-    return deduped.slice(-80);
-  }, [sortedMessages, liveProgressEntries, searchResults]);
-
   const hasPhaseProgress = useMemo(
     () => Object.values(phaseProgress).some(b => (b?.lines?.length || b?.checks?.length)),
     [phaseProgress],
