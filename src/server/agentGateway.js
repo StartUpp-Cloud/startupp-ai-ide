@@ -64,6 +64,10 @@ import { normalizeRunPolicy } from './runPolicy.js';
 
 const CLI_WATCHDOG_INTERVAL_MS = 5000;
 export const LONG_RUNNING_ASSISTANT_STALL_MS = 6 * 60 * 60 * 1000;
+/** No stdout for this long before the spawn safety net kills the turn. */
+export const CLI_TURN_IDLE_MS = LONG_RUNNING_ASSISTANT_STALL_MS;
+/** Absolute wall-clock ceiling for a single CLI spawn (cursor/codex/etc.). */
+export const CLI_TURN_MAX_MS = 12 * 60 * 60 * 1000;
 const CLI_NO_OUTPUT_RETRY_MS = LONG_RUNNING_ASSISTANT_STALL_MS;
 const CLI_SILENCE_RETRY_MS = LONG_RUNNING_ASSISTANT_STALL_MS;
 const ORCHESTRATED_SILENCE_RETRY_MS = LONG_RUNNING_ASSISTANT_STALL_MS;
@@ -1993,7 +1997,7 @@ RULES:
       let thinkingBuf = '', lastThinkingAt = 0, lastMinorAt = 0, progressCount = 0;
       const startedAt = Date.now();
       let lastOutputAt = startedAt, timedOut = false;
-      const IDLE_MS = 6 * 60 * 1000, MAX_MS = 30 * 60 * 1000;
+      const IDLE_MS = CLI_TURN_IDLE_MS, MAX_MS = CLI_TURN_MAX_MS;
       const MAX_PROGRESS = 80; // cap live-progress messages per turn (DB safety)
       const emitProgress = (content) => {
         if (progressCount >= MAX_PROGRESS) return;
@@ -2292,7 +2296,7 @@ RULES:
       let totalOutput = '', stderrBuf = '', lastProgress = 0, lastFilePoll = 0, killedForAbort = false;
       const startedAt = Date.now();
       let lastOutputAt = startedAt, timedOut = false;
-      const IDLE_MS = 6 * 60 * 1000, MAX_MS = 30 * 60 * 1000;
+      const IDLE_MS = CLI_TURN_IDLE_MS, MAX_MS = CLI_TURN_MAX_MS;
       const statusTracker = tool === 'codex' && typeof broadcastFn === 'function'
         ? createCodexStatusTracker()
         : null;
