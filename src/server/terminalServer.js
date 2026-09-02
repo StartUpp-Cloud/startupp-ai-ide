@@ -229,7 +229,13 @@ class TerminalServer {
           const msg = JSON.parse(message.toString());
           this.handleMessage(ws, msg).catch((error) => {
             console.error('Failed to handle WebSocket message:', error);
-            this.sendError(ws, error.message || 'Failed to handle message');
+            this.send(ws, {
+              type: 'error',
+              error: error.message || 'Failed to handle message',
+              projectId: msg?.projectId,
+              sessionId: msg?.sessionId,
+              requestType: msg?.type,
+            });
           });
         } catch (error) {
           console.error('Failed to parse WebSocket message:', error);
