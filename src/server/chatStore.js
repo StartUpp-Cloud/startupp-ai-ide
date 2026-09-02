@@ -24,7 +24,7 @@ const SECRET_PATTERNS = [
   /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/g,
 ];
 
-function redactSecrets(text) {
+export function redactSecrets(text) {
   if (!text || typeof text !== 'string') return text;
   let redacted = text;
   for (const pattern of SECRET_PATTERNS) {
@@ -37,9 +37,28 @@ function redactSecrets(text) {
   return redacted;
 }
 
-function safeJson(value) {
+function redactValue(value) {
+  if (typeof value === 'string') return redactSecrets(value);
+  if (Array.isArray(value)) return value.map(redactValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item)]));
+  }
+  return value;
+}
+
+/**
+ * Clone JSON-compatible metadata and redact secret-shaped strings on leaf values.
+ * Never run regex replacement against the serialized JSON — optional quotes in
+ * secret patterns can eat property delimiters and throw on parse.
+ */
+export function safeJson(value) {
   if (value == null) return null;
-  return JSON.parse(redactSecrets(JSON.stringify(value)));
+  try {
+    return redactValue(JSON.parse(JSON.stringify(value)));
+  } catch (error) {
+    console.warn('[chatStore] Failed to serialize metadata:', error.message);
+    return null;
+  }
 }
 
 function snippetAround(text, query, maxLength = 180) {

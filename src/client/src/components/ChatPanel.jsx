@@ -2620,6 +2620,29 @@ function ChatSessionContent({
           setRecoveryStatus({ active: false, message: null, startedAt: null, stalled: false });
           break;
 
+        case 'error': {
+          const requestType = typeof msg.requestType === 'string' ? msg.requestType : '';
+          const isChatFailure = requestType.startsWith('chat-') || (!requestType && agentBusyRef.current);
+          if (!isChatFailure) break;
+          if (msg.sessionId && msg.sessionId !== sessionId) break;
+          if (msg.projectId && msg.projectId !== projectId) break;
+          setAgentBusy(false);
+          setStreamingMessage(null);
+          streamingChunksRef.current = '';
+          const errText = typeof msg.error === 'string' && msg.error.trim()
+            ? msg.error
+            : 'Failed to send message. Please retry.';
+          updateMessages(prev => [...prev, {
+            id: 'err-' + Date.now(),
+            projectId,
+            sessionId,
+            role: 'error',
+            content: errText,
+            createdAt: new Date().toISOString(),
+          }]);
+          break;
+        }
+
         case 'chat-progress':
           // Progress messages during agent work - check sessionId inside message
           if (msg.message?.sessionId === sessionId && msg.message?.content) {
