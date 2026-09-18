@@ -145,6 +145,20 @@ assert.match(thinCloserAfterReport, /durable tool-loop memory|typed tool results
 assert.match(thinCloserAfterReport, /1\.1\.0\.5/);
 assert.doesNotMatch(thinCloserAfterReport, /I'll inspect/i);
 
+const unstructuredMerge = selectFinalAgentMessage([
+  [
+    'Resend already records clicked URLs on email events.',
+    '',
+    '- Add a campaign-level link report from existing click events.',
+    '- Verify webhook signatures before treating totals as complete.',
+    '- Ask whether links should group by destination URL or by button placement.',
+  ].join('\n'),
+  'Discovery is complete.',
+]);
+assert.match(unstructuredMerge, /campaign-level link report/);
+assert.match(unstructuredMerge, /Ask whether links should group/);
+assert.doesNotMatch(unstructuredMerge, /## Outcome/);
+
 const progressThinFinal = buildThinFinalResponse({
   completed: [{
     task: { title: 'Complete user request', status: 'completed' },
@@ -168,6 +182,7 @@ assert.match(stoppedWithWork, /4378713d/);
 assert.match(stoppedWithWork, /schema\.ts/);
 assert.match(stoppedWithWork, /tell me what to do next/i);
 assert.doesNotMatch(stoppedWithWork, /I'll start|Stopped by user/i);
+assert.doesNotMatch(stoppedWithWork, /## Outcome/);
 
 const stoppedEmpty = buildStoppedRunResponse({ tool: 'codex' });
 assert.match(stoppedEmpty, /I stopped this run/i);
@@ -205,6 +220,23 @@ assert.match(outcomeOnlyWithFindings.body, /## Details/);
 assert.match(outcomeOnlyWithFindings.body, /durable tool loop/);
 assert.match(outcomeOnlyWithFindings.body, /restart-safe agent sessions/);
 assert.doesNotMatch(outcomeOnlyWithFindings.body, /I'll compare/i);
+
+const richOutcomeWithTrace = compactChatReport([
+  'I traced the client flow from Email Campaigns through ResendEvent.',
+  'Reading: `src/client/src/pages/EmailCampaigns.jsx`',
+  '',
+  '## Outcome',
+  'Click tracking already exists on email events. Next step is a campaign-level report.',
+  '',
+  '## Details',
+  '- ResendEvent stores clicked URLs.',
+  '- Grouping by destination URL is the safe default until we need button placement.',
+].join('\n'));
+assert.match(richOutcomeWithTrace.body, /Click tracking already exists/);
+assert.doesNotMatch(richOutcomeWithTrace.body, /I traced the client flow/);
+assert.doesNotMatch(richOutcomeWithTrace.body, /EmailCampaigns\.jsx/);
+assert.match(richOutcomeWithTrace.detail, /I traced the client flow/);
+assert.match(richOutcomeWithTrace.detail, /EmailCampaigns/);
 
 const longNarrative = `${'The agent checked authentication and repository state. '.repeat(40)}\n\nThen it deployed the worker and confirmed health checks.`;
 const compactLong = compactChatReport(longNarrative);

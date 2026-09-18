@@ -1,5 +1,5 @@
 import { Bot, User, AlertTriangle, CheckCircle, Loader, ChevronDown, ChevronRight, Info, Terminal, FileText, ListTree } from 'lucide-react';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import {
   shouldCollapseChatText,
   previewChatText,
@@ -7,7 +7,10 @@ import {
   normalizeWorkspaceFilePath,
 } from '../utils/chatMarkdown.js';
 import { useFileEditor } from '../contexts/FileEditorContext.jsx';
+import { useChatAppearance } from '../contexts/ChatAppearanceContext.jsx';
 import MarkdownContent from './MarkdownContent.jsx';
+import HumanAskCard from './HumanAskCard.jsx';
+import { resolveAsks } from '../../../shared/humanAsk.js';
 
 const ROLE_STYLES = {
   user: { align: 'justify-end', bubble: 'bg-blue-600/15 border-blue-500/20', icon: User, label: 'You' },
@@ -185,6 +188,7 @@ function OrchestratorTracePanel({ loading, trace }) {
 
 export default function ChatMessage({ message, wsRef, projectId, containerName = null, onSend, onRetry, fadeIn = false, onFadeComplete, threadKind = 'session' }) {
   const fileEditor = useFileEditor();
+  const { appearance, cssVars } = useChatAppearance();
   const [showRaw, setShowRaw] = useState(false);
   const [showChangedFiles, setShowChangedFiles] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
@@ -258,6 +262,20 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
   const checks = Array.isArray(message.metadata?.checks) ? message.metadata.checks : [];
   const activity = message.metadata?.activity;
   const detail = message.metadata?.detail || activity;
+  const asks = useMemo(() => {
+    const content = message.content || '';
+    const shouldParse = message.metadata?.requiresUserInput
+      || /needs your input|please answer these questions/i.test(content);
+    return resolveAsks(message.metadata?.asks, shouldParse ? content : '');
+  }, [message.content, message.metadata?.asks, message.metadata?.requiresUserInput]);
+  const askPreamble = useMemo(() => {
+    if (asks.length === 0) return '';
+    const preamble = String(message.content || '').split(/\n\s*\n/)[0].trim();
+    if (!preamble || /please answer these questions|needs your input before it can safely continue/i.test(preamble)) {
+      return '';
+    }
+    return preamble;
+  }, [asks.length, message.content]);
 
   // Suggestion buttons: render as a row of clickable chips
   if (suggestions && message.metadata?.hidden) {
@@ -335,19 +353,34 @@ export default function ChatMessage({ message, wsRef, projectId, containerName =
         </div>
 
         {/* Content — rendered as markdown */}
-        <div className={`text-sm leading-relaxed break-words ${isPlanReply ? 'rounded-md border border-purple-500/25 bg-purple-500/5 px-2.5 py-2' : ''}`}>
-          {isPlanReply && (
-            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-purple-300">Plan</div>
-          )}
-          <MarkdownContent text={displayText} onOpenWorkspaceFile={openWorkspaceFile} />
-          {canCollapse && (
-            <button
-              type="button"
-              onClick={() => setExpanded((value) => !value)}
-              className="mt-1.5 text-[11px] text-primary-300 hover:text-primary-200"
-            >
-              {expanded ? 'Show less' : 'Show more'}
-            </button>
+        <div
+          className={`chat-md leading-relaxed break-words ${isPlanReply ? 'rounded-md border border-purple-500/25 bg-purple-500/5 px-2.5 py-2' : ''}`}
+          style={cssVars}
+          data-emphasize-headings={appearance.emphasizeHeadings ? 'true' : 'false'}
+        >
+          {asks.length > 0 ? (
+            <>
+              {askPreamble && (
+                <p className="mb-2 text-[13px] leading-relaxed text-surface-200">{askPreamble}</p>
+              )}
+              <HumanAskCard questions={asks} onSubmit={(text) => onSend?.(text)} />
+            </>
+          ) : (
+            <>
+              {isPlanReply && (
+                <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-purple-300">Plan</div>
+              )}
+              <MarkdownContent text={displayText} onOpenWorkspaceFile={openWorkspaceFile} />
+              {canCollapse && (
+                <button
+                  type="button"
+                  onClick={() => setExpanded((value) => !value)}
+                  className="mt-1.5 text-[11px] text-primary-300 hover:text-primary-200"
+                >
+                  {expanded ? 'Show less' : 'Show more'}
+                </button>
+              )}
+            </>
           )}
         </div>
 

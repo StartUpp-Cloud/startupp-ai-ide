@@ -6,7 +6,7 @@ import InternalConsole from './InternalConsole';
 import ContainerFileEditor from './ContainerFileEditor';
 import { useFileEditor } from '../contexts/FileEditorContext';
 import SalesforceInlineWorkspace from './salesforce/SalesforceInlineWorkspace';
-import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, ChevronRight, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy, CheckCircle2, Circle, XCircle, MinusCircle, Eye, Send, ShieldCheck } from 'lucide-react';
+import { MessageSquare, Loader, Plus, ChevronDown, ChevronUp, ChevronRight, Trash2, MessageCircle, Bot, Square, Zap, X, MoreHorizontal, Pin, Pencil, Check, Terminal, GitBranch, Cloud, ArrowLeft, Info, BookOpen, RefreshCw, Copy, CheckCircle2, Circle, XCircle, MinusCircle, Eye, Send, ShieldCheck, FileText, Search } from 'lucide-react';
 import ModeToggle from './ModeToggle';
 import {
   CLI_TOOLS,
@@ -23,6 +23,7 @@ import {
   shouldRefetchWithoutSince,
 } from '../utils/chatHistoryLoad';
 import { createRequest } from '../../../shared/wsProtocol.js';
+import { classifyProgress } from '../../../shared/progressEvents.js';
 
 const VISIBLE_SESSION_HEALTH_INTERVAL_MS = 5000;
 const NOT_BUSY_CLEAR_GRACE_MS = 12000;
@@ -1116,7 +1117,7 @@ function bucketItems(bucket, stripLabel) {
     const norm = text.toLowerCase();
     if (!text || seen.has(norm)) continue;
     seen.add(norm);
-    out.push({ id: it.id, text, status: it.status, detail: it.detail || '' });
+    out.push({ id: it.id, text, status: it.status, detail: it.detail || '', kind: it.kind || classifyProgress(text).kind });
   }
   return out;
 }
@@ -1156,6 +1157,18 @@ function attachOrchestratorContext(messages = []) {
       },
     };
   });
+}
+
+function ProgressKindIcon({ kind, status }) {
+  if (status === 'fail') return <XCircle size={11} className="mt-0.5 flex-shrink-0 text-red-400" />;
+  if (status === 'skip') return <MinusCircle size={11} className="mt-0.5 flex-shrink-0 text-surface-500" />;
+  if (kind === 'read') return <FileText size={11} className="mt-0.5 flex-shrink-0 text-sky-300" />;
+  if (kind === 'edit') return <Pencil size={11} className="mt-0.5 flex-shrink-0 text-violet-300" />;
+  if (kind === 'run') return <Terminal size={11} className="mt-0.5 flex-shrink-0 text-surface-300" />;
+  if (kind === 'test') return <CheckCircle2 size={11} className="mt-0.5 flex-shrink-0 text-emerald-300" />;
+  if (kind === 'search') return <Search size={11} className="mt-0.5 flex-shrink-0 text-amber-200" />;
+  if (kind === 'blocked') return <ShieldCheck size={11} className="mt-0.5 flex-shrink-0 text-amber-300" />;
+  return <PhaseItemIcon status={status} />;
 }
 
 function PhaseItemIcon({ status }) {
@@ -1206,12 +1219,15 @@ function PhaseGroup({ phase, index, defaultOpen }) {
       </button>
       {isOpen && items.length > 0 && (
         <div className="ml-[26px] space-y-1 border-l border-surface-700/40 pb-1.5 pl-3 pt-0.5">
-          {items.map((it) => (
-            <div key={it.id} className="flex items-start gap-1.5 text-[11px] text-surface-300">
-              <PhaseItemIcon status={it.status} />
-              <span className="min-w-0 flex-1 break-words">{it.text}</span>
-            </div>
-          ))}
+          {items.map((it) => {
+            const progress = classifyProgress(it.text, { kind: it.kind });
+            return (
+              <div key={it.id} className="flex items-start gap-1.5 text-[11px] text-surface-300">
+                <ProgressKindIcon kind={progress.kind} status={it.status} />
+                <span className="min-w-0 flex-1 break-words">{progress.summary}</span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -1968,7 +1984,15 @@ function ChatSessionContent({
         lines[lines.length - 1] = { ...last, status: status || last.status };
       } else {
         if (status === 'active') lines = lines.map(it => (it.status === 'active' ? { ...it, status: 'done' } : it));
-        lines.push({ id: `${key}-l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text: clean, status, detail: clean.length > 80 ? clean : '' });
+        const progress = classifyProgress(clean);
+        const keepDetail = progress.kind === 'think' || (progress.kind === 'other' && clean.length > 80);
+        lines.push({
+          id: `${key}-l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          text: clean,
+          status,
+          kind: progress.kind,
+          detail: keepDetail ? clean : '',
+        });
         lines = lines.slice(-60);
       }
       return { ...prev, [key]: { ...bucket, lines } };

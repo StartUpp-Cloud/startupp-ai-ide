@@ -15,6 +15,7 @@ import Skills from "./pages/Skills";
 import Connections from "./pages/Connections";
 import SalesforceWorkspace from "./pages/SalesforceWorkspace";
 import { ProjectProvider } from "./contexts/ProjectContext";
+import { ChatAppearanceProvider } from "./contexts/ChatAppearanceContext";
 import NotificationToast from "./components/NotificationToast";
 
 function SetupGate({ children }) {
@@ -70,8 +71,9 @@ function SetupGate({ children }) {
 
 function App() {
   return (
-    <ProjectProvider>
-      <SetupGate>
+    <ChatAppearanceProvider>
+      <ProjectProvider>
+        <SetupGate>
         <Routes>
           {/* IDE is the default view - full screen, no layout */}
           <Route path="/" element={<IDE />} />
@@ -93,9 +95,10 @@ function App() {
           <Route path="/connections" element={<Layout><Connections /></Layout>} />
           <Route path="/salesforce" element={<SalesforceWorkspace />} />
         </Routes>
-      </SetupGate>
-      <NotificationToast />
-    </ProjectProvider>
+        </SetupGate>
+        <NotificationToast />
+      </ProjectProvider>
+    </ChatAppearanceProvider>
   );
 }
 

@@ -32,6 +32,15 @@ import {
   orchestratedAutoConfirm,
 } from './agentAutoConfirm.js';
 import { selectFinalAgentMessage, buildStoppedRunResponse, compactChatReport } from './orchestratorMessages.js';
+import {
+  collectAskQuestionsFromOutput,
+  extractAskQuestionsFromAgentEvent,
+  extractAsksFromContent,
+  formatAskMarkdown,
+  normalizeAskQuestions,
+  resolveAsks,
+} from '../shared/humanAsk.js';
+import { classifyProgress } from '../shared/progressEvents.js';
 import fs from 'fs';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
@@ -74,51 +83,26 @@ const ORCHESTRATED_SILENCE_RETRY_MS = LONG_RUNNING_ASSISTANT_STALL_MS;
 const CLI_MAX_IDLE_ROUNDS = 12 * 60 * 60 / 2;
 const SESSION_CONTEXT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
-function extractAskUserQuestionsFromDenials(denials = []) {
-  const questions = [];
-  for (const denial of denials || []) {
-    const toolName = String(denial?.tool_name || denial?.toolName || '').toLowerCase();
-    if (toolName !== 'askuserquestion') continue;
-    const inputQuestions = Array.isArray(denial?.tool_input?.questions)
-      ? denial.tool_input.questions
-      : [];
-    for (const question of inputQuestions) {
-      if (question?.question) questions.push(question);
-    }
-  }
-  return questions;
+function formatAskUserQuestions(questions = []) {
+  return formatAskMarkdown(questions);
 }
 
-function formatAskUserQuestions(questions = []) {
-  const unique = [];
-  const seen = new Set();
-  for (const question of questions) {
-    const key = `${question.header || ''}:${question.question || ''}`;
-    if (!question?.question || seen.has(key)) continue;
-    seen.add(key);
-    unique.push(question);
-  }
-  if (unique.length === 0) return '';
-
-  const lines = [
-    'The coding agent needs your input before it can safely continue.',
-    '',
-    'Please answer these questions:',
-  ];
-  unique.forEach((question, index) => {
-    const header = question.header ? `${question.header}: ` : '';
-    lines.push('', `${index + 1}. ${header}${question.question}`);
-    if (question.multiSelect || question.multiple) lines.push('   Select one or more options.');
-    const options = Array.isArray(question.options) ? question.options : [];
-    for (const option of options) {
-      const label = String(option?.label || '').trim();
-      const description = String(option?.description || '').trim();
-      if (!label && !description) continue;
-      lines.push(`   - ${label || 'Option'}${description ? `: ${description}` : ''}`);
-    }
-  });
-  lines.push('', 'Reply with your choices or custom instructions, then ask me to continue.');
-  return lines.join('\n');
+function needsUserResult(displayOutput, extra = {}) {
+  const asks = extra.asks?.length
+    ? normalizeAskQuestions(extra.asks)
+    : extractAsksFromContent(displayOutput);
+  return {
+    success: false,
+    retry: false,
+    retryReason: extra.retryReason || 'Coding agent needs user input',
+    retryType: extra.retryType || 'needs-user',
+    errorType: extra.errorType || 'needs-user',
+    requiresUserInput: true,
+    displayOutput,
+    error: extra.error || displayOutput,
+    ...(extra.cleanOutput != null ? { cleanOutput: extra.cleanOutput } : {}),
+    ...(asks.length ? { asks } : {}),
+  };
 }
 
 export function shouldEmitProgress({ transient = false } = {}) {
@@ -1548,6 +1532,15 @@ RULES:
                 : `Error: ${result.error}`)
             : result.displayOutput || result.retryReason || `No response from ${tool}. Check Internal Console.`;
         const changedFiles = fileTracker?.poll().files || [];
+        const asks = resolveAsks(result.asks, failureContent);
+        const failureMeta = {
+          tool,
+          jobId: job.id,
+          error: !requiresUserInput,
+          requiresUserInput,
+          ...(asks.length ? { asks } : {}),
+          ...(changedFiles.length > 0 ? { changedFiles } : {}),
+        };
 
         // Fail the job
         jobManager.failJob(job.id, failureContent);
@@ -1560,7 +1553,7 @@ RULES:
             sessionId: chatSessionId,
             messageId: streamingMsg.id,
             finalContent: failureContent,
-            metadata: { tool, jobId: job.id, error: !requiresUserInput, requiresUserInput, attempts: attempt, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
+            metadata: { ...failureMeta, attempts: attempt },
           });
 
           broadcastFn({
@@ -1572,7 +1565,7 @@ RULES:
             message: {
               ...streamingMsg,
               content: failureContent,
-              metadata: { tool, jobId: job.id, error: !requiresUserInput, requiresUserInput, ...(changedFiles.length > 0 ? { changedFiles } : {}) },
+              metadata: failureMeta,
             },
           });
 
@@ -1601,6 +1594,7 @@ RULES:
           retryable: requiresUserInput ? false : result.retryable,
           requiresUserInput,
           changedFiles,
+          ...(asks.length ? { asks } : {}),
         };
       }
       return this._finalizeStoppedTurn({
@@ -2170,7 +2164,7 @@ RULES:
         this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
       }
       if (parsed.isIncomplete) return { success: false, retry: true, retryReason: 'Claude stopped before a final answer', retryType: 'incomplete-output', displayOutput, cleanOutput };
-      if (parsed.requiresUserInput) return { success: false, retry: false, retryReason: 'Coding agent needs user input', retryType: 'needs-user', errorType: 'needs-user', requiresUserInput: true, displayOutput, error: displayOutput, cleanOutput };
+      if (parsed.requiresUserInput) return needsUserResult(displayOutput, { asks: parsed.asks, cleanOutput });
       if (parsed.isError) {
         if (parsed.errorType === 'auth' || parsed.errorType === 'rate_limit' || parsed.errorType === 'usage') return { success: false, retry: false, displayOutput, error: displayOutput };
         if (/No conversation found with session ID/i.test(displayOutput)) return { success: false, retry: true, retryReason: `${tool} session not found`, retryType: 'context-lost', displayOutput };
@@ -2200,7 +2194,7 @@ RULES:
         this._storeToolSession(projectId, chatSessionId, tool, parsed.sessionId, worktreeOverride || null);
       }
       if (parsed.isError) {
-        if (parsed.errorType === 'auth') return { success: false, retry: false, retryReason: 'Authentication required', retryType: 'needs-user', errorType: 'needs-user', requiresUserInput: true, displayOutput, error: displayOutput };
+        if (parsed.errorType === 'auth') return needsUserResult(displayOutput, { retryReason: 'Authentication required' });
         if (parsed.errorType === 'rate_limit') return { success: false, retry: true, retryReason: 'Codex rate limit', retryType: 'codex-rate-limit', displayOutput };
         const permanent = /not supported|invalid_request_error|model metadata/i.test(displayOutput);
         return { success: false, retry: !permanent, retryReason: displayOutput.slice(0, 200), retryType: 'error', displayOutput, error: displayOutput };
@@ -2768,17 +2762,7 @@ RULES:
         return { success: false, retry: true, retryReason: 'Claude stopped before a final answer', retryType: 'incomplete-output', displayOutput, cleanOutput };
       }
       if (parsed.requiresUserInput) {
-        return {
-          success: false,
-          retry: false,
-          retryReason: 'Coding agent needs user input',
-          retryType: 'needs-user',
-          errorType: 'needs-user',
-          requiresUserInput: true,
-          displayOutput,
-          error: displayOutput,
-          cleanOutput,
-        };
+        return needsUserResult(displayOutput, { asks: parsed.asks, cleanOutput });
       }
       // Check for error in the result
       if (parsed.isError) {
@@ -2839,7 +2823,7 @@ RULES:
       }
       if (parsed.isError) {
         if (parsed.errorType === 'auth') {
-          return { success: false, retry: false, retryReason: 'Authentication required', retryType: 'needs-user', errorType: 'needs-user', requiresUserInput: true, displayOutput, error: displayOutput };
+          return needsUserResult(displayOutput, { retryReason: 'Authentication required' });
         }
         if (parsed.errorType === 'rate_limit') {
           return { success: false, retry: true, retryReason: 'Codex rate limit', retryType: 'codex-rate-limit', displayOutput };
@@ -3555,7 +3539,7 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
       } else if (mode === 'plan-review') {
         parts.push('\nDo NOT make any changes to files or run any commands. Only produce written analysis and recommendations.');
       } else {
-        parts.push(`\nMODE: AGENT — Execute the user's goal at full effort. Make the changes, verify them, and talk back like a teammate.\n- Auto-approve safe operations.\n- Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.\n- If blocked by missing authentication, login, API keys, permissions, or a required human decision, STOP immediately and tell the user what they need to do. Do not retry or burn tokens on the same blocker.\n- Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops).\n- Mid-run status may say what you are about to do.\n${FINAL_REPORT_GUIDANCE}`);
+        parts.push(`\nMODE: AGENT — Execute the user's goal at full effort. Make the changes, verify them, and talk back like a teammate.\n- Auto-approve safe operations.\n- Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context.\n- If blocked by missing authentication, login, API keys, permissions, or a required human decision, STOP immediately and tell the user exactly what they need to do, why, and any recommended default. Do not retry or burn tokens on the same blocker.\n- Never tail logs, watch files, or wait for external events. Do not use commands that block indefinitely (e.g. tail -f, watch, sleep loops).\n- Mid-run status may say what you are about to do.\n${FINAL_REPORT_GUIDANCE}`);
 
         // Engineering Diligence Contract — tool-agnostic doctrine that raises
         // effort/persistence and mandates the verify+report structure. Returns
@@ -4605,9 +4589,7 @@ NEEDS_USER`,
                 .filter(Boolean)
                 .join('\n');
             }
-            if (Array.isArray(json.permission_denials)) {
-              userQuestions.push(...extractAskUserQuestionsFromDenials(json.permission_denials));
-            }
+            userQuestions.push(...extractAskQuestionsFromAgentEvent(json));
             // Copilot format: sessionId (camelCase) in result events
             if (json.type === 'result' && json.sessionId) sessionId = json.sessionId;
             // Copilot format: response text in assistant.message events (data.content)
@@ -4626,19 +4608,11 @@ NEEDS_USER`,
         text = jsonErrorText;
       }
     }
-    if (userQuestions.length === 0 && cleanOutput.includes('permission_denials')) {
-      for (const line of cleanOutput.split('\n')) {
-        const idx = line.indexOf('{');
-        if (idx < 0) continue;
-        try {
-          const json = JSON.parse(line.slice(idx));
-          if (Array.isArray(json.permission_denials)) {
-            userQuestions.push(...extractAskUserQuestionsFromDenials(json.permission_denials));
-          }
-        } catch {}
-      }
+    if (userQuestions.length === 0) {
+      userQuestions.push(...collectAskQuestionsFromOutput(cleanOutput));
     }
-    const userQuestionText = formatAskUserQuestions(userQuestions);
+    const asks = normalizeAskQuestions(userQuestions);
+    const userQuestionText = formatAskUserQuestions(asks);
     if (userQuestionText) {
       const genericWaiting = /waiting for your answers?|need(?:s)? your (?:answers?|input)|before proceeding/i.test(text || '')
         && !/\?/.test(text || '');
@@ -4742,7 +4716,7 @@ NEEDS_USER`,
       }
     }
 
-    return { text, sessionId, isError, errorType, requiresUserInput: !!userQuestionText, isIncomplete: incompleteToolUseResult };
+    return { text, sessionId, isError, errorType, asks, requiresUserInput: asks.length > 0 || !!userQuestionText, isIncomplete: incompleteToolUseResult };
   }
 
   /**
@@ -5069,6 +5043,9 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
     }
     this._lastProgress.set(sessionId, { content, ts: now });
 
+    const progress = classifyProgress(content);
+    const progressMeta = { tasks, live: true, progress };
+
     const ctx = this._running.get(sessionId);
     if (ctx?.orchestrated) {
       // Under the orchestrator we don't persist progress here (it owns durable
@@ -5077,7 +5054,7 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
       // run. _handleAgentBroadcast applies its own suppression + dedup before it
       // surfaces as an agent-progress event. Previously this was dropped outright,
       // so autonomous runs looked frozen ("Listening for the next signal...").
-      broadcastFn({ type: 'chat-progress', projectId, sessionId, message: { content, metadata: { tasks, live: true, transient: true } } });
+      broadcastFn({ type: 'chat-progress', projectId, sessionId, message: { content, metadata: { ...progressMeta, transient: true } } });
       return;
     }
 
@@ -5086,7 +5063,7 @@ Example output: ["Fix it now","Show the diff","Run tests first"]`,
       // live checklist + busy spinner convey work-in-progress.
       if (!shouldEmitProgress({ transient })) return;
     }
-    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { tasks, live: true, transient: false } });
+    const msg = chatStore.addMessage({ projectId, sessionId, role: 'progress', content, metadata: { ...progressMeta, transient: false } });
     broadcastFn({ type: 'chat-progress', projectId, message: msg });
   }
 

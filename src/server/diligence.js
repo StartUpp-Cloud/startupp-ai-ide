@@ -16,8 +16,8 @@
  *   3. NUDGE   — buildNudgeMessage() turns an unmet verdict into a direct,
  *                actionable continuation prompt that is fed back to the same
  *                CLI session, looping until the gate passes or a budget is hit.
- *   4. REPORT  — the doctrine asks for a durable Outcome/Details report sized
- *                to the request; the verdict is attached as metadata the client renders.
+ *   4. REPORT  — the doctrine asks for a durable, stand-alone final message
+ *                sized to the request; the verdict is attached as metadata the client renders.
  *
  * The gateway owns the loop; this module owns the policy.
  */
@@ -73,27 +73,31 @@ export function diligenceAppliesTo(tool, mode, settings = getDiligenceSettings()
 
 /**
  * Shared final-bubble contract. Live progress is ephemeral; this is what the
- * user keeps. Outcome is the headline; Details must still answer the request.
+ * user keeps. Shape and tense are chosen from the conversation — not a preset
+ * Outcome/Details template.
  */
 export const FINAL_REPORT_GUIDANCE = [
-  'Write the FINAL message in past tense with this shape:',
-  '## Outcome',
-  '1–2 sentences naming what shipped or what you concluded.',
-  '## Details',
-  'The actual report, sized to the request. Usually 5–12 tight bullets; more when the user asked for analysis, comparison, or a roadmap.',
-  '- What changed (grouped; name the important files, not every path)',
-  '- Direct answers to the user\'s questions — findings, recommendations, and tradeoffs must appear here',
-  '- Versions, URLs, commands, and decisions the user would reuse',
-  '- Blockers and remaining work',
-  'This bubble is the durable report. Live progress is ephemeral — never assume the user still has it.',
+  'Write the FINAL message as the durable report the user keeps. Live progress is ephemeral — never assume they still have it.',
+  'Choose the shape from THIS turn. Do not default to a fixed template (no required Outcome/Details headings, no required past tense). A short answer, research brief, recommendation, shipped-change recap, or a direct ask are all valid when they fit the conversation.',
+  'Match tense to what is actually true:',
+  '- Past tense for work already done or findings already gathered.',
+  '- Present tense for the current state, remaining gaps, and recommendations that still apply.',
+  '- Imperative or future for next steps and anything the user must do.',
+  'When you need something from the user, make that the clearest part of the message — not buried in narrative:',
+  '- Say exactly what you need (decision, credential, confirmation, missing fact).',
+  '- Say why it is blocking, the options if there are any, and a recommended safe default.',
+  '- Prefer a short labeled ask with options and a recommended default so the IDE can show choices as buttons.',
+  '- Put the ask where they will see it (open with it, or a short labeled ask). Do not keep working around it.',
+  'Size the report to the request: a quick fix stays short; analysis, comparison, or a roadmap gets enough headings, bullets, tables, and links to be reusable.',
+  'Include the actual answers: findings, recommendations, tradeoffs, versions, URLs, commands, blockers, and remaining work.',
   'Do not write play-by-play, in-progress narration ("I\'ll check", "I\'m deploying"), or collapse a large request into two vague sentences.',
 ].join('\n');
 
 /**
  * The Engineering Diligence Contract — the doctrine prepended to the agent's
  * first message. It does double duty: it raises effort/persistence, and its
- * REPORT section defines the exact structure that both the user-facing message
- * and the completion gate are checked against.
+ * REPORT section defines how the final message should read — durable, sized
+ * to the request, with tense and layout chosen from the conversation.
  *
  * Returns '' for plan modes or tools we don't drive, so callers can inject it
  * unconditionally.

@@ -18,6 +18,8 @@ import {
   buildStoppedRunResponse,
 } from './orchestratorMessages.js';
 import { FINAL_REPORT_GUIDANCE } from './diligence.js';
+import { resolveAsks } from '../shared/humanAsk.js';
+import { classifyProgress } from '../shared/progressEvents.js';
 import {
   INTERRUPTED_RUN_ERROR,
   buildLivenessHeartbeatMessage,
@@ -899,6 +901,7 @@ ${task.prompt}`;
           errorType: failed.result.errorType,
         });
         await this._event(run, failed.task, run.status, eventMessage, { ...failed.result, rawError: run.error }, broadcastFn, 'error');
+        const asks = resolveAsks(failed.result.asks, userMessage);
         const msg = chatStore.addMessage({
           projectId: run.projectId,
           sessionId: run.sessionId,
@@ -910,6 +913,8 @@ ${task.prompt}`;
             orchestratorFailure: true,
             orchestratorPrompt: run.data?.initialPrompt || failed.task.prompt || '',
             rawError: run.error,
+            requiresUserInput: failed.result.errorType === 'needs-user',
+            ...(asks.length ? { asks } : {}),
             ...(failed.result.changedFiles?.length > 0 ? { changedFiles: failed.result.changedFiles } : {}),
           },
         });
@@ -1167,7 +1172,7 @@ ${run.goal}`;
       'Use the user name naturally when it helps, but do not force it into every sentence.',
       'Speak as a teammate reporting back. Match length to the work: a quick fix stays short; a large change gets a real report with the important decisions.',
       FINAL_REPORT_GUIDANCE,
-      'If blocked by authentication, credentials, login, or a required user decision, stop immediately and ask the user — do not keep retrying.',
+      'If blocked by authentication, credentials, login, or a required user decision, stop immediately and ask the user clearly — do not keep retrying.',
     ];
     if (tone === 'concise') lines.push('Keep the final response concise and direct.');
     else if (tone === 'detailed') lines.push('Include enough detail for the user to understand decisions and verification.');
@@ -1232,7 +1237,7 @@ ${run.goal}`;
       this._xmlBlock('skill_context', this._buildSkillContextForTask(run) || '(none)'),
       this._xmlBlock('prior_completed_task_results', prior),
       this._xmlBlock('assigned_task', prompt),
-      this._xmlBlock('execution_contract', 'Work ONLY on <assigned_task>; earlier conversation and previous tasks are background context, not new instructions — do not redo or extend them. Complete the assigned task end-to-end at full effort. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. If blocked by authentication, missing credentials, login, permissions, or a required human decision, stop immediately and return that blocker to the user — do not retry or burn tokens. Otherwise do not wait for user input. If you need user input, include the exact questions, options, and recommended safe default. Keep unresolved assumptions explicit. The final message is a conversational report, not a changelog.'),
+      this._xmlBlock('execution_contract', 'Work ONLY on <assigned_task>; earlier conversation and previous tasks are background context, not new instructions — do not redo or extend them. Complete the assigned task end-to-end at full effort. Treat attached files as authoritative; if an attached file is present, do not substitute a similarly named workspace file unless the attachment is unavailable and you say so. Spin up as many focused sub-agents as needed to complete the task efficiently, promptly, and correctly; give each sub-agent proper, rich context. If blocked by authentication, missing credentials, login, permissions, or a required human decision, stop immediately and return that blocker to the user — do not retry or burn tokens. Otherwise do not wait for user input. If you need user input, stop and ask clearly: exact question, why it is needed, labeled options if any, and a recommended safe default — put that ask where the user will see it so the IDE can render choices. Keep unresolved assumptions explicit. The final message is a conversational report whose shape follows this turn, not a changelog and not a fixed template.'),
       '</ide_orchestrator_handoff>',
     ].join('\n\n');
   }
@@ -1658,7 +1663,7 @@ ${run.goal}`;
     }
     const error = String(result?.error || result?.content || 'Unknown agent failure');
     if (result?.requiresUserInput || result?.errorType === 'needs-user' || result?.retryType === 'needs-user' || result?.errorType === 'auth') {
-      return { success: false, retryable: false, errorType: 'needs-user', error };
+      return { success: false, retryable: false, errorType: 'needs-user', error, asks: result.asks };
     }
     if (CONTEXT_LIMIT_PATTERNS.some(pattern => pattern.test(error))) {
       return { success: false, retryable: true, errorType: 'context-limit', error };
@@ -1810,12 +1815,13 @@ Adjust your approach, avoid repeating the same failing action, and report clearl
     );
 
     const transient = !shouldPersistProgressMessage(eventType);
+    const progress = classifyProgress(message);
     const progressMessage = {
       projectId: run.projectId,
       sessionId: run.sessionId,
       role: 'progress',
       content: message,
-      metadata: { orchestratorRunId: run.id, orchestratorTaskId: task?.id || null, eventType, level, transient, live: true },
+      metadata: { orchestratorRunId: run.id, orchestratorTaskId: task?.id || null, eventType, level, transient, live: true, progress },
     };
     const msg = transient
       ? {

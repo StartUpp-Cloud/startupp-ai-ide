@@ -2,7 +2,6 @@ import { CheckCircle } from 'lucide-react';
 import {
   parseMarkdownBlocks,
   blockNeedsTrailSpace,
-  listItemSpacingClass,
   parseInlineTokens,
 } from '../utils/chatMarkdown.js';
 
@@ -84,7 +83,7 @@ export default function MarkdownContent({ text, onOpenWorkspaceFile = null, clas
   });
 
   const listRow = (key, indent, marker, body, extraClass = '') => (
-    <div key={key} className={`flex items-start gap-1.5 leading-snug ${extraClass}`.trim()} style={{ paddingLeft: `${4 + indent * 16}px` }}>
+    <div key={key} className={`chat-md-list-row flex items-start gap-1.5 ${extraClass}`.trim()} style={{ paddingLeft: `${4 + indent * 16}px` }}>
       {marker}
       <span className="min-w-0 flex-1 text-surface-200">{body}</span>
     </div>
@@ -94,9 +93,8 @@ export default function MarkdownContent({ text, onOpenWorkspaceFile = null, clas
   return (
     <div className={className}>
       {blocks.map((block, i) => {
-        const isList = block.type === 'bullet' || block.type === 'number' || block.type === 'check';
-        const trail = isList ? listItemSpacingClass(blocks, i) : (blockNeedsTrailSpace(blocks, i) ? 'mb-2.5' : '');
-        const headingMt = i === 0 ? 'mt-0' : 'mt-3';
+        const trail = blockNeedsTrailSpace(blocks, i) ? 'mb-2.5' : '';
+        const headingMt = i === 0 ? 'mt-0' : 'mt-4';
         if (block.type === 'code') {
           return (
             <pre key={`code-${i}`} className="my-2 p-3 rounded-md bg-surface-950/80 border border-surface-700/30 text-[12px] font-mono text-surface-300 overflow-x-auto">
@@ -106,9 +104,9 @@ export default function MarkdownContent({ text, onOpenWorkspaceFile = null, clas
           );
         }
         if (block.type === 'gap') return <div key={`gap-${i}`} className="h-1.5" />;
-        if (block.type === 'h4') return <h4 key={i} className={`text-sm font-semibold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h4>;
-        if (block.type === 'h3') return <h3 key={i} className={`text-[15px] font-semibold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h3>;
-        if (block.type === 'h2') return <h2 key={i} className={`text-base font-bold text-surface-100 ${headingMt} mb-1.5`}>{processInline(block.text)}</h2>;
+        if (block.type === 'h4') return <h4 key={i} className={`chat-md-h4 ${headingMt} mb-1.5`}>{processInline(block.text)}</h4>;
+        if (block.type === 'h3') return <h3 key={i} className={`chat-md-h3 ${headingMt} mb-1.5`}>{processInline(block.text)}</h3>;
+        if (block.type === 'h2') return <h2 key={i} className={`chat-md-h2 ${headingMt} mb-2`}>{processInline(block.text)}</h2>;
         if (block.type === 'hr') return <hr key={i} className="border-surface-700/50 my-2" />;
         if (block.type === 'bullet') {
           return listRow(i, block.indent, <span className="text-primary-400 mt-0.5 flex-shrink-0">•</span>, processInline(block.text), trail);
@@ -157,7 +155,7 @@ export default function MarkdownContent({ text, onOpenWorkspaceFile = null, clas
             </div>
           );
         }
-        return <p key={i} className={`text-surface-200 leading-relaxed ${trail}`.trim()}>{processInline(block.text)}</p>;
+        return <p key={i} className={`chat-md-p text-surface-200 ${trail}`.trim()}>{processInline(block.text)}</p>;
       })}
     </div>
   );

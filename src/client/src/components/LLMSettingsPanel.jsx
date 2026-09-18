@@ -26,6 +26,8 @@ import {
   MessageSquare,
 } from 'lucide-react';
 
+import ChatAppearanceSettings from './ChatAppearanceSettings.jsx';
+
 const API_BASE = '/api';
 
 function uniqueModels(models) {
@@ -383,8 +385,14 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
           ) : (
             <>
               {/* General Tab */}
-              {activeTab === 'general' && settings && (
+              {activeTab === 'general' && (
                 <div className="space-y-6">
+                  <div className="p-4 bg-surface-800 rounded-lg border border-surface-700">
+                    <ChatAppearanceSettings />
+                  </div>
+
+                  {settings && (
+                    <>
                   {/* Enable/Disable */}
                   <div className="flex items-center justify-between p-4 bg-surface-800 rounded-lg border border-surface-700">
                     <div className="flex items-center gap-3">
@@ -631,6 +639,8 @@ export default function LLMSettingsPanel({ isOpen, onClose, project = null, proj
                         </div>
                       )}
                     </div>
+                  )}
+                    </>
                   )}
                 </div>
               )}

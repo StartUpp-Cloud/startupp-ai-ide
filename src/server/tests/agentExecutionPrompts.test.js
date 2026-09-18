@@ -43,12 +43,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
   assert.match(
     agentGatewaySource,
     /FINAL_REPORT_GUIDANCE/,
-    'Agent mode should inject the shared Outcome/Details final-report contract',
+    'Agent mode should inject the shared final-report guidance',
   );
   assert.match(
     diligenceSource,
-    /Direct answers to the user/,
-    'Final reports must include findings and recommendations, not only a two-sentence outcome',
+    /findings, recommendations/,
+    'Final reports must include findings and recommendations, not only a two-sentence closer',
+  );
+  assert.doesNotMatch(
+    diligenceSource,
+    /Write the FINAL message in past tense/,
+    'Final reports must not be locked to past tense',
   );
 }
 
