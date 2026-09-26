@@ -156,7 +156,9 @@ function dockerSync(docker, args, env) {
 
 function isUnsharedBindMountError(error) {
   const msg = String(error?.message || error || '');
-  return /not shared from the host/i.test(msg) || /ETIMEDOUT/i.test(msg);
+  return /not shared from the host/i.test(msg)
+    || /user declined directory sharing/i.test(msg)
+    || /ETIMEDOUT/i.test(msg);
 }
 
 function withoutHostAuthMounts(runArgs) {

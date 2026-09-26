@@ -61,6 +61,10 @@ assert.equal(
   isUnsharedBindMountError('the path "C:\\\\Users\\\\me\\\\.wrangler" is not shared from the host'),
   true,
 );
+assert.equal(
+  isUnsharedBindMountError('Error response from daemon: user declined directory sharing C:\\Users\\me\\AppData\\Roaming\\xdg.config\\.wrangler'),
+  true,
+);
 assert.equal(isUnsharedBindMountError('busy'), false);
 assert.deepEqual(
   withoutHostAuthMounts([
