@@ -87,6 +87,15 @@ function formatAskUserQuestions(questions = []) {
   return formatAskMarkdown(questions);
 }
 
+/**
+ * Codex prints ignored/deprecated config as item type "error", then still
+ * completes the turn. Those notices are not a failed answer.
+ */
+export function isIgnorableCodexConfigNotice(message) {
+  const text = String(message || '');
+  return /unrecognized configuration setting/i.test(text) && /is ignored/i.test(text);
+}
+
 function needsUserResult(displayOutput, extra = {}) {
   const asks = extra.asks?.length
     ? normalizeAskQuestions(extra.asks)
@@ -3619,7 +3628,9 @@ Be concise — max 10 lines. Write as if briefing a colleague who will continue 
 
   _buildCodexQualityArgs(assistantSettings = {}) {
     const effort = assistantSettings?.effort || 'xhigh';
-    return ` -c reasoning_effort=${this._quoteCliArg(effort)} -c model_verbosity=medium`;
+    // `reasoning_effort` is no longer a session flag. Codex 0.157+ ignores it
+    // and emits an item error, which used to fail an otherwise finished turn.
+    return ` -c model_reasoning_effort=${this._quoteCliArg(effort)} -c model_verbosity=medium`;
   }
 
   _buildToolCommand(tool, message, chatSessionId, projectId, mode = 'agent', assistantSettings = {}, distilledContext = null, salesforceContext = '') {
@@ -4836,6 +4847,7 @@ NEEDS_USER`,
     let isError = false;
     let errorType = null;
     const messageParts = [];
+    const configNotices = [];
     cleanOutput = stripInnerPidLines(cleanOutput);
 
     for (const line of cleanOutput.split('\n')) {
@@ -4855,20 +4867,34 @@ NEEDS_USER`,
           if (typeof text === 'string' && text.trim()) messageParts.push(text);
         }
 
-        // Detect errors
+        // Detect errors. Config warnings are item type "error" but the turn
+        // still completes; keep them out of the answer unless nothing else arrived.
         const itemError = json.type === 'item.completed' && json.item?.type === 'error'
           ? (json.item.message || json.item.error || '')
           : '';
         if (json.type === 'error' || json.type === 'turn.failed' || itemError) {
-          isError = true;
           const errMsg = unwrapCodexErrorMessage(
             itemError || json.message || json.error?.message || json.error || '',
           );
+          const configNotice = itemError
+            && json.type !== 'error'
+            && json.type !== 'turn.failed'
+            && isIgnorableCodexConfigNotice(errMsg);
+          if (configNotice) {
+            if (errMsg) configNotices.push(errMsg);
+            continue;
+          }
+          isError = true;
           if (/auth|401|unauthorized/i.test(errMsg)) errorType = 'auth';
           else if (/429|rate.?limit|too many/i.test(errMsg)) errorType = 'rate_limit';
           if (errMsg && !messageParts.includes(errMsg)) messageParts.push(errMsg);
         }
       } catch {}
+    }
+
+    if (!isError && messageParts.length === 0 && configNotices.length > 0) {
+      isError = true;
+      messageParts.push(configNotices[configNotices.length - 1]);
     }
 
     let text = selectFinalAgentMessage(messageParts);
