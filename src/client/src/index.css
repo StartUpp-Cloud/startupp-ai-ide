@@ -204,4 +204,46 @@
   .chat-message-fade-in {
     animation: chat-message-fade-in 0.22s ease-out both;
   }
+
+  .chat-md {
+    font-size: var(--chat-md-size, 15px);
+    line-height: var(--chat-md-leading, 1.7);
+  }
+
+  .chat-md-p {
+    line-height: inherit;
+  }
+
+  .chat-md-h2,
+  .chat-md-h3,
+  .chat-md-h4 {
+    color: var(--chat-md-heading-color, #dfe2ee);
+    font-weight: var(--chat-md-heading-weight, 700);
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+  }
+
+  .chat-md-h2 {
+    font-size: var(--chat-md-h2, 1.42em);
+  }
+
+  .chat-md-h3 {
+    font-size: var(--chat-md-h3, 1.24em);
+  }
+
+  .chat-md-h4 {
+    font-size: var(--chat-md-h4, 1.1em);
+  }
+
+  .chat-md[data-emphasize-headings="true"] .chat-md-h2,
+  .chat-md[data-emphasize-headings="true"] .chat-md-h3,
+  .chat-md[data-emphasize-headings="true"] .chat-md-h4 {
+    border-left: var(--chat-md-heading-accent, 3px solid rgba(245, 158, 11, 0.75));
+    padding: var(--chat-md-heading-pad, 0.15em 0 0.2em 0.65em);
+  }
+
+  .chat-md-list-row {
+    margin-bottom: var(--chat-md-list-gap, 0.35em);
+    line-height: inherit;
+  }
 }

@@ -44,6 +44,10 @@ assert.match(parsed.text, /Where should docs live\?/);
 assert.match(parsed.text, /Root docs\/.*cross-project docs/);
 assert.match(parsed.text, /Confirm these folders should be deleted/);
 assert.doesNotMatch(parsed.text, /^Waiting for your answers/i);
+assert.equal(parsed.asks.length, 2);
+assert.equal(parsed.asks[0].header, 'Docs location');
+assert.equal(parsed.asks[0].options[0].recommended, true);
+assert.equal(parsed.asks[1].options[0].label, 'Archive first');
 
 const toolUseOnly = agentGateway._parseJsonToolOutput([
   JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-session-2' }),

@@ -293,8 +293,7 @@ export function selectFinalAgentMessage(parts = []) {
     }
   }
   if (richest === last) return last;
-  if (/(?:^|\n)#{1,3}\s*(?:Outcome|Summary|Details)\b/i.test(richest)) return richest;
-  return `## Outcome\n\n${last}\n\n## Details\n\n${richest}`.trim();
+  return richest;
 }
 
 function extractAgentSummary(content) {
@@ -342,7 +341,7 @@ export function buildStoppedRunResponse({
     .slice(0, 30);
 
   const heading = withName(profile, 'I stopped this run. Here is what had already happened.');
-  const parts = ['## Outcome', '', heading, ''];
+  const parts = [heading, ''];
   const detailBits = [];
   if (body) detailBits.push(body);
   if (completedLines.length) {
@@ -356,7 +355,7 @@ export function buildStoppedRunResponse({
     detailBits.push(`${agent} had not produced a usable report yet. The workspace may still have in-progress edits.`);
   }
   if (detailBits.length) {
-    parts.push('## Details', '', detailBits.join('\n\n'), '');
+    parts.push(detailBits.join('\n\n'), '');
   }
   parts.push('You can keep going from this state — tell me what to do next.');
   return parts.join('\n').trim();
@@ -379,6 +378,34 @@ function heuristicCompact(text, maxLength = COMPACT_REPORT_MAX) {
   return kept.join('\n').trim();
 }
 
+function isInvestigationLine(line) {
+  const text = String(line || '').trim().replace(/^[-*•]\s+/, '');
+  if (!text) return false;
+  if (/^(?:reading|editing|creating|running|searching|using)\s*:/i.test(text)) return true;
+  if (/^i (?:traced|inspected|looked(?:\s+at)?|checked|read|opened|searched|scanned)\b/i.test(text)) return true;
+  if (/^(?:looking at|inspecting|tracing)\b/i.test(text)) return true;
+  return false;
+}
+
+function splitInvestigationFromFindings(activity) {
+  const source = String(activity || '').trim();
+  if (!source) return { findings: '', notes: '' };
+  const findingLines = [];
+  const noteLines = [];
+  for (const line of source.split('\n')) {
+    if (!line.trim()) {
+      findingLines.push(line);
+      continue;
+    }
+    if (isInvestigationLine(line)) noteLines.push(line);
+    else findingLines.push(line);
+  }
+  return {
+    findings: findingLines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+    notes: noteLines.join('\n').trim(),
+  };
+}
+
 function promoteFindingsIntoDetails(body, activity) {
   const strippedActivity = stripInProgressNarration(activity);
   if (!strippedActivity || strippedActivity.length < 120) {
@@ -395,9 +422,9 @@ function promoteFindingsIntoDetails(body, activity) {
 }
 
 /**
- * Prefer a titled Outcome/Details report for the chat bubble. Stash leftover
- * play-by-play as `detail` (Working notes). Findings that landed before
- * ## Outcome are promoted into Details so they stay visible.
+ * Prefer a structured report for the chat bubble when the agent used one.
+ * Stash leftover play-by-play as `detail` (Working notes). Findings that
+ * landed before a titled report are promoted so they stay visible.
  */
 export function compactChatReport(content) {
   const raw = String(content || '').trim();
@@ -406,11 +433,12 @@ export function compactChatReport(content) {
   const parsed = parseAgentReport(raw);
   if (parsed.hasReport && parsed.body.trim()) {
     const body = stripInProgressNarration(parsed.body) || parsed.body.trim();
-    const promoted = promoteFindingsIntoDetails(body, parsed.activity);
-    const detail = !promoted.promoted && parsed.activity && parsed.activity !== promoted.body
-      ? parsed.activity
-      : '';
-    return { body: promoted.body, detail, compact: true };
+    const { findings, notes } = splitInvestigationFromFindings(parsed.activity);
+    const promoted = promoteFindingsIntoDetails(body, findings);
+    const detailParts = [];
+    if (notes) detailParts.push(notes);
+    if (!promoted.promoted && findings) detailParts.push(findings);
+    return { body: promoted.body, detail: detailParts.join('\n\n').trim(), compact: true };
   }
 
   const stripped = stripInProgressNarration(raw) || raw;

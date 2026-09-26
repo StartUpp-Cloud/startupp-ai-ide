@@ -83,6 +83,41 @@ assert.match(thinCloser.text, /durable tool-loop memory/);
 assert.match(thinCloser.text, /restart-safe sessions/);
 assert.doesNotMatch(thinCloser.text, /I'll /i);
 
+const configWarning = agentGateway._parseCodexJsonOutput([
+  JSON.stringify({ type: 'thread.started', thread_id: 'codex-thread-5' }),
+  JSON.stringify({
+    type: 'item.completed',
+    item: {
+      type: 'error',
+      message: 'Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\n  session-flags: `reasoning_effort` is ignored.',
+    },
+  }),
+  JSON.stringify({
+    type: 'item.completed',
+    item: {
+      type: 'agent_message',
+      text: '{"status":"complete","artifact":"/workspace/docs/BRIEF.md","recommendation":"Use manual intake.","verified":["npm run test: 71 passed"],"remaining":"No collector implemented."}',
+    },
+  }),
+  JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10 } }),
+].join('\n'), 'codex exec --json test');
+assert.equal(configWarning.isError, false);
+assert.match(configWarning.text, /"status":"complete"/);
+assert.doesNotMatch(configWarning.text, /unrecognized configuration/);
+
+const configWarningOnly = agentGateway._parseCodexJsonOutput([
+  JSON.stringify({ type: 'thread.started', thread_id: 'codex-thread-6' }),
+  JSON.stringify({
+    type: 'item.completed',
+    item: {
+      type: 'error',
+      message: 'Codex is ignoring 1 unrecognized configuration setting.\n  session-flags: `reasoning_effort` is ignored.',
+    },
+  }),
+].join('\n'), 'codex exec --json test');
+assert.equal(configWarningOnly.isError, true);
+assert.match(configWarningOnly.text, /reasoning_effort/);
+
 const rejected = agentGateway._parseCodexJsonOutput([
   JSON.stringify({ type: 'thread.started', thread_id: 'codex-thread-2' }),
   JSON.stringify({ type: 'error', message: JSON.stringify({ type: 'error', error: { message: "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account." } }) }),
@@ -94,7 +129,8 @@ const gatewaySource = readFileSync(resolve(__dirname, '../agentGateway.js'), 'ut
 assert.match(gatewaySource, /CODEX EXECUTION STANDARD/);
 assert.match(gatewaySource, /CODEX EXECUTION STANDARD/);
 assert.match(gatewaySource, /_buildCodexQualityArgs/);
-assert.match(gatewaySource, /reasoning_effort=\$\{this\._quoteCliArg\(effort\)\}/);
+assert.match(gatewaySource, /model_reasoning_effort=\$\{this\._quoteCliArg\(effort\)\}/);
+assert.doesNotMatch(gatewaySource, /-c reasoning_effort=/);
 assert.match(gatewaySource, /const effort = assistantSettings\?\.effort \|\| 'xhigh'/);
 assert.match(gatewaySource, /getHostBashStdinSpec/);
 assert.match(gatewaySource, /assistant-run-status/);
